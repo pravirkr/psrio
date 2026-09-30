@@ -1,0 +1,18 @@
+---
+BasedOnStyle: LLVM
+IndentWidth: 4
+---
+Language: Cpp
+AccessModifierOffset: -4
+AlignConsecutiveAssignments:
+  Enabled: true
+BinPackParameters: false
+DerivePointerAlignment: false
+IncludeCategories:
+  - Regex: '^<.*'              # System and third-party headers
+    Priority: 1
+  - Regex: '^".*"'            # Project headers
+    Priority: 2
+PackConstructorInitializers: CurrentLine
+PointerAlignment: Left
+SortIncludes: CaseSensitive

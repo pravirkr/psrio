@@ -1,28 +1,69 @@
+# Created by https://www.toptal.com/developers/gitignore/api/c++,c
+# Edit at https://www.toptal.com/developers/gitignore?templates=c++,c
+
+### C ###
 # Prerequisites
 *.d
 
-# Compiled Object files
-*.slo
-*.lo
+# Object files
 *.o
+*.ko
 *.obj
+*.elf
+
+# Linker output
+*.ilk
+*.map
+*.exp
 
 # Precompiled Headers
 *.gch
 *.pch
 
-# Linker files
-*.ilk
+# Libraries
+*.lib
+*.a
+*.la
+*.lo
 
-# Debugger Files
+# Shared objects (inc. Windows DLLs)
+*.dll
+*.so
+*.so.*
+*.dylib
+
+# Executables
+*.exe
+*.out
+*.app
+*.i*86
+*.x86_64
+*.hex
+
+# Debug files
+*.dSYM/
+*.su
+*.idb
 *.pdb
 
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
+# Kernel Module Compile Results
+*.mod*
+*.cmd
+.tmp_versions/
+modules.order
+Module.symvers
+Mkfile.old
+dkms.conf
 
+### C++ ###
+# Prerequisites
+
+# Compiled Object files
+*.slo
+
+# Precompiled Headers
+
+# Compiled Dynamic libraries
 
 # Fortran module files
 *.mod
@@ -30,40 +71,16 @@
 
 # Compiled Static libraries
 *.lai
-*.la
-*.a
-*.lib
 
 # Executables
-*.exe
-*.out
-*.app
 
-# Build directories
+# CMake / IDE
 build/
-Build/
-build-*/
-
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
+cmake-build-*/
 compile_commands.json
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
-
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
 .cache/
+
+# Developer files
+AGENTS.md
+
+# End of https://www.toptal.com/developers/gitignore/api/c++,c

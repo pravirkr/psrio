@@ -1,0 +1,62 @@
+name: GitHub CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: "C++ tests (${{ matrix.compiler.cc }})"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - { cc: gcc-11, cpp: g++-11 }
+          - { cc: clang-15, cpp: clang++-15 }
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            build-essential cmake ninja-build ccache \
+            gcc-11 g++-11 clang-15 \
+            python3-dev catch2 git
+
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: cpp-tests-${{ matrix.compiler.cc }}
+          max-size: 500M
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.compiler.cc }}
+          CXX: ${{ matrix.compiler.cpp }}
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          -DCMAKE_BUILD_TYPE=Release
+          -DPSRIO_BUILD_TESTS=ON
+          -DPSRIO_ENABLE_COVERAGE=OFF
+
+      - name: Build
+        run: cmake --build build -j "$(nproc)"
+
+      - name: Run C++ unit tests
+        run: ctest --test-dir build/tests/ --output-on-failure
