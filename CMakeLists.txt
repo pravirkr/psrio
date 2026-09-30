@@ -11,13 +11,13 @@ project(
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
     message(
-      FATAL_ERROR "GCC 11.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+      FATAL_ERROR "GCC 11.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
   if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
     message(
-      FATAL_ERROR "Clang 15.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}"
+      FATAL_ERROR "Clang 15.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 else()
@@ -55,10 +55,8 @@ add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_20)
 
 target_include_directories(
-  ${PROJECT_NAME}
-  INTERFACE
-    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
-    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+  ${PROJECT_NAME} INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
+                            $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
 # ------------------------------------------------------------------------------
@@ -71,13 +69,17 @@ if(PSRIO_BUILD_TESTS)
   add_library(psrio_developer_flags INTERFACE)
   target_compile_options(
     psrio_developer_flags
-    INTERFACE
-      -Wall
-      -Wextra
-      -Wpedantic
-      $<$<CONFIG:Debug>:-O0 -g>
-      $<$<CONFIG:Release>:-O3>
+    INTERFACE -Wall
+              -Wextra
+              -Wpedantic
+              $<$<CONFIG:Debug>:-O0
+              -g>
+              $<$<CONFIG:Release>:-O3>
   )
+
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(psrio_developer_flags INTERFACE -Wno-c2y-extensions)
+  endif()
 
   if(PSRIO_ENABLE_COVERAGE AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(psrio_developer_flags INTERFACE --coverage -O0 -g)
@@ -86,7 +88,6 @@ if(PSRIO_BUILD_TESTS)
 
   add_subdirectory(tests)
 endif()
-
 
 # ------------------------------------------------------------------------------
 # Installation & CMake Packaging (Header-Only / Arch-Independent)
@@ -97,13 +98,11 @@ set(PSRIO_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}")
 install(
   TARGETS ${PROJECT_NAME}
   EXPORT psrioTargets
-  INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-install(
-  DIRECTORY ${PROJECT_SOURCE_DIR}/include/
+  INCLUDES
   DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
+
+install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 
 install(
   EXPORT psrioTargets
@@ -113,23 +112,19 @@ install(
 )
 
 configure_package_config_file(
-  ${PROJECT_SOURCE_DIR}/cmake/psrioConfig.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
+  ${PROJECT_SOURCE_DIR}/cmake/psrioConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
   INSTALL_DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
 )
 
 write_basic_package_version_file(
   ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
   VERSION ${PROJECT_VERSION}
-  COMPATIBILITY SameMajorVersion
-  ARCH_INDEPENDENT
+  COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT
 )
 
-install(
-  FILES
-    ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
-    ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
-  DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
+install(FILES ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
+              ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
+        DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
 )
 
 # ------------------------------------------------------------------------------

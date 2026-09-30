@@ -11,8 +11,9 @@ repos:
       - id: check-yaml
         # .clang-format uses multiple YAML documents (global + Language: Cpp).
         exclude: ^\.clang-format$
-      - id: check-toml
       - id: check-added-large-files
+        # sigpyproc3 filterbanks in tests/data are larger than the 500 KB default.
+        exclude: ^tests/data/
       - id: check-merge-conflict
       - id: check-case-conflict
 

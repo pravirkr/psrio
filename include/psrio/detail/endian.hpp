@@ -2,6 +2,7 @@
 
 #include <bit>
 #include <cstdint>
+#include <cstring>
 #include <type_traits>
 
 namespace psrio::detail {
@@ -56,7 +57,7 @@ constexpr std::uint64_t swap_endian(std::uint64_t value) noexcept {
 template <typename T>
     requires std::is_integral_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 ||
                                        sizeof(T) == 4 || sizeof(T) == 8)
-constexpr auto swap_endian(T value) noexcept -> T {
+constexpr T swap_endian(T value) noexcept {
     if constexpr (sizeof(T) == 1) {
         return value;
     } else if constexpr (sizeof(T) == 2) {
@@ -69,8 +70,44 @@ constexpr auto swap_endian(T value) noexcept -> T {
 }
 
 /// @return true when the host uses little-endian byte order.
-constexpr auto host_is_little_endian() noexcept -> bool {
+constexpr bool host_is_little_endian() noexcept {
     return std::endian::native == std::endian::little;
+}
+
+/// Interpret @p value as little-endian. Identity on a little-endian host.
+template <typename T>
+    requires std::is_integral_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 ||
+                                       sizeof(T) == 4 || sizeof(T) == 8)
+constexpr T from_little_endian(T value) noexcept {
+    if (host_is_little_endian()) {
+        return value;
+    }
+    return swap_endian(value);
+}
+
+/// Interpret @p value as an IEEE-754 binary32 stored little-endian.
+inline float from_little_endian(float value) noexcept {
+    if (host_is_little_endian()) {
+        return value;
+    }
+    const auto bits = swap_endian(std::bit_cast<std::uint32_t>(value));
+    return std::bit_cast<float>(bits);
+}
+
+/// Interpret @p value as an IEEE-754 binary64 stored little-endian.
+inline double from_little_endian(double value) noexcept {
+    if (host_is_little_endian()) {
+        return value;
+    }
+    const auto bits = swap_endian(std::bit_cast<std::uint64_t>(value));
+    return std::bit_cast<double>(bits);
+}
+
+/// Load a little-endian value from an unaligned address.
+template <typename T> inline T load_little_endian(const void* source) noexcept {
+    T value{};
+    std::memcpy(&value, source, sizeof(T));
+    return from_little_endian(value);
 }
 
 } // namespace psrio::detail

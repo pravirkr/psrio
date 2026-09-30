@@ -1,16 +1,16 @@
-#include <catch2/catch_test_macros.hpp>
+#include "psrio/detail/mmap.hpp"
 
-#include <psrio/detail/mmap.hpp>
+#include <catch2/catch_test_macros.hpp>
 
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <ios>
 
-TEST_CASE("MappedFile exposes file bytes", "[presto][mmap]")
-{
+TEST_CASE("MappedFile exposes file bytes", "[presto][mmap]") {
     constexpr std::size_t kPayloadSize = 5;
-    const auto path = std::filesystem::temp_directory_path() / "psrio_mmap_smoke.bin";
+    const auto path =
+        std::filesystem::temp_directory_path() / "psrio_mmap_smoke.bin";
     {
         std::ofstream out(path, std::ios::binary);
         REQUIRE(out);

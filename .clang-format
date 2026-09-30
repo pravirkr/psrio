@@ -8,11 +8,14 @@ AlignConsecutiveAssignments:
   Enabled: true
 BinPackParameters: false
 DerivePointerAlignment: false
+IncludeBlocks: Regroup
 IncludeCategories:
-  - Regex: '^<.*'              # System and third-party headers
-    Priority: 1
   - Regex: '^".*"'            # Project headers
+    Priority: 1
+  - Regex: '^<catch2/'
     Priority: 2
+  - Regex: '^<.*'              # System and third-party headers
+    Priority: 3
 PackConstructorInitializers: CurrentLine
 PointerAlignment: Left
 SortIncludes: CaseSensitive

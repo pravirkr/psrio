@@ -1,23 +1,23 @@
 #pragma once
 
 #include <cstddef>
+#include <fcntl.h>
 #include <filesystem>
 #include <span>
 #include <stdexcept>
 #include <string>
-#include <utility>
-
-#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 
 namespace psrio::detail {
 
 namespace mmap_detail {
 
 inline int open_read_only(const std::filesystem::path& path) {
-    return ::open(path.c_str(), O_RDONLY); // NOLINT(cppcoreguidelines-pro-type-vararg)
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+    return ::open(path.c_str(), O_RDONLY);
 }
 
 } // namespace mmap_detail
@@ -79,16 +79,28 @@ public:
         return *this;
     }
 
-    [[nodiscard]] auto bytes() const noexcept -> std::span<const std::byte> {
+    [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
         if (m_size == 0 || m_addr == MAP_FAILED) {
             return {};
         }
         return {static_cast<const std::byte*>(m_addr), m_size};
     }
 
-    [[nodiscard]] auto size() const noexcept -> std::size_t { return m_size; }
+    [[nodiscard]] std::size_t size() const noexcept { return m_size; }
 
-    [[nodiscard]] auto empty() const noexcept -> bool { return m_size == 0; }
+    [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
+
+    /// Hint to the OS kernel that the mapped pages will be accessed
+    /// sequentially.
+    void advise_sequential() noexcept {
+        if (m_addr != MAP_FAILED && m_size > 0) {
+#ifdef POSIX_MADV_SEQUENTIAL
+            (void)::posix_madvise(m_addr, m_size, POSIX_MADV_SEQUENTIAL);
+#elif defined(MADV_SEQUENTIAL)
+            (void)::madvise(m_addr, m_size, MADV_SEQUENTIAL);
+#endif
+        }
+    }
 
     void reset() noexcept {
         if (m_addr != MAP_FAILED && m_size > 0) {
