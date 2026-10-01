@@ -28,17 +28,6 @@ struct ExtraKey {
     std::vector<std::byte> raw;
 };
 
-/// Count of time samples for FilterbankReader::read.
-struct SampleCount {
-    std::uint64_t value{0};
-};
-
-/// Count of raw payload bytes for FilterbankReader::read and view.
-/// Must be a positive multiple of FilterbankHeader::bytes_per_sample().
-struct ByteCount {
-    std::uint64_t value{0};
-};
-
 struct NameId {
     std::int32_t id{0};
     std::string_view name;

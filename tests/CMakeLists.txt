@@ -10,6 +10,9 @@ find_package(
 if(Catch2_FOUND)
   message(STATUS "Using system Catch2 ${Catch2_VERSION}")
 else()
+  if(NOT DEFINED PSRIO_CATCH2_VERSION)
+    set(PSRIO_CATCH2_VERSION "3.8.0")
+  endif()
   FetchContent_Declare(
     Catch2
     GIT_REPOSITORY https://github.com/catchorg/Catch2.git

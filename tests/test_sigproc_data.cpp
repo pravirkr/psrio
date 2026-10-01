@@ -21,10 +21,8 @@
 #error PSRIO_TEST_DATA_DIR must be the tests/data directory
 #endif
 
-using psrio::formats::sigproc::ByteCount;
 using psrio::formats::sigproc::FilterbankHeader;
 using psrio::formats::sigproc::FilterbankReader;
-using psrio::formats::sigproc::SampleCount;
 
 namespace {
 
@@ -255,7 +253,7 @@ void check_reads(FilterbankReader& reader, const PayloadExpect& expect) {
 
     const auto nchans = static_cast<std::size_t>(header.nchans);
     std::vector<std::uint8_t> sample(nchans);
-    REQUIRE(reader.read(SampleCount{1}, std::span<std::uint8_t>{sample}) == 1U);
+    REQUIRE(reader.read(1, std::span<std::uint8_t>{sample}) == 1U);
     REQUIRE(
         std::equal(expect.first.begin(), expect.first.end(), sample.begin()));
     REQUIRE(sample.back() == expect.sample0_last);
@@ -263,7 +261,7 @@ void check_reads(FilterbankReader& reader, const PayloadExpect& expect) {
 
     reader.rewind();
     std::vector<float> as_float(nchans);
-    REQUIRE(reader.read(SampleCount{1}, std::span<float>{as_float}) == 1U);
+    REQUIRE(reader.read(1, std::span<float>{as_float}) == 1U);
     REQUIRE(as_float.front() == static_cast<float>(expect.first.front()));
     REQUIRE(as_float.back() == static_cast<float>(expect.sample0_last));
 
@@ -273,8 +271,7 @@ void check_reads(FilterbankReader& reader, const PayloadExpect& expect) {
     std::uint64_t seen = 0;
     std::uint64_t sum  = 0;
     while (seen < expect.nsamples) {
-        const auto count =
-            reader.read(SampleCount{kGulp}, std::span<std::uint8_t>{block});
+        const auto count = reader.read(kGulp, std::span<std::uint8_t>{block});
         REQUIRE(count > 0U);
         REQUIRE(count <= kGulp);
         if (seen + count < expect.nsamples) {
@@ -286,8 +283,7 @@ void check_reads(FilterbankReader& reader, const PayloadExpect& expect) {
     }
     REQUIRE(seen == expect.nsamples);
     REQUIRE(sum == expect.unpacked_sum);
-    REQUIRE(reader.read(SampleCount{kGulp}, std::span<std::uint8_t>{block}) ==
-            0U);
+    REQUIRE(reader.read(kGulp, std::span<std::uint8_t>{block}) == 0U);
     REQUIRE(reader.tell() == expect.nsamples);
     reader.seek(expect.nsamples);
     REQUIRE_THROWS_AS(reader.seek(expect.nsamples + 1U),
@@ -295,16 +291,15 @@ void check_reads(FilterbankReader& reader, const PayloadExpect& expect) {
 
     reader.rewind();
     const auto stride = header.bytes_per_sample();
-    const auto viewed = reader.view(ByteCount{stride});
+    const auto viewed = reader.view(stride);
     REQUIRE(viewed.size() == stride);
     REQUIRE(reader.tell() == 1U);
-    REQUIRE_THROWS_AS(reader.view(ByteCount{1}), psrio::ValidationError);
+    REQUIRE_THROWS_AS(reader.view(1), psrio::ValidationError);
     REQUIRE(reader.tell() == 1U);
 
     reader.rewind();
     std::vector<std::byte> payload(static_cast<std::size_t>(expect.data_bytes));
-    REQUIRE(reader.read(ByteCount{expect.data_bytes}, payload) ==
-            expect.data_bytes);
+    REQUIRE(reader.read_bytes(expect.data_bytes, payload) == expect.data_bytes);
     REQUIRE(crc32(payload) == expect.payload_crc);
     REQUIRE(std::equal(viewed.begin(), viewed.end(), payload.begin()));
     REQUIRE(reader.tell() == expect.nsamples);

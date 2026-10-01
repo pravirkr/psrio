@@ -23,9 +23,7 @@
 #include <vector>
 
 using Catch::Matchers::ContainsSubstring;
-using psrio::formats::sigproc::ByteCount;
 using psrio::formats::sigproc::FilterbankReader;
-using psrio::formats::sigproc::SampleCount;
 using psrio::test::SigprocBytes;
 
 namespace {
@@ -92,20 +90,20 @@ TEST_CASE("reader streams samples and stops at the end", "[sigproc][reader]") {
     FilterbankReader reader(file.path());
 
     std::array<std::uint8_t, 3> first{0, 0, 0};
-    REQUIRE(reader.read(SampleCount{3}, std::span<std::uint8_t>{first}) == 3U);
+    REQUIRE(reader.read(3, std::span<std::uint8_t>{first}) == 3U);
     REQUIRE(first == std::array<std::uint8_t, 3>{10, 11, 12});
     REQUIRE(reader.tell() == 3U);
 
     std::array<std::uint8_t, 3> second{};
-    REQUIRE(reader.read(SampleCount{3}, std::span<std::uint8_t>{second}) == 3U);
+    REQUIRE(reader.read(3, std::span<std::uint8_t>{second}) == 3U);
     REQUIRE(second == std::array<std::uint8_t, 3>{13, 14, 15});
 
     std::array<std::uint8_t, 3> tail{9, 9, 9};
-    REQUIRE(reader.read(SampleCount{3}, std::span<std::uint8_t>{tail}) == 2U);
+    REQUIRE(reader.read(3, std::span<std::uint8_t>{tail}) == 2U);
     REQUIRE(tail.at(0) == 16);
     REQUIRE(tail.at(1) == 17);
     REQUIRE(tail.at(2) == 9);
-    REQUIRE(reader.read(SampleCount{3}, std::span<std::uint8_t>{tail}) == 0U);
+    REQUIRE(reader.read(3, std::span<std::uint8_t>{tail}) == 0U);
 
     reader.seek(reader.header().nsamples());
     REQUIRE(reader.tell() == 8U);
@@ -120,13 +118,11 @@ TEST_CASE("reader rejects a destination of the wrong length",
     const TempFile file(file_8bit(samples).out);
     FilterbankReader reader(file.path());
     std::array<std::uint8_t, 1> dest{};
-    REQUIRE_THROWS_AS(
-        reader.read(SampleCount{2}, std::span<std::uint8_t>{dest}),
-        psrio::ValidationError);
+    REQUIRE_THROWS_AS(reader.read(2, std::span<std::uint8_t>{dest}),
+                      psrio::ValidationError);
     std::array<std::uint16_t, 2> wrong_type{};
-    REQUIRE_THROWS_AS(
-        reader.read(SampleCount{2}, std::span<std::uint16_t>{wrong_type}),
-        psrio::ValidationError);
+    REQUIRE_THROWS_AS(reader.read(2, std::span<std::uint16_t>{wrong_type}),
+                      psrio::ValidationError);
 }
 
 TEST_CASE("raw byte reads match a zero-copy view", "[sigproc][reader]") {
@@ -136,7 +132,7 @@ TEST_CASE("raw byte reads match a zero-copy view", "[sigproc][reader]") {
     REQUIRE(reader.header().bytes_per_sample() == 4U);
     REQUIRE(reader.header().nsamples() == 1U);
 
-    const auto viewed = reader.view(ByteCount{4});
+    const auto viewed = reader.view(4);
     REQUIRE(viewed.size() == 4U);
     REQUIRE(std::to_integer<unsigned char>(viewed[0]) == 1);
     REQUIRE(std::to_integer<unsigned char>(viewed[3]) == 4);
@@ -144,14 +140,14 @@ TEST_CASE("raw byte reads match a zero-copy view", "[sigproc][reader]") {
 
     reader.rewind();
     std::array<std::byte, 4> copied{};
-    REQUIRE(reader.read(ByteCount{4}, copied) == 4U);
+    REQUIRE(reader.read_bytes(4, copied) == 4U);
     REQUIRE(std::equal(viewed.begin(), viewed.end(), copied.begin()));
 
     reader.rewind();
     REQUIRE_THROWS_AS(
-        reader.read(ByteCount{3}, std::span<std::byte>{copied}.first(3)),
+        reader.read_bytes(3, std::span<std::byte>{copied}.first(3)),
         psrio::ValidationError);
-    REQUIRE_THROWS_AS(reader.view(ByteCount{8}), psrio::ValidationError);
+    REQUIRE_THROWS_AS(reader.view(8), psrio::ValidationError);
     REQUIRE(reader.tell() == 0U);
 }
 
@@ -168,7 +164,7 @@ TEST_CASE("4-bit byte 0xAB unpacks low nibble first", "[sigproc][reader]") {
     const TempFile file(bytes.out);
     FilterbankReader reader(file.path());
     std::array<float, 2> samples{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<float>{samples}) == 1U);
+    REQUIRE(reader.read(1, std::span<float>{samples}) == 1U);
     REQUIRE(samples.at(0) == 11.0F);
     REQUIRE(samples.at(1) == 10.0F);
 }
@@ -189,7 +185,7 @@ TEST_CASE("signed 8-bit samples cast through int8", "[sigproc][reader]") {
     FilterbankReader reader(file.path());
     REQUIRE(reader.header().samples_are_signed());
     std::array<float, 2> samples{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<float>{samples}) == 1U);
+    REQUIRE(reader.read(1, std::span<float>{samples}) == 1U);
     REQUIRE(samples.at(0) == -1.0F);
     REQUIRE(samples.at(1) == 5.0F);
 }
@@ -209,8 +205,7 @@ TEST_CASE("16-bit and 32-bit samples unpack little-endian",
     const TempFile file16(bits16.out);
     FilterbankReader reader16(file16.path());
     std::array<std::uint16_t, 1> as_int{};
-    REQUIRE(reader16.read(SampleCount{1}, std::span<std::uint16_t>{as_int}) ==
-            1U);
+    REQUIRE(reader16.read(1, std::span<std::uint16_t>{as_int}) == 1U);
     REQUIRE(as_int.at(0) == 0x0102U);
 
     SigprocBytes bits32;
@@ -231,13 +226,12 @@ TEST_CASE("16-bit and 32-bit samples unpack little-endian",
     const TempFile file32(bits32.out);
     FilterbankReader reader32(file32.path());
     std::array<float, 1> as_float{};
-    REQUIRE(reader32.read(SampleCount{1}, std::span<float>{as_float}) == 1U);
+    REQUIRE(reader32.read(1, std::span<float>{as_float}) == 1U);
     REQUIRE(as_float.at(0) == 1.5F);
     reader32.rewind();
     std::array<std::uint8_t, 1> as_byte{};
-    REQUIRE_THROWS_AS(
-        reader32.read(SampleCount{1}, std::span<std::uint8_t>{as_byte}),
-        psrio::ValidationError);
+    REQUIRE_THROWS_AS(reader32.read(1, std::span<std::uint8_t>{as_byte}),
+                      psrio::ValidationError);
 }
 
 TEST_CASE("multi-if samples stay in file order", "[sigproc][reader]") {
@@ -258,7 +252,7 @@ TEST_CASE("multi-if samples stay in file order", "[sigproc][reader]") {
     REQUIRE(reader.header().bytes_per_sample() == 4U);
     REQUIRE(reader.header().nsamples() == 2U);
     std::array<float, 4> first{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<float>{first}) == 1U);
+    REQUIRE(reader.read(1, std::span<float>{first}) == 1U);
     REQUIRE(first == std::array<float, 4>{1.0F, 2.0F, 3.0F, 4.0F});
 }
 
@@ -274,7 +268,7 @@ TEST_CASE("a smaller declared nsamples limits the reader",
 
     std::array<std::uint8_t, 10> dest{};
     dest.fill(0);
-    REQUIRE(reader.read(SampleCount{10}, std::span<std::uint8_t>{dest}) == 3U);
+    REQUIRE(reader.read(10, std::span<std::uint8_t>{dest}) == 3U);
     REQUIRE(dest.at(0) == 1);
     REQUIRE(dest.at(1) == 2);
     REQUIRE(dest.at(2) == 3);
@@ -325,8 +319,7 @@ TEST_CASE("reader respects BitOrder in constructor, setter, and read overload",
     FilterbankReader reader(file.path());
     REQUIRE(reader.bit_order() == psrio::BitOrder::kLsbFirst);
     std::array<std::uint8_t, 2> lsb_out{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<std::uint8_t>{lsb_out}) ==
-            1U);
+    REQUIRE(reader.read(1, std::span<std::uint8_t>{lsb_out}) == 1U);
     REQUIRE(lsb_out == std::array<std::uint8_t, 2>{11, 10});
 
     // Rewind and use set_bit_order(kMsbFirst): {10, 11}
@@ -334,14 +327,13 @@ TEST_CASE("reader respects BitOrder in constructor, setter, and read overload",
     reader.set_bit_order(psrio::BitOrder::kMsbFirst);
     REQUIRE(reader.bit_order() == psrio::BitOrder::kMsbFirst);
     std::array<std::uint8_t, 2> msb_out{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<std::uint8_t>{msb_out}) ==
-            1U);
+    REQUIRE(reader.read(1, std::span<std::uint8_t>{msb_out}) == 1U);
     REQUIRE(msb_out == std::array<std::uint8_t, 2>{10, 11});
 
     // Rewind and use per-read overload override
     reader.rewind();
     std::array<float, 2> lsb_floats{};
-    REQUIRE(reader.read(SampleCount{1}, std::span<float>{lsb_floats},
+    REQUIRE(reader.read(1, std::span<float>{lsb_floats},
                         psrio::BitOrder::kLsbFirst) == 1U);
     REQUIRE(lsb_floats == std::array<float, 2>{11.0F, 10.0F});
 }
@@ -355,14 +347,14 @@ TEST_CASE("reader convenience allocating methods read_samples and read_bytes",
     REQUIRE(reader.header().nsamples() == 3U);
 
     // Convenience read_samples<float>
-    const auto floats = reader.read_samples<float>(SampleCount{2});
+    const auto floats = reader.read_samples<float>(2);
     REQUIRE(floats.size() == 4U); // 2 samples * 2 chans
     REQUIRE(floats == std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F});
     REQUIRE(reader.tell() == 2U);
 
     // Convenience read_bytes
     reader.rewind();
-    const auto raw_bytes = reader.read_bytes(ByteCount{4});
+    const auto raw_bytes = reader.read_bytes(4);
     REQUIRE(raw_bytes.size() == 4U);
     REQUIRE(std::to_integer<unsigned char>(raw_bytes[0]) == 10);
     REQUIRE(std::to_integer<unsigned char>(raw_bytes[3]) == 40);

@@ -19,11 +19,12 @@ namespace psrio::formats::sigproc {
 
 /// Sequential reader for one SIGPROC filterbank file.
 ///
-/// The file is mapped read-only. read(SampleCount) unpacks the next time
-/// samples into a caller-owned span. read(ByteCount) and view(ByteCount)
-/// expose the raw payload. One time sample is nifs * nchans values in file
-/// order, index ipol * nchans + ichan, with no scaling and no Stokes offset.
-/// Sub-byte samples are least-significant field first.
+/// The file is mapped read-only. read_samples(count, span) or read(count, span)
+/// unpacks the next time samples into a caller-owned span. read_bytes(nbytes,
+/// span) and view_bytes(nbytes) expose the raw payload. One time sample is nifs
+/// * nchans values in file order, index ipol * nchans + ichan, with no scaling
+/// and no Stokes offset. Sub-byte samples are unpacked according to the
+/// configured BitOrder.
 ///
 /// The cursor starts at the first readable sample. seek(nsamples()) is the
 /// end. A sample read past the end returns the samples that remain. A byte
@@ -71,38 +72,62 @@ public:
     template <typename T>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>
-    std::uint64_t read(SampleCount count, std::span<T> dest, BitOrder order);
+    std::uint64_t
+    read_samples(std::uint64_t count, std::span<T> dest, BitOrder order);
 
     /// Unpack the next @p count time samples into @p dest using the reader's
     /// bit_order().
     template <typename T>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>
-    std::uint64_t read(SampleCount count, std::span<T> dest) {
-        return read(count, dest, m_bit_order);
+    std::uint64_t read_samples(std::uint64_t count, std::span<T> dest) {
+        return read_samples(count, dest, m_bit_order);
     }
 
-    /// Copy the next @p count.value raw payload bytes into @p dest.
+    /// Unpack alias: unpack the next @p count time samples into @p dest.
+    template <typename T>
+        requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
+                 std::same_as<T, std::uint16_t>
+    std::uint64_t read(std::uint64_t count, std::span<T> dest, BitOrder order) {
+        return read_samples(count, dest, order);
+    }
+
+    /// Unpack alias: unpack the next @p count time samples using reader's
+    /// bit_order().
+    template <typename T>
+        requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
+                 std::same_as<T, std::uint16_t>
+    std::uint64_t read(std::uint64_t count, std::span<T> dest) {
+        return read_samples(count, dest, m_bit_order);
+    }
+
+    /// Copy the next @p nbytes raw payload bytes into @p dest.
     /// @throws ValidationError if the request is not a positive multiple of
     ///         the sample stride, does not fit in the readable samples, or
     ///         @p dest has a different size.
-    std::uint64_t read(ByteCount count, std::span<std::byte> dest);
+    std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
 
-    /// Zero-copy view of the next @p count.value raw payload bytes.
+    /// Zero-copy view of the next @p nbytes raw payload bytes.
     /// The span refers to the mapped file and stays valid until that mapping
-    /// is destroyed. Advances the cursor by the same rule as read(ByteCount).
-    [[nodiscard]] std::span<const std::byte> view(ByteCount count);
+    /// is destroyed. Advances the cursor by the corresponding number of
+    /// samples.
+    [[nodiscard]] std::span<const std::byte> view_bytes(std::uint64_t nbytes);
+
+    /// Zero-copy view alias for view_bytes.
+    [[nodiscard]] std::span<const std::byte> view(std::uint64_t nbytes) {
+        return view_bytes(nbytes);
+    }
 
     /// Convenience allocating read: unpack next @p count time samples into a
     /// new std::vector<T>.
     template <typename T = float>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>
-    [[nodiscard]] std::vector<T> read_samples(SampleCount count,
+    [[nodiscard]] std::vector<T> read_samples(std::uint64_t count,
                                               BitOrder order) {
         const auto per_sample = values_per_sample();
-        std::vector<T> buffer(count.value * per_sample);
-        const auto actual = read(count, std::span<T>(buffer), order);
+        std::vector<T> buffer(count * per_sample);
+        const auto actual = read_samples(count, std::span<T>(buffer), order);
         buffer.resize(static_cast<std::size_t>(actual * per_sample));
         return buffer;
     }
@@ -111,14 +136,14 @@ public:
     template <typename T = float>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>
-    [[nodiscard]] std::vector<T> read_samples(SampleCount count) {
+    [[nodiscard]] std::vector<T> read_samples(std::uint64_t count) {
         return read_samples<T>(count, m_bit_order);
     }
 
     /// Convenience allocating read for raw bytes.
-    [[nodiscard]] std::vector<std::byte> read_bytes(ByteCount count) {
-        std::vector<std::byte> buffer(count.value);
-        const auto actual = read(count, std::span<std::byte>(buffer));
+    [[nodiscard]] std::vector<std::byte> read_bytes(std::uint64_t nbytes) {
+        std::vector<std::byte> buffer(nbytes);
+        const auto actual = read_bytes(nbytes, std::span<std::byte>(buffer));
         buffer.resize(static_cast<std::size_t>(actual));
         return buffer;
     }
@@ -206,8 +231,9 @@ inline void FilterbankReader::check_byte_request(std::uint64_t nbytes) const {
 template <typename T>
     requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
              std::same_as<T, std::uint16_t>
-inline std::uint64_t
-FilterbankReader::read(SampleCount count, std::span<T> dest, BitOrder order) {
+inline std::uint64_t FilterbankReader::read_samples(std::uint64_t count,
+                                                    std::span<T> dest,
+                                                    BitOrder order) {
     if constexpr (std::same_as<T, std::uint8_t>) {
         if (m_header.nbits > 8) {
             throw ValidationError(
@@ -221,12 +247,11 @@ FilterbankReader::read(SampleCount count, std::span<T> dest, BitOrder order) {
     }
 
     const auto per_sample = values_per_sample();
-    if (count.value > 0U &&
-        per_sample >
-            (std::numeric_limits<std::uint64_t>::max() / count.value)) {
+    if (count > 0U &&
+        per_sample > (std::numeric_limits<std::uint64_t>::max() / count)) {
         throw ValidationError("psrio: requested sample block is too large");
     }
-    const auto expected = count.value * per_sample;
+    const auto expected = count * per_sample;
     if (expected != dest.size()) {
         throw ValidationError(std::format(
             "psrio: destination has {} values but the request needs {}",
@@ -237,7 +262,7 @@ FilterbankReader::read(SampleCount count, std::span<T> dest, BitOrder order) {
             "psrio: reader cursor is past the readable samples");
     }
 
-    const auto to_read = std::min(count.value, m_header.nsamples() - m_sample);
+    const auto to_read = std::min(count, m_header.nsamples() - m_sample);
     if (to_read == 0U) {
         return 0;
     }
@@ -280,26 +305,27 @@ FilterbankReader::read(SampleCount count, std::span<T> dest, BitOrder order) {
     return to_read;
 }
 
-inline std::uint64_t FilterbankReader::read(ByteCount count,
-                                            std::span<std::byte> dest) {
-    check_byte_request(count.value);
-    if (dest.size() != count.value) {
+inline std::uint64_t FilterbankReader::read_bytes(std::uint64_t nbytes,
+                                                  std::span<std::byte> dest) {
+    check_byte_request(nbytes);
+    if (dest.size() != nbytes) {
         throw ValidationError(std::format(
             "psrio: destination has {} bytes but the request needs {}",
-            dest.size(), count.value));
+            dest.size(), nbytes));
     }
     const auto stride = m_header.bytes_per_sample();
-    const auto raw    = mapped_bytes(m_sample * stride, count.value);
-    std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(count.value));
-    m_sample += count.value / stride;
-    return count.value;
+    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
+    std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(nbytes));
+    m_sample += nbytes / stride;
+    return nbytes;
 }
 
-inline std::span<const std::byte> FilterbankReader::view(ByteCount count) {
-    check_byte_request(count.value);
+inline std::span<const std::byte>
+FilterbankReader::view_bytes(std::uint64_t nbytes) {
+    check_byte_request(nbytes);
     const auto stride = m_header.bytes_per_sample();
-    const auto raw    = mapped_bytes(m_sample * stride, count.value);
-    m_sample += count.value / stride;
+    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
+    m_sample += nbytes / stride;
     return raw;
 }
 

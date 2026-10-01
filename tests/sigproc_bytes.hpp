@@ -54,6 +54,11 @@ public:
         out.push_back(std::byte{static_cast<unsigned char>(value)});
     }
 
+    void key_str(std::string_view key, std::string_view value) {
+        string(key);
+        string(value);
+    }
+
     std::vector<std::byte> out;
 
 private:

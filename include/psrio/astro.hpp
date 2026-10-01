@@ -115,6 +115,22 @@ parse_sexagesimal(std::string_view input,
     return out;
 }
 
+/// Convert a Sexagesimal coordinate struct to SIGPROC packed coordinate format
+/// (hhmmss.ss or [+|-]ddmmss.ss).
+[[nodiscard]] constexpr double
+sexagesimal_to_packed(const Sexagesimal& sex) noexcept {
+    const double val = (static_cast<double>(sex.major) * 10000.0) +
+                       (static_cast<double>(sex.minutes) * 100.0) + sex.seconds;
+    return sex.negative ? -val : val;
+}
+
+/// Parse a sexagesimal coordinate string and return it in SIGPROC packed
+/// format.
+[[nodiscard]] inline double
+string_to_packed(std::string_view str, std::string_view what = "coordinate") {
+    return sexagesimal_to_packed(parse_sexagesimal(str, what));
+}
+
 /// Convert hours, minutes, and seconds to radians.
 [[nodiscard]] inline double
 hms_to_rad(int hour, int minutes, double sec) noexcept {

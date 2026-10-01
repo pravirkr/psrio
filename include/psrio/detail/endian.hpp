@@ -103,6 +103,24 @@ inline double from_little_endian(double value) noexcept {
     return std::bit_cast<double>(bits);
 }
 
+/// Convert @p value to little-endian representation.
+template <typename T>
+    requires std::is_integral_v<T> && (sizeof(T) == 1 || sizeof(T) == 2 ||
+                                       sizeof(T) == 4 || sizeof(T) == 8)
+constexpr T to_little_endian(T value) noexcept {
+    return from_little_endian(value);
+}
+
+/// Convert IEEE-754 binary32 to little-endian representation.
+inline float to_little_endian(float value) noexcept {
+    return from_little_endian(value);
+}
+
+/// Convert IEEE-754 binary64 to little-endian representation.
+inline double to_little_endian(double value) noexcept {
+    return from_little_endian(value);
+}
+
 /// Load a little-endian value from an unaligned address.
 template <typename T> inline T load_little_endian(const void* source) noexcept {
     T value{};

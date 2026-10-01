@@ -34,7 +34,7 @@ else()
 endif()
 
 # Configuration options
-option(PSRIO_BUILD_TESTS "Build test suite" ${PROJECT_IS_TOP_LEVEL})
+option(PSRIO_BUILD_TESTS "Build test suite" ${PSRIO_IS_TOP_LEVEL})
 option(PSRIO_BUILD_DOCS "Build documentation" OFF)
 option(PSRIO_ENABLE_COVERAGE "Enable code coverage for tests" OFF)
 

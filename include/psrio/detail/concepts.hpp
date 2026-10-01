@@ -2,6 +2,8 @@
 
 #include <concepts>
 #include <cstddef>
+#include <cstdint>
+#include <span>
 
 namespace psrio::detail {
 
@@ -16,3 +18,25 @@ concept ByteSpan = requires(T span) {
 };
 
 } // namespace psrio::detail
+
+namespace psrio::concepts {
+
+/**
+ * @brief Concept modeling a single-channel time-series streaming reader.
+ *
+ * Modeled by psrio::TimeSeriesReader, allowing downstream algorithms (FFTs,
+ * periodic folding, single-pulse boxcars) to operate generically on any
+ * dedispersed stream.
+ */
+template <typename R>
+concept TimeSeriesReader =
+    requires(R& reader, std::span<float> dest, std::uint64_t count) {
+        { reader.header() };
+        { reader.tell() } -> std::same_as<std::uint64_t>;
+        { reader.seek(count) };
+        { reader.rewind() };
+        { reader.read_samples(count, dest) } -> std::same_as<std::uint64_t>;
+        { reader.read(count, dest) } -> std::same_as<std::uint64_t>;
+    };
+
+} // namespace psrio::concepts
