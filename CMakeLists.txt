@@ -9,15 +9,15 @@ project(
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
     message(
-      FATAL_ERROR "GCC 11.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
+      FATAL_ERROR "GCC 13.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 15.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
     message(
-      FATAL_ERROR "Clang 15.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
+      FATAL_ERROR "Clang 18.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 else()

@@ -16,7 +16,7 @@ A high-performance, header-only C++20 library for reading, parsing, and streamin
 ## Requirements
 
 - **C++ Standard**: C++20 (`-std=c++20`)
-- **Compilers**: GCC 12+ (GCC 13+ recommended), Clang 15+ (Clang 18+ recommended), or Apple Clang 15+
+- **Compilers**: GCC 13+, Clang 18+
 - **Build System**: CMake 3.21+
 
 ---

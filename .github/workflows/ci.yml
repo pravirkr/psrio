@@ -23,8 +23,8 @@ jobs:
       fail-fast: false
       matrix:
         compiler:
-          - { cc: gcc-11, cpp: g++-11 }
-          - { cc: clang-15, cpp: clang++-15 }
+          - { cc: gcc-13, cpp: g++-13 }
+          - { cc: clang-18, cpp: clang++-18 }
 
     steps:
       - uses: actions/checkout@v7
@@ -34,7 +34,7 @@ jobs:
           sudo apt update
           sudo apt install -y --no-install-recommends \
             build-essential cmake ninja-build ccache \
-            gcc-11 g++-11 clang-15 \
+            gcc-13 g++-13 clang-18 \
             python3-dev catch2 git
 
       - name: Cache ccache object store
