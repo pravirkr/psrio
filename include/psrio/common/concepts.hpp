@@ -21,6 +21,9 @@ concept ByteSpan = requires(T span) {
 
 namespace psrio::concepts {
 
+// Multi-channel intensity streams model psrio::concepts::BlockReader in
+// psrio/block_source.hpp. That concept is separate from TimeSeriesReader.
+
 /**
  * @brief Concept modeling a single-channel time-series streaming reader.
  *

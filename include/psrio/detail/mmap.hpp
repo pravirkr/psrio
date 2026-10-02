@@ -1,11 +1,15 @@
 #pragma once
 
+#include "psrio/detail/exceptions.hpp"
+#include "psrio/detail/file.hpp"
+
+#include <cerrno>
 #include <cstddef>
-#include <fcntl.h>
+#include <cstdint>
+#include <cstdio>
 #include <filesystem>
+#include <limits>
 #include <span>
-#include <stdexcept>
-#include <string>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -13,74 +17,92 @@
 
 namespace psrio::detail {
 
-namespace mmap_detail {
-
-inline int open_read_only(const std::filesystem::path& path) {
-    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-    return ::open(path.c_str(), O_RDONLY);
-}
-
-} // namespace mmap_detail
-
 /// Read-only memory mapping of a regular file (POSIX `mmap`).
+///
+/// The descriptor used to establish the mapping is closed after a successful
+/// `mmap()`. An existing mapping remains valid when its descriptor is closed.
+///
+/// Empty files produce an empty byte span and do not call `mmap()`.
+///
+/// The backing file must not be truncated while mapped; access beyond the new
+/// end-of-file may raise `SIGBUS`.
 class MappedFile {
 public:
-    MappedFile() = default;
+    MappedFile() noexcept = default;
 
+    /// @throws psrio::IoError if the path cannot be opened, inspected, or
+    /// mapped.
     explicit MappedFile(const std::filesystem::path& path) {
-        const int file_descriptor = mmap_detail::open_read_only(path);
-        if (file_descriptor < 0) {
-            throw std::runtime_error(
-                "psrio: failed to open file for mapping: " + path.string());
+        FileHandle file{std::fopen(path.c_str(), "rb")};
+        if (!file) {
+            error_check::throw_errno_io("fopen", path);
         }
 
-        struct stat stat_buffer{};
-        if (::fstat(file_descriptor, &stat_buffer) != 0) {
-            ::close(file_descriptor);
-            throw std::runtime_error("psrio: failed to stat file: " +
-                                     path.string());
+        const int fd = ::fileno(file.get());
+        if (fd < 0) {
+            error_check::throw_errno_io("fileno", path);
         }
 
-        if (stat_buffer.st_size < 0) {
-            ::close(file_descriptor);
-            throw std::runtime_error("psrio: negative file size: " +
-                                     path.string());
+        struct stat file_stat{};
+        if (::fstat(fd, &file_stat) != 0) {
+            error_check::throw_errno_io("fstat", path);
         }
 
-        const auto mapped_size = static_cast<std::size_t>(stat_buffer.st_size);
-        void* mapped_addr      = MAP_FAILED;
-        if (mapped_size > 0) {
-            mapped_addr = ::mmap(nullptr, mapped_size, PROT_READ, MAP_PRIVATE,
-                                 file_descriptor, 0);
-            if (mapped_addr == MAP_FAILED) {
-                ::close(file_descriptor);
-                throw std::runtime_error("psrio: mmap failed: " +
-                                         path.string());
-            }
+        if (!S_ISREG(file_stat.st_mode)) {
+            throw IoError(
+                std::format("psrio: cannot memory-map non-regular file '{}'",
+                            path.string()));
         }
 
-        m_fd   = file_descriptor;
-        m_addr = mapped_addr;
-        m_size = mapped_size;
+        if (file_stat.st_size < 0) {
+            throw IoError(std::format(
+                "psrio: file reports a negative size: '{}'", path.string()));
+        }
+
+        const auto file_size = static_cast<std::uintmax_t>(file_stat.st_size);
+        constexpr auto kMaxMappingSize = static_cast<std::uintmax_t>(
+            std::numeric_limits<std::size_t>::max());
+        if (file_size > kMaxMappingSize) {
+            throw IoError(std::format(
+                "psrio: file is too large to map in this process: '{}'",
+                path.string()));
+        }
+
+        const auto mapping_size = static_cast<std::size_t>(file_size);
+        if (mapping_size == 0) {
+            return;
+        }
+
+        void* const address =
+            ::mmap(nullptr, mapping_size, PROT_READ, MAP_PRIVATE, fd, 0);
+        if (address == MAP_FAILED) {
+            error_check::throw_errno_io("mmap", path);
+        }
+
+        m_addr = address;
+        m_size = mapping_size;
     }
 
-    ~MappedFile() { reset(); }
+    ~MappedFile() noexcept { reset(); }
 
     MappedFile(const MappedFile&)            = delete;
     MappedFile& operator=(const MappedFile&) = delete;
 
-    MappedFile(MappedFile&& other) noexcept { swap(other); }
+    MappedFile(MappedFile&& other) noexcept
+        : m_addr{std::exchange(other.m_addr, MAP_FAILED)},
+          m_size{std::exchange(other.m_size, 0)} {}
 
     MappedFile& operator=(MappedFile&& other) noexcept {
         if (this != &other) {
             reset();
-            swap(other);
+            m_addr = std::exchange(other.m_addr, MAP_FAILED);
+            m_size = std::exchange(other.m_size, 0);
         }
         return *this;
     }
 
     [[nodiscard]] std::span<const std::byte> bytes() const noexcept {
-        if (m_size == 0 || m_addr == MAP_FAILED) {
+        if (m_addr == MAP_FAILED || m_size == 0) {
             return {};
         }
         return {static_cast<const std::byte*>(m_addr), m_size};
@@ -90,38 +112,30 @@ public:
 
     [[nodiscard]] bool empty() const noexcept { return m_size == 0; }
 
-    /// Hint to the OS kernel that the mapped pages will be accessed
-    /// sequentially.
-    void advise_sequential() noexcept {
-        if (m_addr != MAP_FAILED && m_size > 0) {
-#ifdef POSIX_MADV_SEQUENTIAL
-            (void)::posix_madvise(m_addr, m_size, POSIX_MADV_SEQUENTIAL);
-#elif defined(MADV_SEQUENTIAL)
-            (void)::madvise(m_addr, m_size, MADV_SEQUENTIAL);
-#endif
+    [[nodiscard]] bool is_mapped() const noexcept {
+        return m_addr != MAP_FAILED;
+    }
+
+    void advise_sequential() const noexcept {
+        if (m_addr == MAP_FAILED || m_size == 0) {
+            return;
         }
+#ifdef POSIX_MADV_SEQUENTIAL
+        (void)::posix_madvise(m_addr, m_size, POSIX_MADV_SEQUENTIAL);
+#elif defined(MADV_SEQUENTIAL)
+        (void)::madvise(m_addr, m_size, MADV_SEQUENTIAL);
+#endif
     }
 
     void reset() noexcept {
-        if (m_addr != MAP_FAILED && m_size > 0) {
-            ::munmap(m_addr, m_size);
-        }
-        if (m_fd >= 0) {
-            ::close(m_fd);
+        if (m_addr != MAP_FAILED) {
+            (void)::munmap(m_addr, m_size);
         }
         m_addr = MAP_FAILED;
         m_size = 0;
-        m_fd   = -1;
     }
 
 private:
-    void swap(MappedFile& other) noexcept {
-        std::swap(m_fd, other.m_fd);
-        std::swap(m_addr, other.m_addr);
-        std::swap(m_size, other.m_size);
-    }
-
-    int m_fd           = -1;
     void* m_addr       = MAP_FAILED;
     std::size_t m_size = 0;
 };

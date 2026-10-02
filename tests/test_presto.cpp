@@ -1,4 +1,4 @@
-#include "psrio/detail/concepts.hpp"
+#include "psrio/common/concepts.hpp"
 #include "psrio/formats/presto.hpp"
 
 #include <catch2/catch_test_macros.hpp>

@@ -26,7 +26,7 @@ void require_format(std::span<const std::byte> bytes, const char* fragment) {
 } // namespace
 
 TEST_CASE("library version is exposed", "[sigproc]") {
-    REQUIRE(psrio::version() == "0.1.0");
+    REQUIRE(psrio::version() == "0.2.0");
 }
 
 TEST_CASE("minimal filterbank header parses and validates",

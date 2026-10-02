@@ -1,9 +1,11 @@
 #pragma once
 
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
-#include "psrio/detail/unpack.hpp"
+#include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/skip.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/header.hpp"
 
@@ -11,9 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -68,6 +72,9 @@ public:
     /// Sampling interval in seconds.
     [[nodiscard]] double dt() const noexcept { return m_header.tsamp; }
 
+    /// Sampling interval in seconds. Same value as `dt()`.
+    [[nodiscard]] double tsamp() const noexcept { return m_header.tsamp; }
+
     /// Total duration in seconds.
     [[nodiscard]] double tobs() const noexcept { return m_header.tobs(); }
 
@@ -93,6 +100,112 @@ public:
             throw ValidationError("psrio: seek is past the readable samples");
         }
         m_sample = sample;
+    }
+
+    /// Move the cursor by @p delta time samples. Negative moves backward.
+    /// A sub-byte series must land on a byte boundary or on `nsamples()`.
+    /// @throws ValidationError if the landing index is outside
+    ///         `[0, nsamples()]` or is not byte-aligned.
+    void skip(std::int64_t delta) {
+        const auto landing =
+            detail::apply_skip(m_sample, delta, m_header.nsamples);
+        if (is_sub_byte() && landing != m_header.nsamples &&
+            landing % samples_per_byte() != 0U) {
+            throw ValidationError(
+                "psrio: sub-byte time series skip must land on a byte "
+                "boundary");
+        }
+        m_sample = landing;
+    }
+
+    /// One frequency channel.
+    static std::uint64_t nchans() noexcept { return 1; }
+
+    /// IF count from the header, at least 1.
+    [[nodiscard]] std::uint64_t nifs() const noexcept {
+        return static_cast<std::uint64_t>(m_header.nifs > 0 ? m_header.nifs
+                                                            : 1);
+    }
+
+    /// Bits per on-disk sample. PRESTO `.dat` samples are 32-bit floats.
+    [[nodiscard]] int nbits() const noexcept {
+        return m_is_presto ? 32 : m_raw_sigproc.nbits;
+    }
+
+    /// On-disk sample type.
+    [[nodiscard]] SampleType sample_type() const {
+        if (m_is_presto) {
+            return SampleType::kFloat32;
+        }
+        return sample_type_from_nbits(m_raw_sigproc.nbits,
+                                      m_raw_sigproc.samples_are_signed());
+    }
+
+    /// Bytes charged to one sample by `read_bytes`.
+    ///
+    /// PRESTO and whole-byte SIGPROC samples return their real width. A
+    /// sub-byte series returns 1, which is the `read_bytes` stride.
+    /// `read_block` still counts time samples and requires a byte-aligned
+    /// count.
+    [[nodiscard]] std::uint64_t bytes_per_sample() const {
+        if (m_is_presto) {
+            return sizeof(float);
+        }
+        if (m_raw_sigproc.nbits >= 8) {
+            return static_cast<std::uint64_t>(m_raw_sigproc.nbits) / 8U;
+        }
+        return 1;
+    }
+
+    /// True. The file length is known after open.
+    static bool has_nsamples() noexcept { return true; }
+
+    /// Source name from header.
+    [[nodiscard]] std::string_view source_name() const noexcept {
+        return m_header.source;
+    }
+
+    /// Telescope name from header.
+    [[nodiscard]] std::string_view telescope() const noexcept {
+        return m_header.telescope;
+    }
+
+    /// Right ascension packed sexagesimal (HHMMSS.ss), or 0.0.
+    [[nodiscard]] double raj() const noexcept { return m_header.raj; }
+
+    /// Declination packed sexagesimal (+-DDMMSS.ss), or 0.0.
+    [[nodiscard]] double dej() const noexcept { return m_header.dej; }
+
+    /// Bandwidth in MHz.
+    [[nodiscard]] double bandwidth() const noexcept {
+        return m_header.bandwidth();
+    }
+
+    /// Centre frequency in MHz.
+    [[nodiscard]] double center_frequency() const noexcept {
+        return m_header.center_frequency();
+    }
+
+    /// MJD of the first sample.
+    [[nodiscard]] double tstart() const noexcept { return m_header.tstart; }
+
+    /// Centre frequency of the single channel, in MHz.
+    [[nodiscard]] double fch1() const noexcept { return m_header.fch1; }
+
+    /// Signed channel spacing, in MHz.
+    [[nodiscard]] double foff() const noexcept { return m_header.foff; }
+
+    /// Beam index from the header.
+    [[nodiscard]] int beam() const noexcept { return m_header.ibeam; }
+
+    /// Spectra per second, or 0 when `tsamp` is not positive.
+    [[nodiscard]] double spectra_rate() const noexcept {
+        return m_header.tsamp > 0.0 ? 1.0 / m_header.tsamp : 0.0;
+    }
+
+    /// UTC of `tstart`, as POSIX seconds.
+    [[nodiscard]] std::time_t utc_start() const noexcept {
+        return astro::mjd_to_time(m_header.tstart);
     }
 
     /// Read the complete time-series directly into a caller-owned destination
@@ -195,45 +308,6 @@ public:
         return read_samples(count, dest, m_bit_order);
     }
 
-    /// Read next @p nbytes raw payload bytes directly into @p dest.
-    std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest) {
-        if (dest.size() != nbytes) {
-            throw ValidationError(
-                "psrio: destination size does not match requested bytes");
-        }
-        const auto stride = bytes_per_sample();
-        if (nbytes == 0U || stride == 0U || nbytes % stride != 0U) {
-            throw ValidationError("psrio: byte request must be a positive "
-                                  "multiple of the sample stride");
-        }
-        const auto samples_requested = nbytes / stride;
-        if (m_sample + samples_requested > m_header.nsamples) {
-            throw ValidationError(
-                "psrio: byte request extends past readable samples");
-        }
-        const auto raw = mapped_bytes(m_sample * stride, nbytes);
-        std::ranges::copy(raw, dest.begin());
-        m_sample += samples_requested;
-        return nbytes;
-    }
-
-    /// Zero-copy view of the next @p nbytes raw payload bytes.
-    [[nodiscard]] std::span<const std::byte> view_bytes(std::uint64_t nbytes) {
-        const auto stride = bytes_per_sample();
-        if (nbytes == 0U || stride == 0U || nbytes % stride != 0U) {
-            throw ValidationError("psrio: byte request must be a positive "
-                                  "multiple of the sample stride");
-        }
-        const auto samples_requested = nbytes / stride;
-        if (m_sample + samples_requested > m_header.nsamples) {
-            throw ValidationError(
-                "psrio: byte request extends past readable samples");
-        }
-        const auto raw = mapped_bytes(m_sample * stride, nbytes);
-        m_sample += samples_requested;
-        return raw;
-    }
-
     /// Convenience allocating read: read all data into an in-memory TimeSeries
     /// object.
     [[nodiscard]] TimeSeries read_data();
@@ -243,14 +317,6 @@ public:
     [[nodiscard]] std::vector<float> read_samples(std::uint64_t count) {
         std::vector<float> out(count);
         const auto actual = read_samples(count, std::span<float>(out));
-        out.resize(static_cast<std::size_t>(actual));
-        return out;
-    }
-
-    /// Convenience allocating read for raw bytes.
-    [[nodiscard]] std::vector<std::byte> read_bytes(std::uint64_t nbytes) {
-        std::vector<std::byte> out(nbytes);
-        const auto actual = read_bytes(nbytes, std::span<std::byte>(out));
         out.resize(static_cast<std::size_t>(actual));
         return out;
     }
@@ -345,7 +411,8 @@ private:
 
         const auto mapped = m_file.bytes();
         if (m_raw_sigproc.header_bytes > mapped.size()) {
-            throw FormatError(path_str + ": header extends past end of file");
+            throw FormatError(
+                std::format("{}: header extends past end of file", path_str));
         }
         m_payload = mapped.subspan(
             static_cast<std::size_t>(m_raw_sigproc.header_bytes));
@@ -363,14 +430,47 @@ private:
         }
     }
 
-    [[nodiscard]] std::uint64_t bytes_per_sample() const {
+    [[nodiscard]] bool is_sub_byte() const noexcept {
+        const int nbits = m_raw_sigproc.nbits;
+        return !m_is_presto && (nbits == 1 || nbits == 2 || nbits == 4);
+    }
+
+    [[nodiscard]] std::uint64_t samples_per_byte() const {
+        return 8U / static_cast<std::uint64_t>(m_raw_sigproc.nbits);
+    }
+
+    [[nodiscard]] std::uint64_t payload_offset(std::uint64_t sample) const {
         if (m_is_presto) {
-            return sizeof(float);
+            return sample * sizeof(float);
         }
-        if (m_raw_sigproc.nbits >= 8) {
-            return static_cast<std::uint64_t>(m_raw_sigproc.nbits) / 8U;
+        if (!is_sub_byte()) {
+            return sample * bytes_per_sample();
         }
-        return 1;
+        return (sample * static_cast<std::uint64_t>(m_raw_sigproc.nbits)) / 8U;
+    }
+
+    [[nodiscard]] std::uint64_t payload_bytes(std::uint64_t count) const {
+        if (!is_sub_byte()) {
+            return count * bytes_per_sample();
+        }
+        return (count * static_cast<std::uint64_t>(m_raw_sigproc.nbits)) / 8U;
+    }
+
+    [[nodiscard]] std::uint64_t block_bytes(std::uint64_t count) const {
+        if (is_sub_byte()) {
+            if (count % samples_per_byte() != 0U) {
+                throw ValidationError(
+                    "psrio: sub-byte time series block read must cover whole "
+                    "bytes");
+            }
+            return payload_bytes(count);
+        }
+        const auto stride = bytes_per_sample();
+        if (count > 0U &&
+            stride > (std::numeric_limits<std::uint64_t>::max() / count)) {
+            throw ValidationError("psrio: requested sample block is too large");
+        }
+        return count * stride;
     }
 
     [[nodiscard]] std::span<const std::byte>

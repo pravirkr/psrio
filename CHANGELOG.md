@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.0] - 2026-10-02
+
+- **Intensity block front**:
+  - `psrio::concepts::BlockReader` and move-only `psrio::BlockSource` for filterbank-like streams.
+  - `read_block` copies packed time samples and may return a short count. `read_bytes` is unchanged and still requires an exact byte count.
+  - `skip` moves the sample cursor forward or backward. `read_samples` unpacks into caller storage.
+  - Metadata getters: `nchans`, `nifs`, `nbits`, `sample_type`, `bytes_per_sample`, `tsamp`, `tstart`, `fch1`, `foff`, `beam`, `spectra_rate`, `utc_start`, and `has_nsamples`.
+  - `MemoryBlock` for an in-memory packed stream. `reverse_channels`, and `astro::mjd_to_time`.
+
+- **GUPPI RAW baseband front** (`psrio::formats::guppi::RawReader`):
+  - Parses 80-byte headers, DIRECTIO padding, and payload bytes. It does not model `BlockReader`.
+
+- **Optional readers** (off unless the matching CMake option is on; neither is included by `psrio.hpp`):
+  - FBH5 via `PSRIO_WITH_HDF5` and `psrio::fbh5`.
+  - PSRDADA via `PSRIO_WITH_PSRDADA` and `psrio::psrdada`. `RingReader` streams one intensity observation from a ring.
+
 ## [0.1.0] - 2026-10-01
 
 ### Added

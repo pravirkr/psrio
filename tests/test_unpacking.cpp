@@ -1,5 +1,5 @@
 #include "psrio/detail/endian.hpp"
-#include "psrio/detail/unpack.hpp"
+#include "psrio/detail/packed_bits.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
