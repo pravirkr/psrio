@@ -109,6 +109,8 @@ struct Header {
         return 0.5 * (ftop() + fbottom());
     }
 
+    [[nodiscard]] double center_frequency() const noexcept { return fcenter(); }
+
     [[nodiscard]] std::string basename() const {
         return std::filesystem::path(filename).stem().string();
     }

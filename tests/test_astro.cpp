@@ -102,6 +102,11 @@ TEST_CASE("deg_to_dms round-trip", "[astro]") {
 }
 
 TEST_CASE("MJD to Gregorian calendar date", "[astro]") {
+    REQUIRE(psrio::astro::mjd_to_time(40587.0) == 0);
+    REQUIRE(psrio::astro::mjd_to_time(40587.5) == 43200);
+    REQUIRE(psrio::astro::mjd_to_time(58000.0) == 1504483200);
+    REQUIRE(psrio::astro::mjd_to_time(58000.0 + (1.5 / 86400.0)) == 1504483201);
+
     REQUIRE(psrio::astro::mjd_to_gregorian(50000) == "1995-10-10");
     REQUIRE(psrio::astro::mjd_to_gregorian(59000) == "2020-05-31");
     REQUIRE(psrio::astro::mjd_to_gregorian(59000.75) == "2020-05-31");

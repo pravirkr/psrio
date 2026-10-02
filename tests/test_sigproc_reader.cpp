@@ -1,6 +1,6 @@
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
-#include "psrio/detail/unpack.hpp"
+#include "psrio/detail/packed_bits.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/formats/sigproc/reader.hpp"
 #include "sigproc_bytes.hpp"

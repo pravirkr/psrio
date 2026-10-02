@@ -1,26 +1,18 @@
 #pragma once
 
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
+#include "psrio/detail/exceptions.hpp"
 
+#include <algorithm>
 #include <array>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <span>
 #include <stdexcept>
-
-namespace psrio {
-
-/// Bit packing order for sub-byte samples (1-bit, 2-bit, 4-bit) within each
-/// byte.
-enum class BitOrder : std::uint8_t {
-    kLsbFirst, /// Least significant bit / nibble first (DSPSR convention)
-    kMsbFirst, /// Most significant bit / nibble first (PRESTO / sigpyproc3
-               /// convention)
-};
-
-} // namespace psrio
 
 namespace psrio::detail {
 
@@ -331,6 +323,216 @@ inline void unpack_32le(std::span<const std::byte> packed,
     for (std::size_t index = 0; index < output.size(); ++index) {
         output[index] = load_little_endian<float>(packed.data() + (index * 4U));
     }
+}
+
+namespace packed_detail {
+
+/// Reverse 8 individual bits inside a single byte.
+[[nodiscard]] constexpr std::uint8_t reverse_bits(std::uint8_t value) noexcept {
+    value = static_cast<std::uint8_t>(((value & 0xF0U) >> 4U) |
+                                      ((value & 0x0FU) << 4U));
+    value = static_cast<std::uint8_t>(((value & 0xCCU) >> 2U) |
+                                      ((value & 0x33U) << 2U));
+    value = static_cast<std::uint8_t>(((value & 0xAAU) >> 1U) |
+                                      ((value & 0x55U) << 1U));
+    return value;
+}
+
+/// In-byte permutation for 2-bit rows (4 channels/byte). It reverses the four
+/// 2-bit fields: ch0<->ch3, ch1<->ch2.
+[[nodiscard]] constexpr std::uint8_t
+reverse_bit_pairs(std::uint8_t value) noexcept {
+    return static_cast<std::uint8_t>(
+        ((value & 0x03U) << 6U) | ((value & 0x0CU) << 2U) |
+        ((value & 0x30U) >> 2U) | ((value & 0xC0U) >> 6U));
+}
+
+/// In-byte permutation for 4-bit rows (2 channels/byte). It swaps the two 4-bit
+/// nibbles: ch0<->ch1.
+[[nodiscard]] constexpr std::uint8_t swap_nibbles(std::uint8_t value) noexcept {
+    return static_cast<std::uint8_t>(((value & 0x0FU) << 4U) |
+                                     ((value & 0xF0U) >> 4U));
+}
+
+} // namespace packed_detail
+
+inline void reverse_channels_impl(std::span<std::byte> gulp,
+                                  std::uint64_t nsamps,
+                                  std::uint64_t nchans,
+                                  int nbits) {
+    if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 && nbits != 16 &&
+        nbits != 32) {
+        throw ValidationError(
+            "psrio: channel reversal supports 1, 2, 4, 8, "
+            "16, and 32-bit samples");
+    }
+    if (nchans == 0U || nsamps == 0U) {
+        throw ValidationError(
+            "psrio: channel reversal needs at least one sample and channel");
+    }
+    const auto width = static_cast<std::uint64_t>(nbits);
+    if (nchans > std::numeric_limits<std::uint64_t>::max() / width) {
+        throw ValidationError(
+            "psrio: channel reversal block is too large");
+    }
+    if ((nchans * width) % 8U != 0U) {
+        throw ValidationError(
+            "psrio: nchans * nbits must be a whole number of bytes");
+    }
+    const auto row_bytes = (nchans * width) / 8U;
+    if (row_bytes > std::numeric_limits<std::uint64_t>::max() / nsamps) {
+        throw ValidationError(
+            "psrio: channel reversal block is too large");
+    }
+    const auto need = nsamps * row_bytes;
+    if (gulp.size() < need) {
+        throw ValidationError(
+            "psrio: channel reversal buffer is smaller than the block");
+    }
+
+    auto* bytes = reinterpret_cast<std::uint8_t*>(gulp.data());
+
+    if (nbits == 16) {
+        for (std::uint64_t sample = 0; sample < nsamps; ++sample) {
+            auto* row =
+                reinterpret_cast<std::uint16_t*>(bytes + (sample * row_bytes));
+            std::reverse(row, row + nchans);
+        }
+        return;
+    }
+
+    if (nbits == 32) {
+        for (std::uint64_t sample = 0; sample < nsamps; ++sample) {
+            auto* row =
+                reinterpret_cast<std::uint32_t*>(bytes + (sample * row_bytes));
+            std::reverse(row, row + nchans);
+        }
+        return;
+    }
+
+    for (std::uint64_t sample = 0; sample < nsamps; ++sample) {
+        std::uint8_t* row = bytes + (sample * row_bytes);
+        for (std::uint64_t index = 0; index < row_bytes / 2U; ++index) {
+            const auto other        = row_bytes - (1U + index);
+            std::uint8_t this_byte  = row[index];
+            std::uint8_t other_byte = row[other];
+            if (nbits == 1) {
+                this_byte  = packed_detail::reverse_bits(this_byte);
+                other_byte = packed_detail::reverse_bits(other_byte);
+            } else if (nbits == 2) {
+                this_byte  = packed_detail::reverse_bit_pairs(this_byte);
+                other_byte = packed_detail::reverse_bit_pairs(other_byte);
+            } else if (nbits == 4) {
+                this_byte  = packed_detail::swap_nibbles(this_byte);
+                other_byte = packed_detail::swap_nibbles(other_byte);
+            }
+            row[other] = this_byte;
+            row[index] = other_byte;
+        }
+        // Handle middle byte on odd-length sub-byte rows.
+        if (row_bytes % 2U != 0U) {
+            const auto mid = row_bytes / 2U;
+            if (nbits == 1) {
+                row[mid] = packed_detail::reverse_bits(row[mid]);
+            } else if (nbits == 2) {
+                row[mid] = packed_detail::reverse_bit_pairs(row[mid]);
+            } else if (nbits == 4) {
+                row[mid] = packed_detail::swap_nibbles(row[mid]);
+            }
+        }
+    }
+}
+
+inline void write_sample_impl(std::span<std::byte> data,
+                              std::uint64_t stride,
+                              std::uint64_t samps,
+                              std::uint64_t chans,
+                              SampleType type,
+                              float value,
+                              BitOrder bit_order) {
+    const auto sample_index = (samps * stride) + chans;
+
+    if (type == SampleType::kFloat32) {
+        const auto byte_offset = sample_index * sizeof(float);
+        if (byte_offset + sizeof(float) > data.size()) {
+            throw ValidationError(
+                "psrio: write_sample offset out of range");
+        }
+        std::memcpy(data.data() + byte_offset, &value, sizeof(float));
+        return;
+    }
+
+    if (type == SampleType::kUInt32) {
+        const auto byte_offset = sample_index * sizeof(std::uint32_t);
+        if (byte_offset + sizeof(std::uint32_t) > data.size()) {
+            throw ValidationError(
+                "psrio: write_sample offset out of range");
+        }
+        const auto raw = static_cast<std::uint32_t>(std::max(0.0F, value));
+        std::memcpy(data.data() + byte_offset, &raw, sizeof(std::uint32_t));
+        return;
+    }
+
+    if (type == SampleType::kUInt16) {
+        const auto byte_offset = sample_index * sizeof(std::uint16_t);
+        if (byte_offset + sizeof(std::uint16_t) > data.size()) {
+            throw ValidationError(
+                "psrio: write_sample offset out of range");
+        }
+        const auto raw = static_cast<std::uint16_t>(std::clamp(
+            value, 0.0F,
+            static_cast<float>(std::numeric_limits<std::uint16_t>::max())));
+        std::memcpy(data.data() + byte_offset, &raw, sizeof(std::uint16_t));
+        return;
+    }
+
+    if (type == SampleType::kUInt8) {
+        if (sample_index >= data.size()) {
+            throw ValidationError(
+                "psrio: write_sample offset out of range");
+        }
+        const auto raw     = static_cast<std::uint8_t>(std::clamp(
+            value, 0.0F,
+            static_cast<float>(std::numeric_limits<std::uint8_t>::max())));
+        data[sample_index] = static_cast<std::byte>(raw);
+        return;
+    }
+
+    if (type == SampleType::kInt8) {
+        if (sample_index >= data.size()) {
+            throw ValidationError(
+                "psrio: write_sample offset out of range");
+        }
+        const auto raw = static_cast<std::int8_t>(std::clamp(
+            value, static_cast<float>(std::numeric_limits<std::int8_t>::min()),
+            static_cast<float>(std::numeric_limits<std::int8_t>::max())));
+        data[sample_index] =
+            static_cast<std::byte>(static_cast<std::uint8_t>(raw));
+        return;
+    }
+
+    // Sub-byte integers: 1, 2, or 4 bits
+    const int nbits             = bits_of(type);
+    const auto samples_per_byte = 8U / static_cast<std::uint64_t>(nbits);
+    const auto byte_offset      = sample_index / samples_per_byte;
+    const auto sub_index        = sample_index % samples_per_byte;
+
+    if (byte_offset >= data.size()) {
+        throw ValidationError(
+            "psrio: write_sample offset out of range");
+    }
+
+    const auto shift =
+        (bit_order == BitOrder::kLsbFirst)
+            ? (sub_index * static_cast<std::uint64_t>(nbits))
+            : (8U - ((sub_index + 1U) * static_cast<std::uint64_t>(nbits)));
+    const auto mask = static_cast<std::uint8_t>((1U << nbits) - 1U);
+    const auto raw  = static_cast<std::uint8_t>(std::max(0.0F, value)) & mask;
+
+    auto current      = std::to_integer<std::uint8_t>(data[byte_offset]);
+    current           = static_cast<std::uint8_t>(current & ~(mask << shift));
+    current           = static_cast<std::uint8_t>(current | (raw << shift));
+    data[byte_offset] = static_cast<std::byte>(current);
 }
 
 } // namespace psrio::detail

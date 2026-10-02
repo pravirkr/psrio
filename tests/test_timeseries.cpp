@@ -175,11 +175,6 @@ TEST_CASE(
     REQUIRE(count == 131072U);
     REQUIRE_THAT(caller_buffer[0], WithinAbs(444259.0F, 1e-2F));
     REQUIRE_THAT(caller_buffer[4], WithinAbs(446026.0F, 1e-2F));
-
-    // Zero copy view of payload
-    reader.rewind();
-    const auto view = reader.view_bytes(sizeof(float) * 2);
-    REQUIRE(view.size() == 8U);
 }
 
 TEST_CASE("TimeSeries to_tim and to_dat round-trips correctly",
@@ -204,7 +199,7 @@ TEST_CASE("TimeSeries to_tim and to_dat round-trips correctly",
     // 1. Round-trip .tim
     const auto tim_tmp =
         std::filesystem::temp_directory_path() / "psrio_test_roundtrip.tim";
-    ts.to_tim(tim_tmp);
+    REQUIRE(!ts.to_tim(tim_tmp).empty());
     REQUIRE(std::filesystem::exists(tim_tmp));
 
     const auto ts_tim_back = psrio::TimeSeries::from_tim(tim_tmp);
@@ -218,7 +213,7 @@ TEST_CASE("TimeSeries to_tim and to_dat round-trips correctly",
     // 2. Round-trip PRESTO .dat / .inf
     const auto presto_base =
         std::filesystem::temp_directory_path() / "psrio_test_roundtrip_presto";
-    ts.to_dat(presto_base);
+    REQUIRE(!ts.to_dat(presto_base).empty());
     const auto dat_tmp = presto_base.string() + ".dat";
     const auto inf_tmp = presto_base.string() + ".inf";
     REQUIRE(std::filesystem::exists(dat_tmp));

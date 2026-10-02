@@ -35,9 +35,7 @@ public:
     TimeSeriesReader& operator=(TimeSeriesReader&&) noexcept = default;
     ~TimeSeriesReader()                                      = default;
 
-    [[nodiscard]] const Header& header() const noexcept {
-        return m_header;
-    }
+    [[nodiscard]] const Header& header() const noexcept { return m_header; }
 
     /// Sample index of the next read.
     [[nodiscard]] std::uint64_t tell() const noexcept { return m_sample; }

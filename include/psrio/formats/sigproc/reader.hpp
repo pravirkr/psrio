@@ -1,14 +1,18 @@
 #pragma once
 
+#include "psrio/astro.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
-#include "psrio/detail/unpack.hpp"
+#include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/skip.hpp"
 #include "psrio/formats/sigproc/header.hpp"
+#include "psrio/packed.hpp"
 
 #include <algorithm>
 #include <concepts>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <format>
 #include <limits>
@@ -55,6 +59,128 @@ public:
     [[nodiscard]] std::uint64_t tell() const noexcept { return m_sample; }
 
     void rewind() noexcept { m_sample = 0; }
+
+    /// Number of frequency channels.
+    [[nodiscard]] std::uint64_t nchans() const noexcept {
+        return static_cast<std::uint64_t>(m_header.nchans);
+    }
+
+    /// Number of IFs stored in each time sample.
+    [[nodiscard]] std::uint64_t nifs() const noexcept {
+        return static_cast<std::uint64_t>(m_header.nifs);
+    }
+
+    /// Bits per on-disk sample.
+    [[nodiscard]] int nbits() const noexcept { return m_header.nbits; }
+
+    /// On-disk sample type. 32-bit SIGPROC samples are float.
+    [[nodiscard]] SampleType sample_type() const {
+        return sample_type_from_nbits(m_header.nbits,
+                                      m_header.samples_are_signed());
+    }
+
+    /// Bytes in one time sample (`nifs * nchans * nbits / 8`).
+    [[nodiscard]] std::uint64_t bytes_per_sample() const {
+        return m_header.bytes_per_sample();
+    }
+
+    /// Complete time samples a read can return.
+    [[nodiscard]] std::uint64_t nsamples() const { return m_header.nsamples(); }
+
+    /// True. A filterbank file has a known length after the header is parsed.
+    static bool has_nsamples() noexcept { return true; }
+
+    /// Sample interval in seconds.
+    [[nodiscard]] double tsamp() const noexcept {
+        return m_header.tsamp.value_or(0.0);
+    }
+
+    /// MJD of the first sample.
+    [[nodiscard]] double tstart() const noexcept {
+        return m_header.tstart.value_or(0.0);
+    }
+
+    /// Centre frequency of channel 0, in MHz.
+    [[nodiscard]] double fch1() const noexcept {
+        return m_header.fch1.value_or(0.0);
+    }
+
+    /// Signed channel spacing, in MHz.
+    [[nodiscard]] double foff() const noexcept {
+        return m_header.foff.value_or(0.0);
+    }
+
+    /// Beam index from the header, or 0 when `ibeam` is absent.
+    [[nodiscard]] int beam() const noexcept {
+        return static_cast<int>(m_header.ibeam.value_or(0));
+    }
+
+    /// Source name from header, or "Unknown".
+    [[nodiscard]] std::string_view source_name() const noexcept {
+        return m_header.source_name.has_value()
+                   ? std::string_view(*m_header.source_name)
+                   : std::string_view("Unknown");
+    }
+
+    /// Telescope name derived from telescope_id, or "Unknown".
+    [[nodiscard]] std::string_view telescope() const noexcept {
+        return m_header.telescope_name();
+    }
+
+    /// Right ascension packed sexagesimal (HHMMSS.ss), or 0.0.
+    [[nodiscard]] double raj() const noexcept {
+        return m_header.src_raj.value_or(0.0);
+    }
+
+    /// Declination packed sexagesimal (+-DDMMSS.ss), or 0.0.
+    [[nodiscard]] double dej() const noexcept {
+        return m_header.src_dej.value_or(0.0);
+    }
+
+    /// Total observing bandwidth across all channels, in MHz.
+    [[nodiscard]] double bandwidth() const noexcept {
+        return std::abs(foff()) * static_cast<double>(nchans());
+    }
+
+    /// Centre frequency of the full band, in MHz.
+    [[nodiscard]] double center_frequency() const noexcept {
+        return fch1() + (foff() * (static_cast<double>(nchans()) - 1.0) / 2.0);
+    }
+
+    /// Spectra per second, or 0 when `tsamp` is not positive.
+    [[nodiscard]] double spectra_rate() const noexcept {
+        const double interval = tsamp();
+        return interval > 0.0 ? 1.0 / interval : 0.0;
+    }
+
+    /// UTC of `tstart`, as POSIX seconds.
+    [[nodiscard]] std::time_t utc_start() const noexcept {
+        return astro::mjd_to_time(tstart());
+    }
+
+    /// Enable or disable automatic channel reversal (fswap) on read_block.
+    void set_fswap(bool enable) noexcept { m_apply_fswap = enable; }
+    [[nodiscard]] bool fswap_enabled() const noexcept { return m_apply_fswap; }
+
+    /// Move the cursor by @p delta time samples. Negative moves backward.
+    /// @throws ValidationError if the landing index is outside
+    ///         `[0, nsamples()]`.
+    void skip(std::int64_t delta);
+
+    /// Copy up to @p count packed time samples into @p dest.
+    ///
+    /// @p dest must hold at least `count * bytes_per_sample()` bytes. The copy
+    /// is raw file order (or channel-reversed if fswap is enabled). Returns
+    /// the number of time samples copied, which is short at the end of the
+    /// file and zero when the cursor is already there.
+    /// @throws ValidationError if @p dest is smaller than the requested block.
+    std::uint64_t read_block(std::uint64_t count, std::span<std::byte> dest);
+
+    /// Zero-copy view of the next @p count time samples.
+    [[nodiscard]] std::span<const std::byte> view_block(std::uint64_t count);
+
+    /// Convenience allocating read: copy next @p count packed time samples.
+    [[nodiscard]] std::vector<std::byte> read_block(std::uint64_t count);
 
     /// Move the cursor to @p sample. @p sample may equal nsamples().
     /// @throws ValidationError if @p sample is greater than nsamples().
@@ -161,6 +287,7 @@ private:
     std::span<const std::byte> m_payload;
     std::uint64_t m_sample{0};
     BitOrder m_bit_order{BitOrder::kLsbFirst};
+    bool m_apply_fswap{false};
 };
 
 inline FilterbankReader::FilterbankReader(const std::filesystem::path& path,
@@ -178,12 +305,13 @@ inline FilterbankReader::FilterbankReader(const std::filesystem::path& path,
     try {
         m_header.validate();
     } catch (const ValidationError& ex) {
-        throw ValidationError(path_string + ": " + ex.what());
+        throw ValidationError(std::format("{}: {}", path_string, ex.what()));
     }
 
     const auto mapped = m_file.bytes();
     if (m_header.header_bytes > mapped.size()) {
-        throw FormatError(path_string + ": header extends past end of file");
+        throw FormatError(
+            std::format("{}: header extends past end of file", path_string));
     }
     m_payload = mapped.subspan(static_cast<std::size_t>(m_header.header_bytes));
 }
@@ -193,6 +321,70 @@ inline void FilterbankReader::seek(std::uint64_t sample) {
         throw ValidationError("psrio: seek is past the readable samples");
     }
     m_sample = sample;
+}
+
+inline void FilterbankReader::skip(std::int64_t delta) {
+    m_sample =
+        ::psrio::detail::apply_skip(m_sample, delta, m_header.nsamples());
+}
+
+inline std::uint64_t FilterbankReader::read_block(std::uint64_t count,
+                                                  std::span<std::byte> dest) {
+    const auto stride = m_header.bytes_per_sample();
+    if (count > 0U &&
+        stride > (std::numeric_limits<std::uint64_t>::max() / count)) {
+        throw ValidationError("psrio: requested sample block is too large");
+    }
+    const auto bytes_needed = count * stride;
+    if (dest.size() < bytes_needed) {
+        throw ValidationError(std::format(
+            "psrio: destination has {} bytes but the block needs {}",
+            dest.size(), bytes_needed));
+    }
+    if (m_sample > m_header.nsamples()) {
+        throw ValidationError(
+            "psrio: reader cursor is past the readable samples");
+    }
+    const auto to_read = std::min(count, m_header.nsamples() - m_sample);
+    if (to_read == 0U) {
+        return 0;
+    }
+    const auto nbytes = to_read * stride;
+    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
+    std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(nbytes));
+    if (m_apply_fswap && to_read > 0U) {
+        ::psrio::reverse_channels(dest.first(static_cast<std::size_t>(nbytes)),
+                                  to_read, nchans(), nbits());
+    }
+    m_sample += to_read;
+    return to_read;
+}
+
+inline std::span<const std::byte>
+FilterbankReader::view_block(std::uint64_t count) {
+    const auto stride = m_header.bytes_per_sample();
+    if (count > 0U &&
+        stride > (std::numeric_limits<std::uint64_t>::max() / count)) {
+        throw ValidationError("psrio: requested sample block is too large");
+    }
+    if (m_sample > m_header.nsamples() ||
+        count > m_header.nsamples() - m_sample) {
+        throw ValidationError(
+            "psrio: view_block extends past readable samples");
+    }
+    const auto nbytes = count * stride;
+    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
+    m_sample += count;
+    return raw;
+}
+
+inline std::vector<std::byte>
+FilterbankReader::read_block(std::uint64_t count) {
+    const auto stride = m_header.bytes_per_sample();
+    std::vector<std::byte> out(static_cast<std::size_t>(count * stride));
+    const auto actual = read_block(count, std::span<std::byte>(out));
+    out.resize(static_cast<std::size_t>(actual * stride));
+    return out;
 }
 
 inline std::uint64_t FilterbankReader::values_per_sample() const {

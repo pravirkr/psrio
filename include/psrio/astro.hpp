@@ -3,6 +3,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <ctime>
 #include <format>
 #include <numbers>
 #include <stdexcept>
@@ -275,6 +276,18 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
 /// Convert double MJD (fractional day) to Gregorian calendar date "YYYY-MM-DD".
 [[nodiscard]] inline std::string mjd_to_gregorian(double mjd) {
     return mjd_to_gregorian(static_cast<int>(std::floor(mjd)));
+}
+
+/// Convert a Modified Julian Date to POSIX UTC seconds.
+///
+/// The Unix epoch is MJD 40587. Fractional seconds truncate toward zero after
+/// a 1 microsecond rounding margin. The conversion does not use the local
+/// time zone and does not insert leap seconds.
+[[nodiscard]] inline std::time_t mjd_to_time(double mjd) noexcept {
+    constexpr double kUnixEpochMjd = 40587.0;
+    constexpr double kSecondsInDay = 86400.0;
+    return static_cast<std::time_t>(
+        std::floor(((mjd - kUnixEpochMjd) * kSecondsInDay) + 1e-6));
 }
 
 /// Format a duration in seconds into a human-readable string (e.g. "45.0

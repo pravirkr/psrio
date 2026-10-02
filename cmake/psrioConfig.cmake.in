@@ -1,5 +1,10 @@
 @PACKAGE_INIT@
 
+include(CMakeFindDependencyMacro)
+if(@PSRIO_WITH_HDF5@)
+  find_dependency(HDF5 REQUIRED COMPONENTS C)
+endif()
+
 include("${CMAKE_CURRENT_LIST_DIR}/psrioTargets.cmake")
 
 check_required_components(psrio)

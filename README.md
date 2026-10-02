@@ -2,14 +2,15 @@
 
 A high-performance, header-only C++20 library for reading, parsing, and streaming time-domain radio astronomy data (pulsar baseband, filterbank, and single-channel time series).
 
-`psrio` provides zero-overhead, type-safe ingestion of observational data formats (SIGPROC `.fil` / `.tim`, PRESTO `.dat` / `.inf`, and GUPPI headers).
+`psrio` provides zero-overhead, type-safe ingestion of observational data formats (SIGPROC `.fil` / `.tim`, PRESTO `.dat` / `.inf`, and GUPPI RAW). Intensity formats share one block-streaming front. GUPPI stays on its own baseband front.
 
 ## Key Features
 
 - **Pure Header-Only C++20**: Zero compiled library binaries. Simply link `psrio::psrio` and `#include <psrio/psrio.hpp>`.
 - **Zero-Copy & Zero-Allocation**: Direct memory-mapped access (`mmap`) to file payloads. Readers unpack directly into caller-managed buffers (`std::span<float>`, pinned CUDA host memory, etc.) without intermediate heap allocations.
 - **Unified Metadata Representation**: A single flat, idiomatic [`psrio::Header`](include/psrio/header.hpp) struct.
-- **Zero Third-Party Dependencies by Default**: Base formats require only the ISO C++ standard library and POSIX system APIs (`<sys/mman.h>`).
+- **Zero Third-Party Dependencies by Default**: Base formats require only the ISO C++ standard library and POSIX system APIs (`<sys/mman.h>`). FBH5 and PSRDADA are optional and stay out of `psrio.hpp` unless `PSRIO_WITH_HDF5` or `PSRIO_WITH_PSRDADA` is turned on.
+- **Block streaming**: `psrio::concepts::BlockReader` and the move-only `psrio::BlockSource` read packed bytes (`read_block`) or unpacked floats (`read_samples`), and move the sample cursor with `seek`, `rewind`, and `skip`.
 
 ---
 
@@ -33,7 +34,7 @@ Add `psrio` directly from GitHub using [CPM.cmake](https://github.com/cpm-cmake/
 CPMAddPackage(
   NAME psrio
   GITHUB_REPOSITORY pravirkr/psrio
-  GIT_TAG v0.1.0  # Or a specific branch/commit
+  GIT_TAG v0.2.0  # Or a specific branch/commit
 )
 
 target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
@@ -49,7 +50,7 @@ include(FetchContent)
 FetchContent_Declare(
   psrio
   GIT_REPOSITORY https://github.com/pravirkr/psrio.git
-  GIT_TAG v0.1.0  # Or a specific branch/commit
+  GIT_TAG v0.2.0  # Or a specific branch/commit
 )
 
 FetchContent_MakeAvailable(psrio)
@@ -176,6 +177,56 @@ int main() {
         // spectra contains read * hdr.nchans unpacked floats
     }
 
+    return 0;
+}
+```
+
+### 4. One intensity front (`BlockSource`)
+
+`BlockSource` erases any reader that models `concepts::BlockReader` (filterbank, time series, or an in-memory block). `read_block` copies packed bytes. `skip` moves by time samples, including backward.
+
+```cpp
+#include <psrio/psrio.hpp>
+
+#include <vector>
+
+int main() {
+    psrio::MemoryInfo info;
+    info.nchans = 4;
+    info.nbits  = 8;
+    info.tsamp  = 64.0e-6;
+    info.fch1   = 1400.0;
+    info.foff   = -0.5;
+
+    std::vector<std::byte> packed(info.nchans * 2);
+    psrio::BlockSource source(
+        psrio::MemoryBlock(info, std::move(packed)));
+
+    std::vector<std::byte> block(source.bytes_per_sample() * 2);
+    const auto nread = source.read_block(2, block);
+    if (nread > 0) {
+        source.skip(-1); // one sample back, still inside this block
+    }
+    return 0;
+}
+```
+
+### 5. GUPPI RAW (baseband, not a block source)
+
+GUPPI complex voltages do not model `BlockReader`. Read a header, then a payload span:
+
+```cpp
+#include <psrio/formats/guppi.hpp>
+
+#include <iostream>
+
+int main() {
+    psrio::formats::guppi::RawReader reader("observation.raw");
+    const auto header = reader.read_header();
+    const auto bytes  = header.get<std::int64_t>("BLOCSIZE");
+    const auto payload =
+        reader.view_bytes(static_cast<std::uint64_t>(bytes));
+    std::cout << "payload bytes: " << payload.size() << "\n";
     return 0;
 }
 ```

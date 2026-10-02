@@ -83,6 +83,6 @@ compile_commands.json
 # Developer files
 AGENTS.md
 tmp_files/
-build2/
+build*/
 
 # End of https://www.toptal.com/developers/gitignore/api/c++,c

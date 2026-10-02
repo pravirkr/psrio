@@ -11,6 +11,7 @@ Checks: >
   -cppcoreguidelines-avoid-do-while,
   -cppcoreguidelines-init-variables,
   -cppcoreguidelines-non-private-member-variables-in-classes,
+  -cppcoreguidelines-owning-memory,
   -cppcoreguidelines-prefer-member-initializer,
   -cppcoreguidelines-pro-bounds-avoid-unchecked-container-access,
   -cppcoreguidelines-pro-bounds-pointer-arithmetic,
