@@ -5,8 +5,8 @@
 
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
-#include "psrio/detail/skip.hpp"
 #include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/skip.hpp"
 
 #include <algorithm>
 #include <array>
@@ -239,10 +239,12 @@ public:
     std::uint64_t read_samples(std::uint64_t count, std::span<float> dest);
 
     /// Unpack next @p count time samples into uint8_t @p dest.
-    std::uint64_t read_samples(std::uint64_t count, std::span<std::uint8_t> dest);
+    std::uint64_t read_samples(std::uint64_t count,
+                               std::span<std::uint8_t> dest);
 
     /// Unpack next @p count time samples into uint16_t @p dest.
-    std::uint64_t read_samples(std::uint64_t count, std::span<std::uint16_t> dest);
+    std::uint64_t read_samples(std::uint64_t count,
+                               std::span<std::uint16_t> dest);
 
     /// Read raw packed bytes directly into caller storage.
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
@@ -250,7 +252,8 @@ public:
     /// Convenience allocating read: copy next @p count packed time samples.
     [[nodiscard]] std::vector<std::byte> read_block(std::uint64_t count);
 
-    /// Convenience allocating read: unpack next @p count time samples into a new vector.
+    /// Convenience allocating read: unpack next @p count time samples into a
+    /// new vector.
     template <typename T = float>
     [[nodiscard]] std::vector<T> read_samples(std::uint64_t count);
 
@@ -362,11 +365,9 @@ private:
     const std::byte* bytes_at_cursor(std::uint64_t& available) const;
     bool holds(std::uint64_t absolute) const noexcept;
     template <typename T>
-    void unpack_to(std::span<const std::byte> packed,
-                   std::span<T> dest) const;
+    void unpack_to(std::span<const std::byte> packed, std::span<T> dest) const;
     template <typename T>
-    std::uint64_t read_samples_impl(std::uint64_t count,
-                                    std::span<T> dest);
+    std::uint64_t read_samples_impl(std::uint64_t count, std::span<T> dest);
     void copy_held(std::uint64_t begin,
                    std::uint64_t end,
                    std::vector<std::byte>& out) const;
@@ -786,8 +787,8 @@ inline std::uint64_t RingReader::read_block(std::uint64_t count,
     }
     const auto samples = got / m_stride;
     if (m_apply_fswap && samples > 0U) {
-        reverse_channels(dest.first(static_cast<std::size_t>(got)),
-                         samples, m_nchans, m_nbits);
+        reverse_channels(dest.first(static_cast<std::size_t>(got)), samples,
+                         m_nchans, m_nbits);
     }
     return samples;
 }
@@ -816,14 +817,16 @@ inline void RingReader::unpack_to(std::span<const std::byte> packed,
     const auto output = dest.first(values);
     if (m_nbits <= 4) {
         if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError("psrio: uint16_t output requires 16-bit samples");
+            throw ValidationError(
+                "psrio: uint16_t output requires 16-bit samples");
         } else {
             ::psrio::detail::unpack_sub_byte(packed, output, m_nbits,
                                              BitOrder::kLsbFirst);
         }
     } else if (m_nbits == 8) {
         if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError("psrio: uint16_t output requires 16-bit samples");
+            throw ValidationError(
+                "psrio: uint16_t output requires 16-bit samples");
         } else {
             ::psrio::detail::unpack_8bit(packed, output, false);
         }
@@ -939,10 +942,10 @@ inline std::uint64_t RingReader::read_bytes(std::uint64_t nbytes,
         return 0U;
     }
     if (m_stride == 0U || nbytes % m_stride != 0U) {
-        throw ValidationError(
-            "psrio: byte request must be a positive multiple of the sample stride");
+        throw ValidationError("psrio: byte request must be a positive multiple "
+                              "of the sample stride");
     }
-    const auto samples = nbytes / m_stride;
+    const auto samples    = nbytes / m_stride;
     const auto read_count = read_block(samples, dest);
     return read_count * m_stride;
 }

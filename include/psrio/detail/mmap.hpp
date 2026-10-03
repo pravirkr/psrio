@@ -33,7 +33,7 @@ public:
     /// @throws psrio::IoError if the path cannot be opened, inspected, or
     /// mapped.
     explicit MappedFile(const std::filesystem::path& path) {
-        FileHandle file{std::fopen(path.c_str(), "rb")};
+        const FileHandle file{std::fopen(path.c_str(), "rb")};
         if (!file) {
             error_check::throw_errno_io("fopen", path);
         }

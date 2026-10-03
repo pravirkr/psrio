@@ -28,8 +28,8 @@ inline void require_count(std::size_t actual, std::size_t expected) {
 template <std::size_t NBits> struct LookupTable {
     static constexpr std::size_t kSize     = 256;
     static constexpr std::size_t kElements = 8 / NBits;
-    std::array<std::array<std::uint8_t, kElements>, kSize> lsb{};
-    std::array<std::array<std::uint8_t, kElements>, kSize> msb{};
+    alignas(64) std::array<std::array<std::uint8_t, kElements>, kSize> lsb{};
+    alignas(64) std::array<std::array<std::uint8_t, kElements>, kSize> msb{};
 
     constexpr LookupTable() noexcept {
         const auto mask = static_cast<std::uint8_t>((1U << NBits) - 1U);
@@ -262,6 +262,125 @@ inline void pack_sub_byte(std::span<const std::uint8_t> unpacked,
     }
 }
 
+/// Pack unpacked 1-, 2-, or 4-bit samples in place within @p buffer.
+/// Returns the subspan containing the packed bytes.
+template <typename ByteT>
+    requires std::same_as<ByteT, std::uint8_t> || std::same_as<ByteT, std::byte>
+inline std::span<ByteT> pack_sub_byte_inplace(
+    std::span<ByteT> buffer, int nbits, BitOrder order = BitOrder::kLsbFirst) {
+    if (nbits != 1 && nbits != 2 && nbits != 4) {
+        throw ValidationError("psrio: sub-byte pack nbits must be 1, 2, or 4");
+    }
+    const auto samples_per_byte = static_cast<std::size_t>(8 / nbits);
+    if (buffer.size() % samples_per_byte != 0U) {
+        throw ValidationError("psrio: buffer size must be a multiple of "
+                              "samples per byte for in-place pack");
+    }
+    const auto packed_bytes = buffer.size() / samples_per_byte;
+    auto* ptr               = reinterpret_cast<std::uint8_t*>(buffer.data());
+
+    if (nbits == 1) {
+        for (std::size_t index = 0; index < packed_bytes; ++index) {
+            const auto pos = index * 8U;
+            std::uint8_t byte_val{0};
+            if (order == BitOrder::kMsbFirst) {
+                byte_val = static_cast<std::uint8_t>(
+                    ((ptr[pos + 0] & 1U) << 7U) | ((ptr[pos + 1] & 1U) << 6U) |
+                    ((ptr[pos + 2] & 1U) << 5U) | ((ptr[pos + 3] & 1U) << 4U) |
+                    ((ptr[pos + 4] & 1U) << 3U) | ((ptr[pos + 5] & 1U) << 2U) |
+                    ((ptr[pos + 6] & 1U) << 1U) | (ptr[pos + 7] & 1U));
+            } else {
+                byte_val = static_cast<std::uint8_t>(
+                    (ptr[pos + 0] & 1U) | ((ptr[pos + 1] & 1U) << 1U) |
+                    ((ptr[pos + 2] & 1U) << 2U) | ((ptr[pos + 3] & 1U) << 3U) |
+                    ((ptr[pos + 4] & 1U) << 4U) | ((ptr[pos + 5] & 1U) << 5U) |
+                    ((ptr[pos + 6] & 1U) << 6U) | ((ptr[pos + 7] & 1U) << 7U));
+            }
+            ptr[index] = byte_val;
+        }
+    } else if (nbits == 2) {
+        for (std::size_t index = 0; index < packed_bytes; ++index) {
+            const auto pos = index * 4U;
+            std::uint8_t byte_val{0};
+            if (order == BitOrder::kMsbFirst) {
+                byte_val = static_cast<std::uint8_t>(
+                    ((ptr[pos + 0] & 3U) << 6U) | ((ptr[pos + 1] & 3U) << 4U) |
+                    ((ptr[pos + 2] & 3U) << 2U) | (ptr[pos + 3] & 3U));
+            } else {
+                byte_val = static_cast<std::uint8_t>(
+                    (ptr[pos + 0] & 3U) | ((ptr[pos + 1] & 3U) << 2U) |
+                    ((ptr[pos + 2] & 3U) << 4U) | ((ptr[pos + 3] & 3U) << 6U));
+            }
+            ptr[index] = byte_val;
+        }
+    } else {
+        for (std::size_t index = 0; index < packed_bytes; ++index) {
+            const auto pos = index * 2U;
+            std::uint8_t byte_val{0};
+            if (order == BitOrder::kMsbFirst) {
+                byte_val = static_cast<std::uint8_t>(
+                    ((ptr[pos + 0] & 0x0FU) << 4U) | (ptr[pos + 1] & 0x0FU));
+            } else {
+                byte_val = static_cast<std::uint8_t>(
+                    (ptr[pos + 0] & 0x0FU) | ((ptr[pos + 1] & 0x0FU) << 4U));
+            }
+            ptr[index] = byte_val;
+        }
+    }
+    return buffer.subspan(0, packed_bytes);
+}
+
+/// Unpack 1-, 2-, or 4-bit samples in place backwards within @p buffer.
+template <typename ByteT>
+    requires std::same_as<ByteT, std::uint8_t> || std::same_as<ByteT, std::byte>
+inline void unpack_sub_byte_inplace(std::span<ByteT> buffer,
+                                    int nbits,
+                                    BitOrder order = BitOrder::kLsbFirst) {
+    if (nbits != 1 && nbits != 2 && nbits != 4) {
+        throw ValidationError(
+            "psrio: sub-byte unpack nbits must be 1, 2, or 4");
+    }
+    const auto samples_per_byte = static_cast<std::size_t>(8 / nbits);
+    if (buffer.size() % samples_per_byte != 0U) {
+        throw ValidationError("psrio: buffer size must be a multiple of "
+                              "samples per byte for in-place unpack");
+    }
+    const auto packed_bytes = buffer.size() / samples_per_byte;
+    auto* ptr               = reinterpret_cast<std::uint8_t*>(buffer.data());
+
+    if (nbits == 1) {
+        const auto& table = (order == BitOrder::kLsbFirst)
+                                ? unpack_detail::kLookup1Bit.lsb
+                                : unpack_detail::kLookup1Bit.msb;
+        for (std::size_t count = packed_bytes; count > 0; --count) {
+            const auto index    = count - 1U;
+            const auto byte_val = ptr[index];
+            const auto pos      = index * 8U;
+            std::memcpy(ptr + pos, table[byte_val].data(), 8);
+        }
+    } else if (nbits == 2) {
+        const auto& table = (order == BitOrder::kLsbFirst)
+                                ? unpack_detail::kLookup2Bit.lsb
+                                : unpack_detail::kLookup2Bit.msb;
+        for (std::size_t count = packed_bytes; count > 0; --count) {
+            const auto index    = count - 1U;
+            const auto byte_val = ptr[index];
+            const auto pos      = index * 4U;
+            std::memcpy(ptr + pos, table[byte_val].data(), 4);
+        }
+    } else {
+        const auto& table = (order == BitOrder::kLsbFirst)
+                                ? unpack_detail::kLookup4Bit.lsb
+                                : unpack_detail::kLookup4Bit.msb;
+        for (std::size_t count = packed_bytes; count > 0; --count) {
+            const auto index    = count - 1U;
+            const auto byte_val = ptr[index];
+            const auto pos      = index * 2U;
+            std::memcpy(ptr + pos, table[byte_val].data(), 2);
+        }
+    }
+}
+
 /// Copy 8-bit samples. When @p signed_samples is true and @p T is float,
 /// each byte is interpreted as int8. uint8 output keeps the raw byte.
 /// @throws std::invalid_argument if the spans differ in size.
@@ -362,9 +481,8 @@ inline void reverse_channels_impl(std::span<std::byte> gulp,
                                   int nbits) {
     if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 && nbits != 16 &&
         nbits != 32) {
-        throw ValidationError(
-            "psrio: channel reversal supports 1, 2, 4, 8, "
-            "16, and 32-bit samples");
+        throw ValidationError("psrio: channel reversal supports 1, 2, 4, 8, "
+                              "16, and 32-bit samples");
     }
     if (nchans == 0U || nsamps == 0U) {
         throw ValidationError(
@@ -372,8 +490,7 @@ inline void reverse_channels_impl(std::span<std::byte> gulp,
     }
     const auto width = static_cast<std::uint64_t>(nbits);
     if (nchans > std::numeric_limits<std::uint64_t>::max() / width) {
-        throw ValidationError(
-            "psrio: channel reversal block is too large");
+        throw ValidationError("psrio: channel reversal block is too large");
     }
     if ((nchans * width) % 8U != 0U) {
         throw ValidationError(
@@ -381,8 +498,7 @@ inline void reverse_channels_impl(std::span<std::byte> gulp,
     }
     const auto row_bytes = (nchans * width) / 8U;
     if (row_bytes > std::numeric_limits<std::uint64_t>::max() / nsamps) {
-        throw ValidationError(
-            "psrio: channel reversal block is too large");
+        throw ValidationError("psrio: channel reversal block is too large");
     }
     const auto need = nsamps * row_bytes;
     if (gulp.size() < need) {
@@ -455,8 +571,7 @@ inline void write_sample_impl(std::span<std::byte> data,
     if (type == SampleType::kFloat32) {
         const auto byte_offset = sample_index * sizeof(float);
         if (byte_offset + sizeof(float) > data.size()) {
-            throw ValidationError(
-                "psrio: write_sample offset out of range");
+            throw ValidationError("psrio: write_sample offset out of range");
         }
         std::memcpy(data.data() + byte_offset, &value, sizeof(float));
         return;
@@ -465,8 +580,7 @@ inline void write_sample_impl(std::span<std::byte> data,
     if (type == SampleType::kUInt32) {
         const auto byte_offset = sample_index * sizeof(std::uint32_t);
         if (byte_offset + sizeof(std::uint32_t) > data.size()) {
-            throw ValidationError(
-                "psrio: write_sample offset out of range");
+            throw ValidationError("psrio: write_sample offset out of range");
         }
         const auto raw = static_cast<std::uint32_t>(std::max(0.0F, value));
         std::memcpy(data.data() + byte_offset, &raw, sizeof(std::uint32_t));
@@ -476,8 +590,7 @@ inline void write_sample_impl(std::span<std::byte> data,
     if (type == SampleType::kUInt16) {
         const auto byte_offset = sample_index * sizeof(std::uint16_t);
         if (byte_offset + sizeof(std::uint16_t) > data.size()) {
-            throw ValidationError(
-                "psrio: write_sample offset out of range");
+            throw ValidationError("psrio: write_sample offset out of range");
         }
         const auto raw = static_cast<std::uint16_t>(std::clamp(
             value, 0.0F,
@@ -486,10 +599,22 @@ inline void write_sample_impl(std::span<std::byte> data,
         return;
     }
 
+    if (type == SampleType::kInt16) {
+        const auto byte_offset = sample_index * sizeof(std::int16_t);
+        if (byte_offset + sizeof(std::int16_t) > data.size()) {
+            throw ValidationError("psrio: write_sample offset out of range");
+        }
+        const auto raw    = static_cast<std::int16_t>(std::clamp(
+            value, static_cast<float>(std::numeric_limits<std::int16_t>::min()),
+            static_cast<float>(std::numeric_limits<std::int16_t>::max())));
+        const auto stored = detail::to_little_endian(raw);
+        std::memcpy(data.data() + byte_offset, &stored, sizeof(stored));
+        return;
+    }
+
     if (type == SampleType::kUInt8) {
         if (sample_index >= data.size()) {
-            throw ValidationError(
-                "psrio: write_sample offset out of range");
+            throw ValidationError("psrio: write_sample offset out of range");
         }
         const auto raw     = static_cast<std::uint8_t>(std::clamp(
             value, 0.0F,
@@ -500,8 +625,7 @@ inline void write_sample_impl(std::span<std::byte> data,
 
     if (type == SampleType::kInt8) {
         if (sample_index >= data.size()) {
-            throw ValidationError(
-                "psrio: write_sample offset out of range");
+            throw ValidationError("psrio: write_sample offset out of range");
         }
         const auto raw = static_cast<std::int8_t>(std::clamp(
             value, static_cast<float>(std::numeric_limits<std::int8_t>::min()),
@@ -518,8 +642,7 @@ inline void write_sample_impl(std::span<std::byte> data,
     const auto sub_index        = sample_index % samples_per_byte;
 
     if (byte_offset >= data.size()) {
-        throw ValidationError(
-            "psrio: write_sample offset out of range");
+        throw ValidationError("psrio: write_sample offset out of range");
     }
 
     const auto shift =

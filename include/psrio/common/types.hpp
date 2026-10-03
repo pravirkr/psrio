@@ -25,6 +25,7 @@ enum class SampleType : std::uint8_t {
     kUInt4,
     kUInt8,
     kInt8,
+    kInt16,
     kUInt16,
     kUInt32,
     kFloat32,
@@ -42,6 +43,7 @@ enum class SampleType : std::uint8_t {
     case SampleType::kUInt8:
     case SampleType::kInt8:
         return 8;
+    case SampleType::kInt16:
     case SampleType::kUInt16:
         return 16;
     case SampleType::kUInt32:
@@ -63,7 +65,8 @@ enum class SampleType : std::uint8_t {
 
 /// True if @p type represents signed numerical values.
 [[nodiscard]] constexpr bool is_signed(SampleType type) noexcept {
-    return type == SampleType::kInt8 || type == SampleType::kFloat32;
+    return type == SampleType::kInt8 || type == SampleType::kInt16 ||
+           type == SampleType::kFloat32;
 }
 
 /// Bit depth of @p type as an integer count (negative for floating-point, e.g.
@@ -114,6 +117,8 @@ sample_type_name(SampleType type) noexcept {
         return "uint8";
     case SampleType::kInt8:
         return "int8";
+    case SampleType::kInt16:
+        return "int16";
     case SampleType::kUInt16:
         return "uint16";
     case SampleType::kUInt32:
