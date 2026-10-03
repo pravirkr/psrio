@@ -11,6 +11,7 @@
 #include <format>
 #include <limits>
 #include <span>
+#include <vector>
 
 /**
  * @file packed.hpp
@@ -19,6 +20,125 @@
  */
 
 namespace psrio {
+
+// -----------------------------------------------------------------------------
+// Digitization and Bit Information
+// -----------------------------------------------------------------------------
+
+/**
+ * @brief Digitization and bit configuration metadata.
+ *
+ * Provides standard SIGPROC and PRESTO bit packing factors, byte item sizes,
+ * and canonical digitization statistics (min, max, mean, sigma, scale)
+ * for 1, 2, 4, 8, 16, and 32-bit representations.
+ */
+class BitsInfo {
+public:
+    constexpr explicit BitsInfo(int nbits) : m_nbits(nbits) {
+        switch (nbits) {
+        case 1:
+            m_itemsize   = sizeof(std::uint8_t);
+            m_digi_sigma = 0.5F;
+            break;
+        case 2:
+            m_itemsize   = sizeof(std::uint8_t);
+            m_digi_sigma = 1.5F;
+            break;
+        case 4:
+            m_itemsize   = sizeof(std::uint8_t);
+            m_digi_sigma = 6.0F;
+            break;
+        case 8:
+            m_itemsize   = sizeof(std::uint8_t);
+            m_digi_sigma = 6.0F;
+            break;
+        case 16:
+            m_itemsize   = sizeof(std::uint16_t);
+            m_digi_sigma = 6.0F;
+            break;
+        case 32:
+            m_itemsize   = sizeof(float);
+            m_digi_sigma = 6.0F;
+            break;
+        default:
+            throw ValidationError("psrio: nbits must be 1, 2, 4, 8, 16, or 32");
+        }
+    }
+
+    [[nodiscard]] constexpr int nbits() const noexcept { return m_nbits; }
+    [[nodiscard]] constexpr int get_nbits() const noexcept { return m_nbits; }
+
+    [[nodiscard]] constexpr std::size_t itemsize() const noexcept {
+        return m_itemsize;
+    }
+    [[nodiscard]] constexpr std::size_t get_itemsize() const noexcept {
+        return m_itemsize;
+    }
+
+    [[nodiscard]] constexpr bool can_pack_unpack() const noexcept {
+        return m_nbits == 1 || m_nbits == 2 || m_nbits == 4;
+    }
+    [[nodiscard]] constexpr bool get_can_pack_unpack() const noexcept {
+        return can_pack_unpack();
+    }
+
+    [[nodiscard]] constexpr std::size_t bit_factor() const noexcept {
+        return can_pack_unpack() ? (8U / static_cast<std::size_t>(m_nbits))
+                                 : 1U;
+    }
+    [[nodiscard]] constexpr std::size_t bitfact() const noexcept {
+        return bit_factor();
+    }
+    [[nodiscard]] constexpr std::size_t get_bitfact() const noexcept {
+        return bit_factor();
+    }
+
+    [[nodiscard]] static constexpr std::uint64_t digi_min() noexcept {
+        return 0U;
+    }
+    [[nodiscard]] static constexpr std::uint64_t get_digi_min() noexcept {
+        return 0U;
+    }
+
+    [[nodiscard]] constexpr std::uint64_t digi_max() const noexcept {
+        if (m_nbits == 32) {
+            return 0xFFFFFFFFULL;
+        }
+        return (1ULL << static_cast<unsigned>(m_nbits)) - 1ULL;
+    }
+    [[nodiscard]] constexpr std::uint64_t get_digi_max() const noexcept {
+        return digi_max();
+    }
+
+    [[nodiscard]] constexpr float digi_mean() const noexcept {
+        return static_cast<float>((1ULL << static_cast<unsigned>(m_nbits - 1)) -
+                                  0.5);
+    }
+    [[nodiscard]] constexpr float get_digi_mean() const noexcept {
+        return digi_mean();
+    }
+
+    [[nodiscard]] constexpr float digi_sigma() const noexcept {
+        return m_digi_sigma;
+    }
+    [[nodiscard]] constexpr float get_digi_sigma() const noexcept {
+        return m_digi_sigma;
+    }
+
+    [[nodiscard]] constexpr float digi_scale() const noexcept {
+        return digi_mean() / m_digi_sigma;
+    }
+    [[nodiscard]] constexpr float get_digi_scale() const noexcept {
+        return digi_scale();
+    }
+
+private:
+    int m_nbits{8};
+    std::size_t m_itemsize{1};
+    float m_digi_sigma{6.0F};
+};
+
+using DigitizationInfo = BitsInfo;
 
 // -----------------------------------------------------------------------------
 // Bulk Unpacking Routines
@@ -31,6 +151,22 @@ inline void unpack_sub_byte(std::span<const std::byte> packed,
                             int nbits,
                             BitOrder order = BitOrder::kLsbFirst) {
     detail::unpack_sub_byte(packed, dest, nbits, order);
+}
+
+/// Convenience allocating overload returning an unpacked std::vector<T>.
+template <typename T = float>
+[[nodiscard]] inline std::vector<T>
+unpack_sub_byte(std::span<const std::byte> packed,
+                int nbits,
+                BitOrder order = BitOrder::kLsbFirst) {
+    if (nbits != 1 && nbits != 2 && nbits != 4) {
+        throw ValidationError(
+            "psrio: sub-byte unpack nbits must be 1, 2, or 4");
+    }
+    const auto samples_per_byte = static_cast<std::size_t>(8 / nbits);
+    std::vector<T> dest(packed.size() * samples_per_byte);
+    detail::unpack_sub_byte(packed, std::span<T>(dest), nbits, order);
+    return dest;
 }
 
 /// Unpack 8-bit integer samples into float, uint8_t, or uint16_t.
@@ -51,6 +187,62 @@ inline void unpack_16le(std::span<const std::byte> packed, std::span<T> dest) {
 inline void unpack_32le(std::span<const std::byte> packed,
                         std::span<float> dest) {
     detail::unpack_32le(packed, dest);
+}
+
+// -----------------------------------------------------------------------------
+// Bulk Packing Routines
+// -----------------------------------------------------------------------------
+
+/// Pack unpacked 1-, 2-, or 4-bit integer samples into packed bytes according
+/// to order.
+inline void pack_sub_byte(std::span<const std::uint8_t> unpacked,
+                          std::span<std::byte> packed,
+                          int nbits,
+                          BitOrder order = BitOrder::kLsbFirst) {
+    detail::pack_sub_byte(unpacked, packed, nbits, order);
+}
+
+/// Convenience allocating overload returning std::vector<std::byte>.
+[[nodiscard]] inline std::vector<std::byte>
+pack_sub_byte(std::span<const std::uint8_t> unpacked,
+              int nbits,
+              BitOrder order = BitOrder::kLsbFirst) {
+    if (nbits != 1 && nbits != 2 && nbits != 4) {
+        throw ValidationError("psrio: sub-byte pack nbits must be 1, 2, or 4");
+    }
+    const auto samples_per_byte = static_cast<std::size_t>(8 / nbits);
+    if (unpacked.size() % samples_per_byte != 0U) {
+        throw ValidationError(
+            "psrio: unpacked size must be a multiple of samples per byte");
+    }
+    std::vector<std::byte> packed(unpacked.size() / samples_per_byte);
+    detail::pack_sub_byte(unpacked, packed, nbits, order);
+    return packed;
+}
+
+// -----------------------------------------------------------------------------
+// In-Place Packing and Unpacking
+// -----------------------------------------------------------------------------
+
+/// Pack unpacked 1, 2, or 4-bit samples in place within @p buffer.
+/// Returns the subspan containing the packed bytes.
+template <typename ByteT>
+    requires std::same_as<ByteT, std::uint8_t> || std::same_as<ByteT, std::byte>
+inline std::span<ByteT> pack_inplace(std::span<ByteT> buffer,
+                                     int nbits,
+                                     BitOrder order = BitOrder::kLsbFirst) {
+    return detail::pack_sub_byte_inplace(buffer, nbits, order);
+}
+
+/// Unpack 1, 2, or 4-bit samples in place within @p buffer.
+/// @p buffer must have total size equal to the expanded unpacked sample count,
+/// with the first `size / (8 / nbits)` bytes containing the packed data.
+template <typename ByteT>
+    requires std::same_as<ByteT, std::uint8_t> || std::same_as<ByteT, std::byte>
+inline void unpack_inplace(std::span<ByteT> buffer,
+                           int nbits,
+                           BitOrder order = BitOrder::kLsbFirst) {
+    detail::unpack_sub_byte_inplace(buffer, nbits, order);
 }
 
 // -----------------------------------------------------------------------------
@@ -138,6 +330,12 @@ public:
         if (m_type == SampleType::kUInt16) {
             const auto offset = sample_index * sizeof(std::uint16_t);
             return static_cast<float>(detail::load_little_endian<std::uint16_t>(
+                m_data.data() + offset));
+        }
+
+        if (m_type == SampleType::kInt16) {
+            const auto offset = sample_index * sizeof(std::int16_t);
+            return static_cast<float>(detail::load_little_endian<std::int16_t>(
                 m_data.data() + offset));
         }
 

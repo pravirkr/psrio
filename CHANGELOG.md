@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.0] - 2026-10-03
+
+- **Baseband block front**:
+  - `psrio::concepts::BasebandReader`, move-only `psrio::BasebandSource`, and `psrio::FrequencyStitch`.
+  - Canonical reads are time-major: `[time][antenna][channel][polarization][component]`.
+  - `GuppiReader` indexes GUPPI RAW blocks, drops `OVERLAP`, transposes `1SFA` payloads, and unpacks 2, 4,
+  8, and 16-bit complex samples. `GuppiReader::open` joins a time sequence and stitches files that differ
+  in `OBSFREQ`.
+  - `DadaReader` reads header-only DADA files (`NDIM` 1 or 2, `NBIT` 1/2/4/8/16/32/-32) and joins a time
+  sequence by `OBS_OFFSET`.
+  - `SampleType::kInt16` for signed 16-bit voltages. SIGPROC 16-bit intensity stays `kUInt16`.
+  - `read_voltages` exports a dual-polarisation block as `TFPRI` or `FTPRI`, with channel 0 at the lowest
+  frequency when asked. `read_block` stays time-major in native channel order.
+  - `psrio::BitsInfo` (and `psrio::DigitizationInfo`) `constexpr` class providing standard SIGPROC/PRESTO bit packing factors, byte item sizes, and digitization statistics (min, max, mean, sigma, scale) across 1, 2, 4, 8, 16, and 32 bits.
+  - Public `psrio::pack_sub_byte` with both caller-managed span and convenience allocating overloads.
+  - In-place packing (`psrio::pack_inplace`) and backwards in-place unpacking (`psrio::unpack_inplace`) with zero memory allocations.
+
 ## [0.2.0] - 2026-10-02
 
 - **Intensity block front**:

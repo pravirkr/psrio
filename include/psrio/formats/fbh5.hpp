@@ -189,6 +189,7 @@ inline bool nbits_matches(SampleType type, int nbits) {
     switch (type) {
     case SampleType::kUInt8:
         return nbits == 8;
+    case SampleType::kInt16:
     case SampleType::kUInt16:
         return nbits == 16;
     case SampleType::kUInt32:
@@ -427,6 +428,7 @@ private:
         switch (m_sample_type) {
         case SampleType::kUInt8:
             return 1;
+        case SampleType::kInt16:
         case SampleType::kUInt16:
             return 2;
         case SampleType::kUInt32:

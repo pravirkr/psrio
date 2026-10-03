@@ -84,5 +84,7 @@ compile_commands.json
 AGENTS.md
 tmp_files/
 build*/
+.DS_Store
+.vscode/
 
 # End of https://www.toptal.com/developers/gitignore/api/c++,c

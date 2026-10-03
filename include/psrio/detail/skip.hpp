@@ -31,13 +31,11 @@ apply_skip(std::uint64_t current, std::int64_t delta, std::uint64_t limit) {
         return current;
     }
     if (delta == std::numeric_limits<std::int64_t>::min()) {
-        throw ValidationError(
-            "psrio: skip lands before the first sample");
+        throw ValidationError("psrio: skip lands before the first sample");
     }
     const auto step = static_cast<std::uint64_t>(-delta);
     if (step > current) {
-        throw ValidationError(
-            "psrio: skip lands before the first sample");
+        throw ValidationError("psrio: skip lands before the first sample");
     }
     return current - step;
 }

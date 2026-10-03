@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21...3.30)
 
 project(
   psrio
-  VERSION 0.2.0
+  VERSION 0.3.0
   LANGUAGES CXX
   DESCRIPTION "High-Performance Header-Only Pulsar & FRB I/O Library"
 )

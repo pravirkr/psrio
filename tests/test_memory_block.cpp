@@ -18,10 +18,11 @@ namespace {
 class TempFile {
 public:
     explicit TempFile(std::span<const std::byte> bytes) {
-        m_path = std::filesystem::temp_directory_path() /
-                 ("psrio-mem-" +
-                  std::to_string(
-                      std::chrono::steady_clock::now().time_since_epoch().count()));
+        m_path =
+            std::filesystem::temp_directory_path() /
+            ("psrio-mem-" +
+             std::to_string(
+                 std::chrono::steady_clock::now().time_since_epoch().count()));
         std::ofstream stream(m_path, std::ios::binary);
         REQUIRE(stream.good());
         stream.write(reinterpret_cast<const char*>(bytes.data()),
@@ -104,23 +105,24 @@ TEST_CASE("MemoryBlock matches FilterbankReader packed bytes and floats",
             0U);
 }
 
-TEST_CASE("MemoryBlock supports non-owning spans, zero-copy views, fswap, and metadata",
+TEST_CASE("MemoryBlock supports non-owning spans, zero-copy views, fswap, and "
+          "metadata",
           "[memory]") {
     const std::uint8_t raw[] = {1, 2, 3, 4, 5, 6, 7, 8};
     std::span<const std::byte> byte_view{
         reinterpret_cast<const std::byte*>(raw), sizeof(raw)};
 
     psrio::MemoryInfo info;
-    info.nchans      = 4;
-    info.nifs        = 1;
-    info.nbits       = 8;
-    info.tsamp       = 0.002;
-    info.fch1        = 1420.0;
-    info.foff        = -0.25;
+    info.nchans    = 4;
+    info.nifs      = 1;
+    info.nbits     = 8;
+    info.tsamp     = 0.002;
+    info.fch1      = 1420.0;
+    info.foff      = -0.25;
     info.source    = "B1937+21";
     info.telescope = "Arecibo";
-    info.raj         = 193700.0;
-    info.dej         = 210000.0;
+    info.raj       = 193700.0;
+    info.dej       = 210000.0;
 
     // Non-owning span constructor
     psrio::MemoryBlock mem(info, byte_view);

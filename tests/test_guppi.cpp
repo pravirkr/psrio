@@ -7,10 +7,13 @@
 #include <array>
 #include <chrono>
 #include <complex>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
+#include <iosfwd>
 #include <span>
 #include <string>
 #include <string_view>
@@ -38,10 +41,15 @@ public:
         REQUIRE(stream.good());
     }
 
-    ~TempFile() { std::filesystem::remove(m_path); }
+    ~TempFile() noexcept {
+        std::error_code ec;
+        std::filesystem::remove(m_path, ec);
+    }
 
     TempFile(const TempFile&)            = delete;
     TempFile& operator=(const TempFile&) = delete;
+    TempFile(TempFile&&)                 = delete;
+    TempFile& operator=(TempFile&&)      = delete;
 
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
@@ -124,7 +132,8 @@ TEST_CASE("GuppiHeader::parse throws on a truncated header", "[guppi]") {
     CHECK_THROWS_AS(header.parse(bytes), psrio::FormatError);
 }
 
-TEST_CASE("GuppiHeader stores quoted strings and preserves raw NPOL", "[guppi]") {
+TEST_CASE("GuppiHeader stores quoted strings and preserves raw NPOL",
+          "[guppi]") {
     std::vector<std::byte> bytes;
     append_record(bytes, "SRC_NAME = 'B1937+21'");
     append_record(bytes, "NPOL     = 4");
@@ -135,6 +144,25 @@ TEST_CASE("GuppiHeader stores quoted strings and preserves raw NPOL", "[guppi]")
     CHECK(header.get<std::int64_t>("NPOL") == 4);
     CHECK_THROWS_AS(header.get<std::int64_t>("OBSNCHAN"), psrio::FormatError);
     CHECK_THROWS_AS(header.channel_frequencies(3, 1), psrio::ValidationError);
+}
+
+TEST_CASE("GuppiHeader strips comments from records", "[guppi]") {
+    std::vector<std::byte> bytes;
+    append_record(bytes, "SRC_NAME= 'B1937+21' / Target pulsar");
+    append_record(bytes, "TELESCOP= 'GBT' / Green Bank Telescope");
+    append_record(bytes, "OBSFREQ = 1400.0 / Centre frequency in MHz");
+    append_record(bytes, "OBSNCHAN= 64 / Channel count");
+    append_record(bytes, "NPOL    = 2 / Complex polarisations");
+    append_record(bytes, "NBITS   = 8 / Bits per component");
+    append_record(bytes, "END");
+    GuppiHeader header;
+    header.parse(bytes);
+    CHECK(header.get<std::string>("SRC_NAME") == "B1937+21");
+    CHECK(header.get<std::string>("TELESCOP") == "GBT");
+    CHECK(header.get<double>("OBSFREQ") == 1400.0);
+    CHECK(header.get<std::int64_t>("OBSNCHAN") == 64);
+    CHECK(header.get<std::int64_t>("NPOL") == 2);
+    CHECK(header.get<std::int64_t>("NBITS") == 8);
 }
 
 TEST_CASE("DIRECTIO padding reaches the next 512-byte boundary", "[guppi]") {
@@ -184,23 +212,33 @@ TEST_CASE("DIRECTIO padding reaches the next 512-byte boundary", "[guppi]") {
 
 TEST_CASE("unpack_complex reads little-endian real and imaginary pairs",
           "[guppi]") {
-    const std::array<std::byte, 4> packed_i8{std::byte{1}, std::byte{2},
-                                             std::byte{3}, std::byte{4}};
+    const std::array<std::byte, 4> packed_i8{
+        std::byte{1},
+        std::byte{2},
+        std::byte{3},
+        std::byte{4},
+    };
     std::array<std::complex<std::int8_t>, 2> out8{};
     psrio::formats::guppi::unpack_complex<std::int8_t>(packed_i8, out8);
     CHECK(out8[0] == std::complex<std::int8_t>(1, 2));
     CHECK(out8[1] == std::complex<std::int8_t>(3, 4));
 
-    const std::array<std::byte, 4> packed_i16{std::byte{0x02}, std::byte{0x01},
-                                              std::byte{0x04}, std::byte{0x03}};
+    const std::array<std::byte, 4> packed_i16{
+        std::byte{0x02},
+        std::byte{0x01},
+        std::byte{0x04},
+        std::byte{0x03},
+    };
     std::array<std::complex<std::int16_t>, 1> out16{};
     psrio::formats::guppi::unpack_complex<std::int16_t>(packed_i16, out16);
     CHECK(out16[0] == std::complex<std::int16_t>(0x0102, 0x0304));
 
     std::array<std::complex<std::int8_t>, 1> mismatch{};
-    CHECK_THROWS_AS(
-        psrio::formats::guppi::unpack_complex<std::int8_t>(packed_i8, mismatch),
-        psrio::ValidationError);
+    const std::span<const std::byte> packed_span{packed_i8};
+    const std::span<std::complex<std::int8_t>> mismatch_span{mismatch};
+    CHECK_THROWS_AS(psrio::formats::guppi::unpack_complex<std::int8_t>(
+                        packed_span, mismatch_span),
+                    psrio::ValidationError);
 }
 
 TEST_CASE("RawReader walks headers and payload bytes", "[guppi]") {
@@ -213,8 +251,9 @@ TEST_CASE("RawReader walks headers and payload bytes", "[guppi]") {
     append_record(bytes, "chan_bw = 1.0");
     append_record(bytes, "END");
     const auto first_header = bytes.size();
-    const std::array<std::uint8_t, 16> payload{1, 2,  3,  4,  5,  6,  7,  8,
-                                               9, 10, 11, 12, 13, 14, 15, 16};
+    const std::array<std::uint8_t, 16> payload{
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    };
     for (const auto value : payload) {
         bytes.push_back(std::byte{value});
     }
@@ -271,7 +310,8 @@ TEST_CASE("RawReader walks headers and payload bytes", "[guppi]") {
 
     reader.rewind();
     REQUIRE(reader.tell() == 0U);
-    REQUIRE(reader.read_header().get<std::int64_t>("OBSNCHAN") == 4);
+    const auto rewound_header = reader.read_header();
+    REQUIRE(rewound_header.get<std::int64_t>("OBSNCHAN") == 4);
 
     reader.seek(reader.tell() + 1U);
     CHECK_THROWS_AS(reader.read_header(), psrio::ValidationError);

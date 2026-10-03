@@ -2,7 +2,7 @@
 
 A high-performance, header-only C++20 library for reading, parsing, and streaming time-domain radio astronomy data (pulsar baseband, filterbank, and single-channel time series).
 
-`psrio` provides zero-overhead, type-safe ingestion of observational data formats (SIGPROC `.fil` / `.tim`, PRESTO `.dat` / `.inf`, and GUPPI RAW). Intensity formats share one block-streaming front. GUPPI stays on its own baseband front.
+`psrio` provides zero-overhead, type-safe ingestion of observational data formats (SIGPROC `.fil` / `.tim`, PRESTO `.dat` / `.inf`, GUPPI RAW, and DADA files). Intensity formats share one block-streaming front. Baseband formats share another.
 
 ## Key Features
 
@@ -34,7 +34,7 @@ Add `psrio` directly from GitHub using [CPM.cmake](https://github.com/cpm-cmake/
 CPMAddPackage(
   NAME psrio
   GITHUB_REPOSITORY pravirkr/psrio
-  GIT_TAG v0.2.0  # Or a specific branch/commit
+  GIT_TAG v0.3.0  # Or a specific branch/commit
 )
 
 target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
@@ -50,7 +50,7 @@ include(FetchContent)
 FetchContent_Declare(
   psrio
   GIT_REPOSITORY https://github.com/pravirkr/psrio.git
-  GIT_TAG v0.2.0  # Or a specific branch/commit
+  GIT_TAG v0.3.0  # Or a specific branch/commit
 )
 
 FetchContent_MakeAvailable(psrio)
@@ -211,9 +211,9 @@ int main() {
 }
 ```
 
-### 5. GUPPI RAW (baseband, not a block source)
+### 5. GUPPI RAW bytes
 
-GUPPI complex voltages do not model `BlockReader`. Read a header, then a payload span:
+`RawReader` walks one header and the payload that follows it. It does not model the block fronts.
 
 ```cpp
 #include <psrio/formats/guppi.hpp>
@@ -227,6 +227,45 @@ int main() {
     const auto payload =
         reader.view_bytes(static_cast<std::uint64_t>(bytes));
     std::cout << "payload bytes: " << payload.size() << "\n";
+    return 0;
+}
+```
+
+### 6. Baseband block front
+
+GUPPI RAW and DADA files model `concepts::BasebandReader`. `BasebandSource` erases either one. `read_block` copies canonical time-major voltages (`[time][antenna][channel][polarization][component]`). `read_samples` unpacks them into a caller buffer.
+
+`GuppiReader::open` takes every file in a Breakthrough Listen set. Files that share `OBSFREQ` are one band continued in time. Files with different `OBSFREQ` are stitched into one channel axis, ordered by the lowest channel frequency. Each file keeps its own channel order.
+
+```cpp
+#include <psrio/psrio.hpp>
+
+#include <complex>
+#include <filesystem>
+#include <iostream>
+#include <vector>
+
+int main() {
+    const std::filesystem::path files[] = {
+        "blc00_guppi_obs.0000.raw",
+        "blc01_guppi_obs.0000.raw",
+    };
+    psrio::GuppiSet guppi = psrio::GuppiReader::open(files);
+    std::cout << "channels " << guppi.nchan()
+              << " stride " << guppi.bytes_per_sample() << "\n";
+
+    std::vector<std::complex<float>> spectra(guppi.nchan() * guppi.npol());
+    guppi.read_samples(1, spectra);
+
+    psrio::DadaReader dada("observation.dada");
+    psrio::BasebandSource source(std::move(dada));
+    auto volts = source.read_samples<std::complex<float>>(1024);
+
+    // CohFDMT wants FTPRI and channel 0 at the low edge of the band.
+    // 4-bit and 2-bit bytes stay least-significant-field first (`msb_first = false`).
+    std::vector<std::byte> coherent(guppi.bytes_per_sample() * 1024);
+    guppi.seek(0);
+    guppi.read_voltages(1024, {}, coherent);
     return 0;
 }
 ```
