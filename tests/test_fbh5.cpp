@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <fstream>
 #include <hdf5.h>
+#include <limits>
 #include <span>
 #include <string>
 #include <type_traits>
@@ -90,20 +91,24 @@ private:
     std::filesystem::path m_path;
 };
 
+enum class VersionKind { kString, kFloat, kInt };
+
 struct HeaderSpec {
-    std::string source_name = "B0329+54";
-    double tstart           = 58000.0;
-    double tsamp            = 1.0e-3;
-    double fch1             = 1400.0;
-    double foff             = -1.0;
-    int nbits               = 8;
-    int telescope_id        = 6;
-    int ibeam               = 3;
-    double src_raj          = 123456.7;
-    bool write_tsamp        = true;
-    bool write_data         = true;
-    bool gzip               = false;
-    bool foff_on_file       = false;
+    std::string source_name  = "B0329+54";
+    double tstart            = 58000.0;
+    double tsamp             = 1.0e-3;
+    double fch1              = 1400.0;
+    double foff              = -1.0;
+    int nbits                = 8;
+    int telescope_id         = 6;
+    int ibeam                = 3;
+    double src_raj           = 123456.7;
+    bool write_tsamp         = true;
+    bool write_data          = true;
+    bool gzip                = false;
+    bool foff_on_file        = false;
+    VersionKind version_kind = VersionKind::kString;
+    double version_number    = 1.25;
 };
 
 void write_string_attr(hid_t location,
@@ -168,7 +173,14 @@ void write_filterbank(const std::filesystem::path& path,
     Hid file{H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT)};
     REQUIRE(file.valid());
     write_string_attr(file.get(), "CLASS", "FILTERBANK");
-    write_string_attr(file.get(), "VERSION", "1.0");
+    if (spec.version_kind == VersionKind::kFloat) {
+        write_double_attr(file.get(), "VERSION", spec.version_number);
+    } else if (spec.version_kind == VersionKind::kInt) {
+        write_int_attr(file.get(), "VERSION",
+                       static_cast<int>(spec.version_number));
+    } else {
+        write_string_attr(file.get(), "VERSION", "1.0");
+    }
     if (!spec.write_data) {
         return;
     }
@@ -253,6 +265,40 @@ TEST_CASE("HDF5 filterbank header round-trips", "[hdf5]") {
     CHECK(source.has_nsamples());
     CHECK(source.spectra_rate() == 1000.0);
     CHECK(source.utc_start() == psrio::astro::mjd_to_time(58000.0));
+}
+
+TEST_CASE("HDF5 numeric VERSION uses an explicit general format", "[hdf5]") {
+    constexpr std::size_t kNTime  = 1;
+    constexpr std::size_t kNBeams = 1;
+    constexpr std::size_t kNChans = 1;
+    const std::vector<std::uint8_t> cube{0};
+
+    const auto version_of = [&](HeaderSpec spec) {
+        const TempFile file(".h5");
+        write_filterbank(file.path(), kNTime, kNBeams, kNChans, spec, cube);
+        return FilterbankFile(file.path()).header().version;
+    };
+
+    HeaderSpec spec;
+    spec.version_kind   = VersionKind::kFloat;
+    spec.version_number = 1.25;
+    CHECK(version_of(spec) == "1.25");
+
+    spec.version_number = 0.0001;
+    CHECK(version_of(spec) == "0.0001");
+
+    spec.version_number = 1.0e-5;
+    CHECK(version_of(spec) == "1e-05");
+
+    spec.version_kind   = VersionKind::kInt;
+    spec.version_number = 2;
+    CHECK(version_of(spec) == "2");
+
+    spec.version_kind   = VersionKind::kFloat;
+    spec.version_number = std::numeric_limits<double>::quiet_NaN();
+    const TempFile nan_file(".h5");
+    write_filterbank(nan_file.path(), kNTime, kNBeams, kNChans, spec, cube);
+    REQUIRE_THROWS_AS(FilterbankFile(nan_file.path()), psrio::FormatError);
 }
 
 TEST_CASE("HDF5 filterbank reads a channel ramp in file order", "[hdf5]") {

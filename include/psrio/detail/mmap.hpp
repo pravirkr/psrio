@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <filesystem>
+#include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <sys/mman.h>

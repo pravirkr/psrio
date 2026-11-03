@@ -152,7 +152,13 @@ inline std::string read_version(const HighFive::File& file) {
     }
     if (cls == HighFive::DataTypeClass::Float ||
         cls == HighFive::DataTypeClass::Integer) {
-        return fmt::format("{}", read_number(attr, "VERSION"));
+        const double value = read_number(attr, "VERSION");
+        if (!std::isfinite(value)) {
+            throw FormatError(
+                "psrio: HDF5 filterbank VERSION attribute is not finite");
+        }
+        // Six significant digits. The text stays the same across fmt releases.
+        return fmt::format("{:.6g}", value);
     }
     throw FormatError(
         "psrio: HDF5 filterbank VERSION attribute is not a string or number");

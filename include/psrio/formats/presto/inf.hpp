@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <fmt/format.h>
 #include <fstream>
 #include <sstream>
 #include <string>
