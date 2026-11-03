@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-11-03
+
+- **Lower compiler floor**: GCC 11+ and Clang 15+ (was GCC 13+ / Clang 18+).
+  GCC 11 is the oldest libstdc++ with `std::source_location`, `std::bit_cast`,
+  `std::numbers`, and a usable `<ranges>`. Clang 15 is the floor from before
+  `std::format` required GCC 13 and Clang 18.
+  - Diagnostic and metadata strings use `fmt::format`. `psrio::psrio` links
+    `fmt::fmt-header-only`. A build fetches fmt 12.1.0 (hash-pinned) unless that
+    target already exists. psrio does not install fmt.
+  - An installed package calls `find_dependency(fmt 12.1 CONFIG)`. fmt 12.1 or
+    newer must already be on the prefix.
+  - A numeric HDF5 `VERSION` is formatted with `{:.6g}`.
+  - New option `PSRIO_INSTALL` (default: top-level build only) guards the install rules.
+  - CI builds GCC 11 and Clang 15 on Ubuntu 22.04, GCC 13 and Clang 18 on
+    Ubuntu 24.04, and a consumer of the installed package.
+
 ## [0.3.0] - 2026-10-03
 
 - **Baseband block front**:

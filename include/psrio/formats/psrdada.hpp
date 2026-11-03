@@ -17,7 +17,7 @@
 #include <cstring>
 #include <ctime>
 #include <dada_hdu.h>
-#include <format>
+#include <fmt/format.h>
 #include <ipcbuf.h>
 #include <limits>
 #include <span>
@@ -48,7 +48,7 @@ inline int require_int(const char* header, const char* key) {
     int value = 0;
     if (ascii_header_get(header, key, "%d", &value) < 0) {
         throw ValidationError(
-            std::format("psrio: PSRDADA header missing {}", key));
+            fmt::format("psrio: PSRDADA header missing {}", key));
     }
     return value;
 }
@@ -60,7 +60,7 @@ require_real(const char* header, const char* key, const char* alternate) {
         (alternate == nullptr ||
          ascii_header_get(header, alternate, "%lf", &value) < 0)) {
         throw ValidationError(
-            std::format("psrio: PSRDADA header missing {}", key));
+            fmt::format("psrio: PSRDADA header missing {}", key));
     }
     return value;
 }
@@ -299,12 +299,12 @@ private:
             }
             dada_hdu_set_key(m_hdu, static_cast<key_t>(key));
             if (dada_hdu_connect(m_hdu) < 0) {
-                throw IoError(std::format(
+                throw IoError(fmt::format(
                     "psrio: failed to connect to PSRDADA ring {:#x}", key));
             }
             m_connected = true;
             if (dada_hdu_lock_read(m_hdu) < 0) {
-                throw IoError(std::format(
+                throw IoError(fmt::format(
                     "psrio: failed to lock PSRDADA ring {:#x} for reading",
                     key));
             }
@@ -774,7 +774,7 @@ inline std::uint64_t RingReader::read_block(std::uint64_t count,
     }
     const auto bytes_needed = count * m_stride;
     if (dest.size() < bytes_needed) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the block needs {}",
             dest.size(), bytes_needed));
     }
@@ -866,7 +866,7 @@ inline std::uint64_t RingReader::read_samples_impl(std::uint64_t count,
     }
     const auto expected = count * m_nchans;
     if (expected != dest.size()) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), expected));
     }
@@ -934,7 +934,7 @@ inline std::uint64_t RingReader::read_samples(std::uint64_t count,
 inline std::uint64_t RingReader::read_bytes(std::uint64_t nbytes,
                                             std::span<std::byte> dest) {
     if (dest.size() != nbytes) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the request needs {}",
             dest.size(), nbytes));
     }

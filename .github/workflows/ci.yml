@@ -17,14 +17,18 @@ permissions:
 jobs:
   build-test:
     name: "C++ tests (${{ matrix.compiler.cc }})"
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.compiler.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         compiler:
-          - { cc: gcc-13, cpp: g++-13 }
-          - { cc: clang-18, cpp: clang++-18 }
+          # Floor: GCC 11 and Clang 15 share Ubuntu 22.04's libstdc++, which has no std::format.
+          # Ubuntu 22.04's apt catch2 is v2, so those jobs omit it and FetchContent pins Catch2 v3.
+          - { cc: gcc-11, cpp: g++-11, pkgs: "gcc-11 g++-11", extra: "python3-dev git", os: ubuntu-22.04 }
+          - { cc: clang-15, cpp: clang++-15, pkgs: clang-15, extra: "python3-dev git", os: ubuntu-22.04 }
+          - { cc: gcc-13, cpp: g++-13, pkgs: "gcc-13 g++-13", extra: "python3-dev catch2 git", os: ubuntu-24.04 }
+          - { cc: clang-18, cpp: clang++-18, pkgs: clang-18, extra: "python3-dev catch2 git", os: ubuntu-24.04 }
 
     steps:
       - uses: actions/checkout@v7
@@ -34,8 +38,8 @@ jobs:
           sudo apt update
           sudo apt install -y --no-install-recommends \
             build-essential cmake ninja-build ccache \
-            gcc-13 g++-13 clang-18 \
-            python3-dev catch2 git
+            ${{ matrix.compiler.pkgs }} \
+            ${{ matrix.compiler.extra }}
 
       - name: Cache ccache object store
         uses: hendrikmuhs/ccache-action@v1.2
@@ -60,3 +64,58 @@ jobs:
 
       - name: Run C++ unit tests
         run: ctest --test-dir build/tests/ --output-on-failure
+
+  install-consumer:
+    name: Installed package finds fmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install system packages
+        run: |
+          sudo apt update
+          sudo apt install -y --no-install-recommends \
+            build-essential cmake ninja-build g++ git ca-certificates curl
+
+      - name: Install fmt 12.1.0 and psrio, then build a consumer
+        run: |
+          set -euo pipefail
+          prefix="$PWD/prefix"
+          src="$PWD/build/fmt-src"
+          mkdir -p "$src"
+          curl -fsSL -o "$PWD/build/fmt-12.1.0.tar.gz" \
+            https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+          echo "ea7de4299689e12b6dddd392f9896f08fb0777ac7168897a244a6d6085043fea  $PWD/build/fmt-12.1.0.tar.gz" \
+            | sha256sum -c
+          tar -xzf "$PWD/build/fmt-12.1.0.tar.gz" -C "$src" --strip-components=1
+          cmake -S "$src" -B "$PWD/build/fmt" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$prefix" \
+            -DFMT_TEST=OFF \
+            -DFMT_DOC=OFF
+          cmake --build "$PWD/build/fmt"
+          cmake --install "$PWD/build/fmt"
+
+          cmake -S "$PWD" -B "$PWD/build/psrio" -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DPSRIO_BUILD_TESTS=OFF \
+            -DCMAKE_INSTALL_PREFIX="$prefix"
+          cmake --install "$PWD/build/psrio"
+
+          mkdir -p "$PWD/build/consumer"
+          cat > "$PWD/build/consumer/CMakeLists.txt" <<'EOF'
+          cmake_minimum_required(VERSION 3.21)
+          project(psrio_consumer LANGUAGES CXX)
+          find_package(psrio CONFIG REQUIRED)
+          add_executable(useit use.cpp)
+          target_link_libraries(useit PRIVATE psrio::psrio)
+          EOF
+          cat > "$PWD/build/consumer/use.cpp" <<'EOF'
+          #include <psrio/psrio.hpp>
+          int main() { return psrio::version().empty() ? 1 : 0; }
+          EOF
+          cmake -S "$PWD/build/consumer" -B "$PWD/build/consumer/build" -G Ninja \
+            -DCMAKE_PREFIX_PATH="$prefix"
+          cmake --build "$PWD/build/consumer/build"
+          "$PWD/build/consumer/build/useit"

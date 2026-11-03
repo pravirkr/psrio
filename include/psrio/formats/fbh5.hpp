@@ -13,7 +13,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <highfive/highfive.hpp>
 #include <limits>
 #include <memory>
@@ -63,21 +63,21 @@ inline HighFive::Attribute get_attr(const HighFive::DataSet& dataset,
     if (file.hasAttribute(name)) {
         return file.getAttribute(name);
     }
-    throw FormatError(std::format(
+    throw FormatError(fmt::format(
         "psrio: HDF5 filterbank missing required attribute '{}'", name));
 }
 
 inline double read_number(const HighFive::Attribute& attr,
                           std::string_view name) {
     if (attr.getSpace().getElementCount() != 1) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: HDF5 attribute '{}' must be a numeric scalar", name));
     }
     const auto type = attr.getDataType();
     const auto cls  = type.getClass();
     if (cls != HighFive::DataTypeClass::Float &&
         cls != HighFive::DataTypeClass::Integer) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: HDF5 attribute '{}' is not a numeric scalar", name));
     }
     double value = 0.0;
@@ -85,7 +85,7 @@ inline double read_number(const HighFive::Attribute& attr,
         attr.read(value);
     } catch (...) {
         throw FormatError(
-            std::format("psrio: HDF5 attribute '{}' could not be read", name));
+            fmt::format("psrio: HDF5 attribute '{}' could not be read", name));
     }
     return value;
 }
@@ -96,7 +96,7 @@ inline int read_int(const HighFive::Attribute& attr, std::string_view name) {
         value > static_cast<double>(std::numeric_limits<int>::max()) ||
         value < static_cast<double>(std::numeric_limits<int>::min())) {
         throw FormatError(
-            std::format("psrio: HDF5 attribute '{}' is not an integer", name));
+            fmt::format("psrio: HDF5 attribute '{}' is not an integer", name));
     }
     return static_cast<int>(value);
 }
@@ -106,13 +106,13 @@ inline std::string read_text(const HighFive::Attribute& attr,
     const auto type = attr.getDataType();
     if (type.getClass() != HighFive::DataTypeClass::String) {
         throw FormatError(
-            std::format("psrio: HDF5 attribute '{}' is not a string", name));
+            fmt::format("psrio: HDF5 attribute '{}' is not a string", name));
     }
     std::string text;
     try {
         attr.read(text);
     } catch (...) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: HDF5 attribute '{}' could not be read as a string", name));
     }
     return trim_trailing(std::move(text));
@@ -125,7 +125,7 @@ inline void require_class(const HighFive::File& file) {
     }
     const auto text = read_text(file.getAttribute("CLASS"), "CLASS");
     if (text != "FILTERBANK") {
-        throw FormatError(std::format("psrio: expected HDF5 CLASS attribute to "
+        throw FormatError(fmt::format("psrio: expected HDF5 CLASS attribute to "
                                       "be 'FILTERBANK' but saw '{}'",
                                       text));
     }
@@ -152,7 +152,13 @@ inline std::string read_version(const HighFive::File& file) {
     }
     if (cls == HighFive::DataTypeClass::Float ||
         cls == HighFive::DataTypeClass::Integer) {
-        return std::format("{}", read_number(attr, "VERSION"));
+        const double value = read_number(attr, "VERSION");
+        if (!std::isfinite(value)) {
+            throw FormatError(
+                "psrio: HDF5 filterbank VERSION attribute is not finite");
+        }
+        // Six significant digits. The text stays the same across fmt releases.
+        return fmt::format("{:.6g}", value);
     }
     throw FormatError(
         "psrio: HDF5 filterbank VERSION attribute is not a string or number");
@@ -228,7 +234,7 @@ inline void ensure_filters_available(const HighFive::DataSet& dataset) {
         if (H5Zfilter_avail(id) <= 0) {
             const std::string label =
                 name[0] != '\0' ? std::string{name.data()} : std::to_string(id);
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: unsupported compression: HDF5 filter '{}' ({}) is not "
                 "registered (bitshuffle is not linked)",
                 label, static_cast<int>(id)));
@@ -473,7 +479,7 @@ inline FilterbankFile::FilterbankFile(const std::filesystem::path& path,
             std::make_unique<HighFive::File>(native, HighFive::File::ReadOnly);
     } catch (...) {
         throw IoError(
-            std::format("psrio: failed to open HDF5 filterbank {}", native));
+            fmt::format("psrio: failed to open HDF5 filterbank {}", native));
     }
     load(path);
 }
@@ -496,7 +502,7 @@ inline void FilterbankFile::load(const std::filesystem::path& path) {
 
     const auto dims = m_dataset->getDimensions();
     if (dims.size() != 3) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: expected HDF5 data.ndim to be 3 (time, beam, frequency) "
             "but saw {}",
             dims.size()));
@@ -507,7 +513,7 @@ inline void FilterbankFile::load(const std::filesystem::path& path) {
     }
     load_header(dims, path);
     if (m_beam_index >= dims[1]) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: HDF5 beam index {} is out of range for {} beam(s) in {}",
             m_beam_index, dims[1], path.string()));
     }
@@ -524,7 +530,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
 
     const auto require_number = [&](const char* name) {
         if (!detail::has_attr(*m_dataset, *m_file, name)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: HDF5 filterbank missing required attribute '{}'",
                 name));
         }
@@ -534,7 +540,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
 
     const auto require_count = [&](const char* name) {
         if (!detail::has_attr(*m_dataset, *m_file, name)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: HDF5 filterbank missing required attribute '{}'",
                 name));
         }
@@ -542,7 +548,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
             detail::read_int(detail::get_attr(*m_dataset, *m_file, name), name);
         if (value <= 0) {
             throw ValidationError(
-                std::format("psrio: HDF5 {} must be positive", name));
+                fmt::format("psrio: HDF5 {} must be positive", name));
         }
         return static_cast<std::uint64_t>(value);
     };
@@ -575,7 +581,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
             "psrio: HDF5 foff must be a non-zero finite channel width");
     }
     if (m_header.nchans != dims[2]) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: HDF5 nchans ({}) does not match the frequency axis ({})",
             m_header.nchans, dims[2]));
     }
@@ -590,7 +596,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
     if (has_nifs) {
         m_header.nifs = require_count("nifs");
         if (m_header.nifs != dims[1]) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: HDF5 nifs ({}) does not match the beam axis ({})",
                 m_header.nifs, dims[1]));
         }
@@ -598,7 +604,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
     if (has_nbeams) {
         m_header.nbeams = require_count("nbeams");
         if (!has_nifs && m_header.nbeams != dims[1]) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: HDF5 nbeams ({}) does not match the beam axis ({})",
                 m_header.nbeams, dims[1]));
         }
@@ -614,7 +620,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
         const int declared = detail::read_int(
             detail::get_attr(*m_dataset, *m_file, "nsamples"), "nsamples");
         if (declared < 0 || static_cast<std::uint64_t>(declared) != dims[0]) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: HDF5 nsamples ({}) does not match the time axis ({})",
                 declared, dims[0]));
         }
@@ -623,7 +629,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
 
     m_sample_type = detail::sample_type_from_dataset(*m_dataset);
     if (!detail::nbits_matches(m_sample_type, m_header.nbits)) {
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: HDF5 nbits ({}) does not match the data dataset type",
             m_header.nbits));
     }
@@ -720,7 +726,7 @@ inline std::uint64_t FilterbankFile::read_block(std::uint64_t count,
     }
     const auto bytes_needed = count * stride;
     if (dest.size() < bytes_needed) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the block needs {}",
             dest.size(), bytes_needed));
     }
@@ -770,7 +776,7 @@ inline std::uint64_t FilterbankFile::read_block(std::uint64_t count,
         throw;
     } catch (const std::exception& e) {
         throw IoError(
-            std::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+            fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
 
     if (m_apply_fswap && to_read > 0U) {
@@ -789,7 +795,7 @@ inline std::uint64_t FilterbankFile::read_samples(std::uint64_t count,
     }
     const auto expected = count * m_header.nchans;
     if (expected != dest.size()) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), expected));
     }
@@ -814,7 +820,7 @@ inline std::uint64_t FilterbankFile::read_samples(std::uint64_t count,
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
-            std::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+            fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
     m_sample += to_read;
     return to_read;
@@ -833,7 +839,7 @@ FilterbankFile::read_samples(std::uint64_t count,
     }
     const auto expected = count * m_header.nchans;
     if (expected != dest.size()) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), expected));
     }
@@ -858,7 +864,7 @@ FilterbankFile::read_samples(std::uint64_t count,
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
-            std::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+            fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
     m_sample += to_read;
     return to_read;
@@ -877,7 +883,7 @@ FilterbankFile::read_samples(std::uint64_t count,
     }
     const auto expected = count * m_header.nchans;
     if (expected != dest.size()) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), expected));
     }
@@ -902,7 +908,7 @@ FilterbankFile::read_samples(std::uint64_t count,
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
-            std::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+            fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
     m_sample += to_read;
     return to_read;

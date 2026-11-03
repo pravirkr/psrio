@@ -4,7 +4,7 @@
 #include <charconv>
 #include <cmath>
 #include <ctime>
-#include <format>
+#include <fmt/format.h>
 #include <numbers>
 #include <stdexcept>
 #include <string>
@@ -71,7 +71,7 @@ inline constexpr std::string_view kWhitespace = " \t\n\v\f\r";
 parse_sexagesimal(std::string_view input,
                   std::string_view what = "coordinate") {
     const auto invalid = [&] {
-        return std::invalid_argument(std::format(
+        return std::invalid_argument(fmt::format(
             "psrio: invalid {} format: '{}' (expected [+|-]dd:mm:ss.sss)", what,
             input));
     };
@@ -169,7 +169,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
 [[nodiscard]] inline double ra_to_rad(std::string_view ra_string) {
     const Sexagesimal sex = parse_sexagesimal(ra_string, "right ascension");
     if (sex.negative || sex.major >= 24) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "psrio: right ascension out of range: '{}' (expected 00:00:00 "
             "to 23:59:59.999...)",
             ra_string));
@@ -184,7 +184,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
     const Sexagesimal sex = parse_sexagesimal(dec_string, "declination");
     if (sex.major > 90 ||
         (sex.major == 90 && (sex.minutes != 0 || sex.seconds != 0.0))) {
-        throw std::invalid_argument(std::format(
+        throw std::invalid_argument(fmt::format(
             "psrio: declination out of range: '{}' (expected -90:00:00 "
             "to +90:00:00)",
             dec_string));
@@ -202,7 +202,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
     const int mm       = (static_cast<int>(angle) / 100) % 100;
     const double ss    = angle - (static_cast<double>(mm) * 100.0) -
                          (static_cast<double>(hh) * 10000.0);
-    return std::format("{:02d}:{:02d}:{:07.4f}", hh, mm, ss);
+    return fmt::format("{:02d}:{:02d}:{:07.4f}", hh, mm, ss);
 }
 
 /// Format packed SIGPROC Declination (ddmmss.ss) into "[+|-]DD:MM:SS.ssss".
@@ -213,7 +213,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
     const int mm        = (static_cast<int>(angle) / 100) % 100;
     const double ss     = angle - (static_cast<double>(mm) * 100.0) -
                           (static_cast<double>(dd) * 10000.0);
-    return std::format("{}{:02d}:{:02d}:{:07.4f}", negative ? "-" : "+", dd, mm,
+    return fmt::format("{}{:02d}:{:02d}:{:07.4f}", negative ? "-" : "+", dd, mm,
                        ss);
 }
 
@@ -270,7 +270,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
     const int day   = e - (((153 * m) + 2) / 5) + 1;
     const int month = m + 3 - (12 * (m / 10));
     const int year  = (100 * b) + d - 4800 + (m / 10);
-    return std::format("{:04d}-{:02d}-{:02d}", year, month, day);
+    return fmt::format("{:04d}-{:02d}-{:02d}", year, month, day);
 }
 
 /// Convert double MJD (fractional day) to Gregorian calendar date "YYYY-MM-DD".
@@ -305,7 +305,7 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
         val /= factor;
         ++index;
     }
-    return std::format("{:.1f} {}", val, kUnits[index]);
+    return fmt::format("{:.1f} {}", val, kUnits[index]);
 }
 
 /// Calculate dispersion delay in seconds between @p freq_mhz and @p

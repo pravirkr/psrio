@@ -23,7 +23,7 @@
 namespace psrio {
 
 /// @return Semantic version string matching the CMake project version.
-constexpr std::string_view version() noexcept { return "0.3.0"; }
+constexpr std::string_view version() noexcept { return "0.4.0"; }
 
 // Main convenient public types
 using formats::dada::DadaReader;

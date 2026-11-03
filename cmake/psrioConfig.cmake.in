@@ -1,10 +1,24 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(fmt 12.1 CONFIG)
 if(@PSRIO_WITH_HDF5@)
   find_dependency(HDF5 REQUIRED COMPONENTS C)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/psrioTargets.cmake")
+
+# The export names fmt here instead of linking the in-tree target. install(EXPORT)
+# rejects a dependency that is not itself exported, and psrio does not install fmt.
+if(TARGET psrio::psrio AND TARGET fmt::fmt-header-only)
+  get_target_property(_psrio_fmt_links psrio::psrio INTERFACE_LINK_LIBRARIES)
+  if(NOT _psrio_fmt_links)
+    set(_psrio_fmt_links "")
+  endif()
+  if(NOT "fmt::fmt-header-only" IN_LIST _psrio_fmt_links)
+    set_property(TARGET psrio::psrio APPEND PROPERTY INTERFACE_LINK_LIBRARIES fmt::fmt-header-only)
+  endif()
+  unset(_psrio_fmt_links)
+endif()
 
 check_required_components(psrio)
