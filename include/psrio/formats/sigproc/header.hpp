@@ -10,7 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <format>
+#include <fmt/format.h>
 #include <limits>
 #include <optional>
 #include <span>
@@ -603,7 +603,7 @@ inline void skip_unknown(ByteCursor& cursor,
 
     throw FormatError(error_at(
         cursor.path(), origin,
-        std::format("cannot determine the size of unknown header key \"{}\"",
+        fmt::format("cannot determine the size of unknown header key \"{}\"",
                     name)));
 }
 
@@ -693,7 +693,7 @@ inline std::uint64_t FilterbankHeader::bytes_per_sample() const {
     if (nbits != 1 && nbits != 2 && nbits != 4 && nbits != 8 && nbits != 16 &&
         nbits != 32) {
         throw ValidationError(
-            std::format("psrio: nbits {} is not supported", nbits));
+            fmt::format("psrio: nbits {} is not supported", nbits));
     }
     if (const auto stride = try_bytes_per_sample()) {
         return *stride;
@@ -715,7 +715,7 @@ inline void FilterbankHeader::note_sample_count() {
         return;
     }
     const auto used = std::min<std::uint64_t>(*declared_nsamples, in_file);
-    m_warnings.push_back(std::format("header nsamples {} disagrees with {} "
+    m_warnings.push_back(fmt::format("header nsamples {} disagrees with {} "
                                      "complete samples in the file; using {}",
                                      *declared_nsamples, in_file, used));
 }
@@ -735,7 +735,7 @@ inline void FilterbankHeader::validate() const {
         throw ValidationError("psrio: tsamp must be present and positive");
     }
     if (data_type.has_value() && *data_type != 0 && *data_type != 1) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: data_type {} ({}) is not filterbank data; other SIGPROC "
             "types are read by a separate reader",
             *data_type, sigproc::data_type_name(*data_type)));

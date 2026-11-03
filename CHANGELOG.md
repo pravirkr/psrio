@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- **Lower compiler floor**: GCC 11+ and Clang 17+ (was GCC 13+ / Clang 18+), matching loki.
+  - Messages are formatted with `fmt::format` instead of `std::format`, which libstdc++ < 13 lacks.
+    `psrio::psrio` now links `fmt::fmt-header-only` (fmt 12.1.0 via CPM, unless the parent project
+    already defines the target). Plain `{}` floating-point fields follow fmt's notation
+    (`0.0001`, not `1e-04`).
+  - The installed package calls `find_dependency(fmt)`.
+  - New option `PSRIO_INSTALL` (default: top-level build only) guards the install rules.
+  - CI adds GCC 11 (Ubuntu 22.04) and Clang 17.
+
 ## [0.3.0] - 2026-10-03
 
 - **Baseband block front**:

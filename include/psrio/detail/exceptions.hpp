@@ -2,7 +2,7 @@
 
 #include <cerrno>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <source_location>
 #include <stdexcept>
 #include <string>
@@ -39,7 +39,7 @@ public:
 /// Append `file:line` and function name to @p user_msg (developer diagnostics).
 [[nodiscard]] inline std::string
 located_message(std::string_view user_msg, const std::source_location& loc) {
-    return std::format("{}:{}:{}: error: {}\n  in function '{}'",
+    return fmt::format("{}:{}:{}: error: {}\n  in function '{}'",
                        loc.file_name(), loc.line(), loc.column(), user_msg,
                        loc.function_name());
 }
@@ -56,28 +56,28 @@ public:
 };
 
 template <typename... Args>
-[[noreturn]] inline void throw_io(std::format_string<Args...> fmt,
+[[noreturn]] inline void throw_io(fmt::format_string<Args...> fmt_str,
                                   Args&&... args) {
-    throw IoError(std::format(fmt, std::forward<Args>(args)...));
+    throw IoError(fmt::format(fmt_str, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
-[[noreturn]] inline void throw_format(std::format_string<Args...> fmt,
+[[noreturn]] inline void throw_format(fmt::format_string<Args...> fmt_str,
                                       Args&&... args) {
-    throw FormatError(std::format(fmt, std::forward<Args>(args)...));
+    throw FormatError(fmt::format(fmt_str, std::forward<Args>(args)...));
 }
 
 template <typename... Args>
-[[noreturn]] inline void throw_validation(std::format_string<Args...> fmt,
+[[noreturn]] inline void throw_validation(fmt::format_string<Args...> fmt_str,
                                           Args&&... args) {
-    throw ValidationError(std::format(fmt, std::forward<Args>(args)...));
+    throw ValidationError(fmt::format(fmt_str, std::forward<Args>(args)...));
 }
 
 /// @throws psrio::error_check::IoError with the platform message for @p err.
 [[noreturn]] inline void throw_errno_io(int err,
                                         std::string_view operation,
                                         const std::filesystem::path& path) {
-    throw IoError(std::format("psrio: {} failed for '{}': {}", operation,
+    throw IoError(fmt::format("psrio: {} failed for '{}': {}", operation,
                               path.string(),
                               std::generic_category().message(err)));
 }

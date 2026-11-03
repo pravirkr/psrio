@@ -9,7 +9,7 @@ A high-performance, header-only C++20 library for reading, parsing, and streamin
 - **Pure Header-Only C++20**: Zero compiled library binaries. Simply link `psrio::psrio` and `#include <psrio/psrio.hpp>`.
 - **Zero-Copy & Zero-Allocation**: Direct memory-mapped access (`mmap`) to file payloads. Readers unpack directly into caller-managed buffers (`std::span<float>`, pinned CUDA host memory, etc.) without intermediate heap allocations.
 - **Unified Metadata Representation**: A single flat, idiomatic [`psrio::Header`](include/psrio/header.hpp) struct.
-- **Zero Third-Party Dependencies by Default**: Base formats require only the ISO C++ standard library and POSIX system APIs (`<sys/mman.h>`). FBH5 and PSRDADA are optional and stay out of `psrio.hpp` unless `PSRIO_WITH_HDF5` or `PSRIO_WITH_PSRDADA` is turned on.
+- **One Header-Only Dependency**: Base formats require the ISO C++ standard library, POSIX system APIs (`<sys/mman.h>`) and [fmt](https://github.com/fmtlib/fmt) (header-only; fetched with CPM, or shared with a parent project that already provides `fmt::fmt-header-only`). FBH5 and PSRDADA are optional and stay out of `psrio.hpp` unless `PSRIO_WITH_HDF5` or `PSRIO_WITH_PSRDADA` is turned on.
 - **Block streaming**: `psrio::concepts::BlockReader` and the move-only `psrio::BlockSource` read packed bytes (`read_block`) or unpacked floats (`read_samples`), and move the sample cursor with `seek`, `rewind`, and `skip`.
 
 ---
@@ -17,8 +17,9 @@ A high-performance, header-only C++20 library for reading, parsing, and streamin
 ## Requirements
 
 - **C++ Standard**: C++20 (`-std=c++20`)
-- **Compilers**: GCC 13+, Clang 18+
+- **Compilers**: GCC 11+, Clang 17+
 - **Build System**: CMake 3.21+
+- **Dependencies**: fmt (fetched at configure time; an installed psrio finds it with `find_package(fmt)`)
 
 ---
 

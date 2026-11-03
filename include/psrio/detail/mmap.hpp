@@ -50,12 +50,12 @@ public:
 
         if (!S_ISREG(file_stat.st_mode)) {
             throw IoError(
-                std::format("psrio: cannot memory-map non-regular file '{}'",
+                fmt::format("psrio: cannot memory-map non-regular file '{}'",
                             path.string()));
         }
 
         if (file_stat.st_size < 0) {
-            throw IoError(std::format(
+            throw IoError(fmt::format(
                 "psrio: file reports a negative size: '{}'", path.string()));
         }
 
@@ -63,7 +63,7 @@ public:
         constexpr auto kMaxMappingSize = static_cast<std::uintmax_t>(
             std::numeric_limits<std::size_t>::max());
         if (file_size > kMaxMappingSize) {
-            throw IoError(std::format(
+            throw IoError(fmt::format(
                 "psrio: file is too large to map in this process: '{}'",
                 path.string()));
         }

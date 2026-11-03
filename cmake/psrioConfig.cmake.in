@@ -1,6 +1,7 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+find_dependency(fmt)
 if(@PSRIO_WITH_HDF5@)
   find_dependency(HDF5 REQUIRED COMPONENTS C)
 endif()

@@ -15,7 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <fstream>
 #include <limits>
 #include <optional>
@@ -213,7 +213,7 @@ public:
     std::uint64_t read_data(std::span<float> dest) {
         if (dest.size() != m_header.nsamples) {
             throw ValidationError(
-                std::format("psrio: destination buffer size ({}) does not "
+                fmt::format("psrio: destination buffer size ({}) does not "
                             "match time-series nsamples ({})",
                             dest.size(), m_header.nsamples));
         }
@@ -226,7 +226,7 @@ public:
     std::uint64_t
     read_samples(std::uint64_t count, std::span<float> dest, BitOrder order) {
         if (count != dest.size()) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: destination has {} values but the request needs {}",
                 dest.size(), count));
         }
@@ -355,12 +355,12 @@ private:
                      const std::filesystem::path& inf_path) {
         if (!std::filesystem::exists(inf_path)) {
             throw IoError(
-                std::format("psrio: companion .inf file '{}' not found",
+                fmt::format("psrio: companion .inf file '{}' not found",
                             inf_path.string()));
         }
         if (!std::filesystem::exists(dat_path)) {
             throw IoError(
-                std::format("psrio: companion .dat file '{}' not found",
+                fmt::format("psrio: companion .dat file '{}' not found",
                             dat_path.string()));
         }
 
@@ -376,7 +376,7 @@ private:
         }
 
         if (m_file.empty()) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: PRESTO .dat file '{}' is empty", dat_path.string()));
         }
 
@@ -384,7 +384,7 @@ private:
         if (m_header.nsamples == 0U) {
             m_header.nsamples = available_samples;
         } else if (m_header.nsamples > available_samples) {
-            m_warnings.push_back(std::format(
+            m_warnings.push_back(fmt::format(
                 "psrio: .inf declared {} samples but file only has {}",
                 m_header.nsamples, available_samples));
             m_header.nsamples = available_samples;
@@ -412,7 +412,7 @@ private:
         const auto mapped = m_file.bytes();
         if (m_raw_sigproc.header_bytes > mapped.size()) {
             throw FormatError(
-                std::format("{}: header extends past end of file", path_str));
+                fmt::format("{}: header extends past end of file", path_str));
         }
         m_payload = mapped.subspan(
             static_cast<std::size_t>(m_raw_sigproc.header_bytes));
@@ -583,7 +583,7 @@ public:
 
         std::ofstream out(out_path, std::ios::binary);
         if (!out.is_open()) {
-            throw IoError(std::format("psrio: cannot create .tim file '{}'",
+            throw IoError(fmt::format("psrio: cannot create .tim file '{}'",
                                       out_path.string()));
         }
 
@@ -661,7 +661,7 @@ public:
         std::ofstream dat_out(dat_path, std::ios::binary);
         if (!dat_out.is_open()) {
             throw IoError(
-                std::format("psrio: cannot create .dat file '{}'", dat_path));
+                fmt::format("psrio: cannot create .dat file '{}'", dat_path));
         }
 
         if constexpr (std::endian::native == std::endian::little) {

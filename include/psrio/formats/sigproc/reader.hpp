@@ -14,7 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <string>
@@ -305,13 +305,13 @@ inline FilterbankReader::FilterbankReader(const std::filesystem::path& path,
     try {
         m_header.validate();
     } catch (const ValidationError& ex) {
-        throw ValidationError(std::format("{}: {}", path_string, ex.what()));
+        throw ValidationError(fmt::format("{}: {}", path_string, ex.what()));
     }
 
     const auto mapped = m_file.bytes();
     if (m_header.header_bytes > mapped.size()) {
         throw FormatError(
-            std::format("{}: header extends past end of file", path_string));
+            fmt::format("{}: header extends past end of file", path_string));
     }
     m_payload = mapped.subspan(static_cast<std::size_t>(m_header.header_bytes));
 }
@@ -337,7 +337,7 @@ inline std::uint64_t FilterbankReader::read_block(std::uint64_t count,
     }
     const auto bytes_needed = count * stride;
     if (dest.size() < bytes_needed) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the block needs {}",
             dest.size(), bytes_needed));
     }
@@ -445,7 +445,7 @@ inline std::uint64_t FilterbankReader::read_samples(std::uint64_t count,
     }
     const auto expected = count * per_sample;
     if (expected != dest.size()) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), expected));
     }
@@ -501,7 +501,7 @@ inline std::uint64_t FilterbankReader::read_bytes(std::uint64_t nbytes,
                                                   std::span<std::byte> dest) {
     check_byte_request(nbytes);
     if (dest.size() != nbytes) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the request needs {}",
             dest.size(), nbytes));
     }

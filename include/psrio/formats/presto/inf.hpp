@@ -188,7 +188,7 @@ namespace detail {
 [[nodiscard]] inline Header parse_inf_file(const std::filesystem::path& path) {
     std::ifstream file(path);
     if (!file.is_open()) {
-        throw IoError(std::format("psrio: cannot open PRESTO .inf file '{}'",
+        throw IoError(fmt::format("psrio: cannot open PRESTO .inf file '{}'",
                                   path.string()));
     }
     std::stringstream buffer;

@@ -353,7 +353,7 @@ template <typename T>
         const auto code     = (byte_val >> shift) & mask;
 
         std::int64_t val = 0;
-        const auto half = static_cast<int>(1U << (unbit - 1U));
+        const auto half  = static_cast<int>(1U << (unbit - 1U));
         if (samples_signed) {
             if (std::cmp_greater_equal(code, half)) {
                 val = static_cast<std::int64_t>(static_cast<int>(code) -

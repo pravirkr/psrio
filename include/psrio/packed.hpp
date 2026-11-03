@@ -8,7 +8,7 @@
 #include <bit>
 #include <cstddef>
 #include <cstdint>
-#include <format>
+#include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <vector>
@@ -307,7 +307,7 @@ public:
     /// Extract sample at time index @p t, channel index @p c as float.
     [[nodiscard]] float extract_sample(std::uint64_t t, std::uint64_t c) const {
         if (t >= m_nsamps || c >= m_nchans) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: sample indices ({}, {}) out of range ({}, {})", t, c,
                 m_nsamps, m_nchans));
         }
@@ -368,7 +368,7 @@ public:
     /// Extract the complete spectrum at time index @p t into @p dest.
     void extract_spectrum(std::uint64_t t, std::span<float> dest) const {
         if (dest.size() < m_nchans) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: destination size {} is smaller than nchans {}",
                 dest.size(), m_nchans));
         }
@@ -389,7 +389,7 @@ private:
         const auto total_bits   = m_nsamps * m_nchans * width;
         const auto bytes_needed = (total_bits + 7U) / 8U;
         if (m_data.size() < bytes_needed) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: DataExtractor buffer ({} bytes) too small for "
                 "requested geometry (needs {} bytes)",
                 m_data.size(), bytes_needed));

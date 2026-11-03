@@ -9,15 +9,15 @@ project(
 
 # Compiler version requirements
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 13.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 11.0)
     message(
-      FATAL_ERROR "GCC 13.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
+      FATAL_ERROR "GCC 11.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 elseif(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
-  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 18.0)
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_LESS 17.0)
     message(
-      FATAL_ERROR "Clang 18.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
+      FATAL_ERROR "Clang 17.0+ is required for C++20 support. Found: ${CMAKE_CXX_COMPILER_VERSION}."
     )
   endif()
 else()
@@ -39,6 +39,7 @@ option(PSRIO_BUILD_DOCS "Build documentation" OFF)
 option(PSRIO_ENABLE_COVERAGE "Enable code coverage for tests" OFF)
 option(PSRIO_WITH_HDF5 "Enable the opt-in FBH5 reader" OFF)
 option(PSRIO_WITH_PSRDADA "Enable the opt-in PSRDADA ring reader" OFF)
+option(PSRIO_INSTALL "Generate the install rules" ${PSRIO_IS_TOP_LEVEL})
 
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -61,15 +62,32 @@ target_include_directories(
                             $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
 
-if(PSRIO_WITH_HDF5)
-  include(cmake/CPM.cmake)
-  if(DEFINED ENV{CPM_SOURCE_CACHE})
-    set(CPM_SOURCE_CACHE
-        $ENV{CPM_SOURCE_CACHE}
-        CACHE PATH "Directory to cache downloaded CPM sources"
-    )
-  endif()
+include(cmake/CPM.cmake)
+if(DEFINED ENV{CPM_SOURCE_CACHE})
+  set(CPM_SOURCE_CACHE
+      $ENV{CPM_SOURCE_CACHE}
+      CACHE PATH "Directory to cache downloaded CPM sources"
+  )
+endif()
 
+# fmt (header-only) formats the error messages. A parent project that already
+# provides fmt::fmt-header-only (e.g. loki) shares its copy.
+if(NOT TARGET fmt::fmt-header-only)
+  CPMAddPackage(
+    NAME fmt
+    VERSION 12.1.0
+    URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+    OPTIONS "FMT_INSTALL ON"
+    EXCLUDE_FROM_ALL YES
+    SYSTEM YES
+  )
+endif()
+if(NOT TARGET fmt::fmt-header-only)
+  message(FATAL_ERROR "fmt::fmt-header-only target not available after CPM setup.")
+endif()
+target_link_libraries(${PROJECT_NAME} INTERFACE fmt::fmt-header-only)
+
+if(PSRIO_WITH_HDF5)
   CPMAddPackage(
     NAME HighFive
     VERSION 3.3.0
@@ -144,47 +162,49 @@ endif()
 # ------------------------------------------------------------------------------
 # Installation & CMake Packaging (Header-Only / Arch-Independent)
 # ------------------------------------------------------------------------------
-include(CMakePackageConfigHelpers)
+if(PSRIO_INSTALL)
+  include(CMakePackageConfigHelpers)
 
-set(PSRIO_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}")
-set(PSRIO_INSTALL_TARGETS ${PROJECT_NAME})
-if(TARGET psrio_fbh5)
-  list(APPEND PSRIO_INSTALL_TARGETS psrio_fbh5)
+  set(PSRIO_CMAKE_PACKAGE_DIR "${CMAKE_INSTALL_DATADIR}/cmake/${PROJECT_NAME}")
+  set(PSRIO_INSTALL_TARGETS ${PROJECT_NAME})
+  if(TARGET psrio_fbh5)
+    list(APPEND PSRIO_INSTALL_TARGETS psrio_fbh5)
+  endif()
+  if(TARGET psrio_psrdada)
+    list(APPEND PSRIO_INSTALL_TARGETS psrio_psrdada)
+  endif()
+  install(
+    TARGETS ${PSRIO_INSTALL_TARGETS}
+    EXPORT psrioTargets
+    INCLUDES
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+  )
+
+  install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+  install(
+    EXPORT psrioTargets
+    FILE psrioTargets.cmake
+    NAMESPACE ${PROJECT_NAME}::
+    DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
+  )
+
+  configure_package_config_file(
+    ${PROJECT_SOURCE_DIR}/cmake/psrioConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
+    INSTALL_DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
+  )
+
+  write_basic_package_version_file(
+    ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT
+  )
+
+  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
+                ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
+          DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
+  )
 endif()
-if(TARGET psrio_psrdada)
-  list(APPEND PSRIO_INSTALL_TARGETS psrio_psrdada)
-endif()
-install(
-  TARGETS ${PSRIO_INSTALL_TARGETS}
-  EXPORT psrioTargets
-  INCLUDES
-  DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-)
-
-install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-
-install(
-  EXPORT psrioTargets
-  FILE psrioTargets.cmake
-  NAMESPACE ${PROJECT_NAME}::
-  DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
-)
-
-configure_package_config_file(
-  ${PROJECT_SOURCE_DIR}/cmake/psrioConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
-  INSTALL_DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
-)
-
-write_basic_package_version_file(
-  ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
-  VERSION ${PROJECT_VERSION}
-  COMPATIBILITY SameMajorVersion ARCH_INDEPENDENT
-)
-
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/psrioConfig.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/psrioConfigVersion.cmake
-        DESTINATION ${PSRIO_CMAKE_PACKAGE_DIR}
-)
 
 # ------------------------------------------------------------------------------
 # Summary

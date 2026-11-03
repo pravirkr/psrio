@@ -14,7 +14,7 @@
 #include <cstring>
 #include <ctime>
 #include <exception>
-#include <format>
+#include <fmt/format.h>
 #include <map>
 #include <span>
 #include <string>
@@ -46,10 +46,10 @@ public:
         const auto it = m_entries.find(upper(key));
         if (it == m_entries.end()) {
             throw FormatError(
-                std::format("psrio: GUPPI header missing {}", upper(key)));
+                fmt::format("psrio: GUPPI header missing {}", upper(key)));
         }
         if (!std::holds_alternative<T>(it->second)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: GUPPI key {} does not hold the requested type",
                 upper(key)));
         }
@@ -63,7 +63,7 @@ public:
             return fallback;
         }
         if (!std::holds_alternative<T>(it->second)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: GUPPI key {} does not hold the requested type",
                 upper(key)));
         }
@@ -78,11 +78,13 @@ public:
 
     [[nodiscard]] std::size_t size() const noexcept { return m_entries.size(); }
 
-    [[nodiscard]] const std::map<std::string, HeaderValue>& entries() const noexcept {
+    [[nodiscard]] const std::map<std::string, HeaderValue>&
+    entries() const noexcept {
         return m_entries;
     }
 
-    /// Complex polarizations stored in the block. Header `NPOL` of 4 counts as 2.
+    /// Complex polarizations stored in the block. Header `NPOL` of 4 counts
+    /// as 2.
     [[nodiscard]] std::int64_t complex_npol() const {
         const auto npol = int_or("NPOL", std::int64_t{1});
         return npol < 2 ? std::int64_t{1} : std::int64_t{2};
@@ -100,13 +102,14 @@ public:
         if (std::holds_alternative<double>(it->second)) {
             const auto value = std::get<double>(it->second);
             if (!std::isfinite(value) || std::trunc(value) != value) {
-                throw FormatError(std::format(
+                throw FormatError(fmt::format(
                     "psrio: GUPPI key {} is not an integer", upper(key)));
             }
             return static_cast<std::int64_t>(value);
         }
-        throw FormatError(std::format(
-            "psrio: GUPPI key {} does not hold the requested type", upper(key)));
+        throw FormatError(
+            fmt::format("psrio: GUPPI key {} does not hold the requested type",
+                        upper(key)));
     }
 
     [[nodiscard]] double real_or(std::string_view key, double fallback) const {
@@ -120,8 +123,9 @@ public:
         if (std::holds_alternative<std::int64_t>(it->second)) {
             return static_cast<double>(std::get<std::int64_t>(it->second));
         }
-        throw FormatError(std::format(
-            "psrio: GUPPI key {} does not hold the requested type", upper(key)));
+        throw FormatError(
+            fmt::format("psrio: GUPPI key {} does not hold the requested type",
+                        upper(key)));
     }
 
     [[nodiscard]] std::string string_or(std::string_view key,
@@ -131,7 +135,7 @@ public:
             return fallback;
         }
         if (!std::holds_alternative<std::string>(it->second)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: GUPPI key {} does not hold the requested type",
                 upper(key)));
         }
@@ -237,12 +241,12 @@ public:
             throw ValidationError("psrio: GUPPI NBITS must be 8 or 16");
         }
         const char* element = nbits == 8 ? "Complex<Int8>" : "Complex<Int16>";
-        return std::format("Array<{}, {}>", element, ndims);
+        return fmt::format("Array<{}, {}>", element, ndims);
     }
 
     /// Centre frequency of 1-based channel @p channel, in MHz.
     [[nodiscard]] double channel_frequency(std::int64_t channel) const {
-        const auto n       = antnchan();
+        const auto n = antnchan();
         if (!has_key("OBSFREQ")) {
             throw FormatError("psrio: GUPPI header missing OBSFREQ");
         }
@@ -278,7 +282,8 @@ public:
         return freqs;
     }
 
-    /// `CHAN_BW` when present, otherwise `OBSBW` divided by the channels on one antenna.
+    /// `CHAN_BW` when present, otherwise `OBSBW` divided by the channels on one
+    /// antenna.
     [[nodiscard]] double channel_spacing() const {
         if (!has_key("CHAN_BW") && !has_key("OBSBW")) {
             throw FormatError("psrio: GUPPI header missing CHAN_BW");
@@ -288,7 +293,8 @@ public:
         }
         const auto n = antnchan();
         if (n == 0) {
-            throw ValidationError("psrio: GUPPI antenna channel count is empty");
+            throw ValidationError(
+                "psrio: GUPPI antenna channel count is empty");
         }
         return real_or("OBSBW", 0.0) / static_cast<double>(n);
     }
@@ -297,29 +303,32 @@ public:
     /// sample count, and byte cursor.
     [[nodiscard]] BasebandHeader to_baseband_header() const {
         BasebandHeader out;
-        out.format   = BasebandFormat::kGuppiRaw;
-        out.npol     = static_cast<std::uint64_t>(complex_npol());
-        out.nants    = static_cast<std::uint64_t>(int_or("NANTS", std::int64_t{1}));
-        out.nchan    = static_cast<std::uint64_t>(antnchan());
-        out.nbit     = static_cast<int>(int_or("NBITS", std::int64_t{8}));
-        out.ndim     = 2;
+        out.format = BasebandFormat::kGuppiRaw;
+        out.npol   = static_cast<std::uint64_t>(complex_npol());
+        out.nants =
+            static_cast<std::uint64_t>(int_or("NANTS", std::int64_t{1}));
+        out.nchan          = static_cast<std::uint64_t>(antnchan());
+        out.nbit           = static_cast<int>(int_or("NBITS", std::int64_t{8}));
+        out.ndim           = 2;
         out.samples_signed = true;
-        out.msb_first = (out.nbit == 4);
-        const auto fmt = string_or("PKTFMT", "");
-        out.order = equals_ignore_case(fmt, "SIMPLE") ? BasebandOrder::kTimeMajor
-                                                      : BasebandOrder::kChannelMajor;
-        out.tsamp = real_or("TBIN", 0.0);
-        out.overlap = static_cast<std::uint64_t>(std::max<std::int64_t>(
+        out.msb_first      = (out.nbit == 4);
+        const auto pktfmt  = string_or("PKTFMT", "");
+        out.order          = equals_ignore_case(pktfmt, "SIMPLE")
+                                 ? BasebandOrder::kTimeMajor
+                                 : BasebandOrder::kChannelMajor;
+        out.tsamp          = real_or("TBIN", 0.0);
+        out.overlap        = static_cast<std::uint64_t>(std::max<std::int64_t>(
             int_or("OVERLAP", std::int64_t{0}), std::int64_t{0}));
-        out.source    = string_or("SRC_NAME", "Unknown");
-        out.telescope = string_or("TELESCOP", "Unknown");
-        out.backend   = string_or("BACKEND", "");
+        out.source         = string_or("SRC_NAME", "Unknown");
+        out.telescope      = string_or("TELESCOP", "Unknown");
+        out.backend        = string_or("BACKEND", "");
         const auto chan_bw = channel_spacing();
-        out.foff       = chan_bw;
-        out.fch1       = channel_frequency(1);
-        out.bandwidth  = std::abs(chan_bw) * static_cast<double>(out.nchan);
+        out.foff           = chan_bw;
+        out.fch1           = channel_frequency(1);
+        out.bandwidth      = std::abs(chan_bw) * static_cast<double>(out.nchan);
         out.center_frequency =
-            out.fch1 + (out.foff * (static_cast<double>(out.nchan) - 1.0) / 2.0);
+            out.fch1 +
+            (out.foff * (static_cast<double>(out.nchan) - 1.0) / 2.0);
         out.tstart    = start_mjd();
         out.utc_start = out.tstart == 0.0 ? 0 : astro::mjd_to_time(out.tstart);
         out.extra.reserve(m_entries.size());
@@ -364,7 +373,7 @@ private:
 
     void add_keyword(const std::string& key, std::string value) {
         if (!value.empty() && (value.front() == '\'' || value.front() == '"')) {
-            const char quote = value.front();
+            const char quote     = value.front();
             const auto end_quote = value.find(quote, 1);
             if (end_quote != std::string::npos) {
                 m_entries[key] = trim(value.substr(1, end_quote - 1));
@@ -407,19 +416,25 @@ private:
         if (!has_key("STT_IMJD")) {
             return 0.0;
         }
-        const auto imjd = static_cast<double>(int_or("STT_IMJD", std::int64_t{0}));
-        const auto smjd = static_cast<double>(int_or("STT_SMJD", std::int64_t{0}));
+        const auto imjd =
+            static_cast<double>(int_or("STT_IMJD", std::int64_t{0}));
+        const auto smjd =
+            static_cast<double>(int_or("STT_SMJD", std::int64_t{0}));
         const auto offs = real_or("STT_OFFS", 0.0);
         double mjd      = imjd + ((smjd + offs) / 86400.0);
-        if (has_key("PKTIDX") && has_key("PKTSIZE") && real_or("TBIN", 0.0) > 0.0) {
-            const auto pktidx = static_cast<double>(int_or("PKTIDX", std::int64_t{0}));
-            const auto pkt    = real_or("PKTSIZE", 0.0);
-            const auto bits   = static_cast<double>(antnchan()) *
-                                static_cast<double>(int_or("NANTS", std::int64_t{1})) *
-                                static_cast<double>(complex_npol()) * 2.0 *
-                                static_cast<double>(int_or("NBITS", std::int64_t{8}));
+        if (has_key("PKTIDX") && has_key("PKTSIZE") &&
+            real_or("TBIN", 0.0) > 0.0) {
+            const auto pktidx =
+                static_cast<double>(int_or("PKTIDX", std::int64_t{0}));
+            const auto pkt = real_or("PKTSIZE", 0.0);
+            const auto bits =
+                static_cast<double>(antnchan()) *
+                static_cast<double>(int_or("NANTS", std::int64_t{1})) *
+                static_cast<double>(complex_npol()) * 2.0 *
+                static_cast<double>(int_or("NBITS", std::int64_t{8}));
             if (bits > 0.0) {
-                const auto seconds = pktidx * pkt * 8.0 * real_or("TBIN", 0.0) / bits;
+                const auto seconds =
+                    pktidx * pkt * 8.0 * real_or("TBIN", 0.0) / bits;
                 mjd += seconds / 86400.0;
             }
         }
@@ -462,6 +477,5 @@ inline void unpack_complex(std::span<const std::byte> packed,
         dest[index]     = std::complex<T>(real, imag);
     }
 }
-
 
 } // namespace psrio::formats::guppi

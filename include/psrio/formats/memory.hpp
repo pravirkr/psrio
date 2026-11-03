@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <ctime>
-#include <format>
+#include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <string>
@@ -140,7 +140,7 @@ public:
         }
         const auto bytes_needed = count * m_stride;
         if (dest.size() < bytes_needed) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: destination has {} bytes but the block needs {}",
                 dest.size(), bytes_needed));
         }
@@ -236,7 +236,7 @@ public:
         }
         const auto expected = count * per_sample;
         if (expected != dest.size()) {
-            throw ValidationError(std::format(
+            throw ValidationError(fmt::format(
                 "psrio: destination has {} values but the request needs {}",
                 dest.size(), expected));
         }

@@ -16,7 +16,7 @@
 #include <ctime>
 #include <exception>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <map>
 #include <span>
 #include <string>
@@ -61,8 +61,9 @@ public:
             std::string line;
             line.resize(static_cast<std::size_t>(end - pos));
             for (std::uint64_t index = pos; index < end; ++index) {
-                line[static_cast<std::size_t>(index - pos)] = static_cast<char>(
-                    std::to_integer<unsigned char>(bytes[static_cast<std::size_t>(index)]));
+                line[static_cast<std::size_t>(index - pos)] =
+                    static_cast<char>(std::to_integer<unsigned char>(
+                        bytes[static_cast<std::size_t>(index)]));
             }
             if (end < bytes.size() &&
                 bytes[static_cast<std::size_t>(end)] == std::byte{'\n'}) {
@@ -77,9 +78,9 @@ public:
                 continue;
             }
             const auto comment = line.find('#');
-            const auto body =
-                comment == std::string::npos ? std::string_view{line}
-                                             : std::string_view{line}.substr(0, comment);
+            const auto body = comment == std::string::npos
+                                  ? std::string_view{line}
+                                  : std::string_view{line}.substr(0, comment);
             if (comment != std::string::npos &&
                 line.find("end of header") != std::string::npos) {
                 saw_end = true;
@@ -90,11 +91,12 @@ public:
                 continue;
             }
             const auto gap = trimmed.find_first_of(" \t");
-            const auto key = upper(gap == std::string_view::npos
-                                       ? trimmed
-                                       : trimmed.substr(0, gap));
-            const auto value =
-                gap == std::string_view::npos ? std::string_view{} : trim(trimmed.substr(gap + 1));
+            const auto key =
+                upper(gap == std::string_view::npos ? trimmed
+                                                    : trimmed.substr(0, gap));
+            const auto value = gap == std::string_view::npos
+                                   ? std::string_view{}
+                                   : trim(trimmed.substr(gap + 1));
             store(key, value);
             if (key == "HDR_SIZE") {
                 const auto size = int_or("HDR_SIZE", std::int64_t{0});
@@ -105,17 +107,20 @@ public:
             }
         }
         if (bytes.size() < hdr_size) {
-            throw FormatError("psrio: DADA header extends past the end of the file");
+            throw FormatError(
+                "psrio: DADA header extends past the end of the file");
         }
         if (!saw_end && pos < hdr_size &&
             bytes[static_cast<std::size_t>(pos)] != std::byte{0} &&
             m_entries.empty()) {
             throw FormatError("psrio: DADA header is empty");
         }
-        if (!has_key("HEADER") || !equals_ignore_case(string_or("HEADER", ""), "DADA")) {
+        if (!has_key("HEADER") ||
+            !equals_ignore_case(string_or("HEADER", ""), "DADA")) {
             throw FormatError("psrio: DADA header is missing HEADER DADA");
         }
-        if (has_key("ORDER") && !equals_ignore_case(string_or("ORDER", ""), "TF")) {
+        if (has_key("ORDER") &&
+            !equals_ignore_case(string_or("ORDER", ""), "TF")) {
             throw FormatError("psrio: DADA ORDER must be TF");
         }
         m_hdr_size = hdr_size;
@@ -133,7 +138,7 @@ public:
             return fallback;
         }
         if (!std::holds_alternative<std::int64_t>(it->second)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: DADA key {} does not hold an integer", upper(key)));
         }
         return std::get<std::int64_t>(it->second);
@@ -150,7 +155,7 @@ public:
         if (std::holds_alternative<std::int64_t>(it->second)) {
             return static_cast<double>(std::get<std::int64_t>(it->second));
         }
-        throw FormatError(std::format(
+        throw FormatError(fmt::format(
             "psrio: DADA key {} does not hold a number", upper(key)));
     }
 
@@ -161,18 +166,19 @@ public:
             return fallback;
         }
         if (!std::holds_alternative<std::string>(it->second)) {
-            throw FormatError(std::format(
+            throw FormatError(fmt::format(
                 "psrio: DADA key {} does not hold a string", upper(key)));
         }
         return std::get<std::string>(it->second);
     }
 
-    [[nodiscard]] std::uint64_t header_bytes() const noexcept { return m_hdr_size; }
+    [[nodiscard]] std::uint64_t header_bytes() const noexcept {
+        return m_hdr_size;
+    }
 
     [[nodiscard]] BasebandHeader to_baseband_header() const {
         if (!has_key("NBIT") || !has_key("NPOL") || !has_key("TSAMP")) {
-            throw FormatError(
-                "psrio: DADA header needs NBIT, NPOL, and TSAMP");
+            throw FormatError("psrio: DADA header needs NBIT, NPOL, and TSAMP");
         }
         BasebandHeader out;
         out.format = BasebandFormat::kDada;
@@ -180,18 +186,19 @@ public:
         out.npol   = static_cast<std::uint64_t>(require_positive("NPOL"));
         out.nchan  = static_cast<std::uint64_t>(
             has_key("NCHAN") ? require_positive("NCHAN") : 1);
-        out.nants  = 1;
-        out.nbit   = static_cast<int>(int_or("NBIT", std::int64_t{8}));
-        out.ndim   = static_cast<int>(int_or("NDIM", std::int64_t{1}));
+        out.nants = 1;
+        out.nbit  = static_cast<int>(int_or("NBIT", std::int64_t{8}));
+        out.ndim  = static_cast<int>(int_or("NDIM", std::int64_t{1}));
         if (out.ndim != 1 && out.ndim != 2) {
             throw ValidationError("psrio: DADA NDIM must be 1 or 2");
         }
-        out.samples_signed = out.nbit < 0 || out.ndim == 2;
-        out.tsamp          = real_or("TSAMP", 0.0) * 1.0e-6;
+        out.samples_signed   = out.nbit < 0 || out.ndim == 2;
+        out.tsamp            = real_or("TSAMP", 0.0) * 1.0e-6;
         const auto bandwidth = has_key("BW") ? real_or("BW", 0.0) : 0.0;
         const auto center    = has_key("FREQ") ? real_or("FREQ", 0.0) : 0.0;
-        out.foff = out.nchan == 0U ? 0.0 : bandwidth / static_cast<double>(out.nchan);
-        out.fch1 = center - (bandwidth / 2.0) + (out.foff / 2.0);
+        out.foff =
+            out.nchan == 0U ? 0.0 : bandwidth / static_cast<double>(out.nchan);
+        out.fch1             = center - (bandwidth / 2.0) + (out.foff / 2.0);
         out.bandwidth        = std::abs(bandwidth);
         out.center_frequency = center;
         out.source           = string_or("SOURCE", "Unknown");
@@ -209,8 +216,9 @@ public:
             if (!has_key("MJD_START")) {
                 constexpr double kUnixEpochMjd = 40587.0;
                 constexpr double kSecondsInDay = 86400.0;
-                out.tstart = kUnixEpochMjd +
-                             (static_cast<double>(out.utc_start) / kSecondsInDay);
+                out.tstart =
+                    kUnixEpochMjd +
+                    (static_cast<double>(out.utc_start) / kSecondsInDay);
             }
         } else if (out.tstart != 0.0) {
             out.utc_start = astro::mjd_to_time(out.tstart);
@@ -242,7 +250,7 @@ private:
         const auto value = int_or(key, std::int64_t{0});
         if (value <= 0) {
             throw ValidationError(
-                std::format("psrio: DADA {} must be positive", key));
+                fmt::format("psrio: DADA {} must be positive", key));
         }
         return value;
     }
@@ -250,10 +258,11 @@ private:
     void store(const std::string& key, std::string_view value) {
         if (is_int_key(key)) {
             try {
-                m_entries[key] = static_cast<std::int64_t>(std::stoll(std::string{value}));
+                m_entries[key] =
+                    static_cast<std::int64_t>(std::stoll(std::string{value}));
             } catch (const std::exception&) {
                 throw FormatError(
-                    std::format("psrio: DADA key {} is not an integer", key));
+                    fmt::format("psrio: DADA key {} is not an integer", key));
             }
             return;
         }
@@ -262,7 +271,7 @@ private:
                 m_entries[key] = std::stod(std::string{value});
             } catch (const std::exception&) {
                 throw FormatError(
-                    std::format("psrio: DADA key {} is not a number", key));
+                    fmt::format("psrio: DADA key {} is not a number", key));
             }
             return;
         }
@@ -270,10 +279,11 @@ private:
     }
 
     [[nodiscard]] static bool is_int_key(std::string_view key) {
-        return key == "HDR_SIZE" || key == "FILE_SIZE" || key == "FILE_NUMBER" ||
-               key == "OBS_OFFSET" || key == "OBS_OVERLAP" || key == "NBIT" ||
-               key == "NDIM" || key == "NPOL" || key == "NCHAN" ||
-               key == "RESOLUTION" || key == "DSB";
+        return key == "HDR_SIZE" || key == "FILE_SIZE" ||
+               key == "FILE_NUMBER" || key == "OBS_OFFSET" ||
+               key == "OBS_OVERLAP" || key == "NBIT" || key == "NDIM" ||
+               key == "NPOL" || key == "NCHAN" || key == "RESOLUTION" ||
+               key == "DSB";
     }
 
     [[nodiscard]] static bool is_real_key(std::string_view key) {
@@ -338,7 +348,8 @@ public:
         open_files(files);
     }
 
-    [[nodiscard]] static DadaReader open(std::span<const std::filesystem::path> files) {
+    [[nodiscard]] static DadaReader
+    open(std::span<const std::filesystem::path> files) {
         return DadaReader(files);
     }
 
@@ -352,20 +363,22 @@ public:
         return m_header;
     }
     [[nodiscard]] std::uint64_t npol() const noexcept { return m_header.npol; }
-    [[nodiscard]] std::uint64_t nchan() const noexcept { return m_header.nchan; }
-    [[nodiscard]] std::uint64_t nants() const noexcept { return m_header.nants; }
+    [[nodiscard]] std::uint64_t nchan() const noexcept {
+        return m_header.nchan;
+    }
+    [[nodiscard]] std::uint64_t nants() const noexcept {
+        return m_header.nants;
+    }
     [[nodiscard]] int nbit() const noexcept { return m_header.nbit; }
     [[nodiscard]] int ndim() const noexcept { return m_header.ndim; }
-    [[nodiscard]] SampleType sample_type() const { return m_header.sample_type(); }
+    [[nodiscard]] SampleType sample_type() const {
+        return m_header.sample_type();
+    }
     [[nodiscard]] bool samples_signed() const noexcept {
         return m_header.samples_signed;
     }
-    [[nodiscard]] bool msb_first() const noexcept {
-        return m_header.msb_first;
-    }
-    void set_msb_first(bool msb) noexcept {
-        m_header.msb_first = msb;
-    }
+    [[nodiscard]] bool msb_first() const noexcept { return m_header.msb_first; }
+    void set_msb_first(bool msb) noexcept { m_header.msb_first = msb; }
     [[nodiscard]] std::uint64_t bytes_per_sample() const noexcept {
         return m_stride;
     }
@@ -490,16 +503,15 @@ public:
             m_scratch_bytes.resize(needed);
         }
         const std::span<std::byte> packed(m_scratch_bytes.data(), needed);
-        const auto got    = read_block(take, packed);
-        const auto values = got * m_header.values_per_sample();
+        const auto got         = read_block(take, packed);
+        const auto values      = got * m_header.values_per_sample();
         auto geometry          = m_layout;
         geometry.pol_major     = false;
         geometry.channel_major = false;
         if constexpr (kIsBasebandComplex<T>) {
             detail::unpack_complex(
                 packed.first(static_cast<std::size_t>(got * m_stride)),
-                dest.first(static_cast<std::size_t>(values)),
-                geometry);
+                dest.first(static_cast<std::size_t>(values)), geometry);
         } else {
             detail::unpack_components(
                 packed.first(static_cast<std::size_t>(got * m_stride)),
@@ -513,7 +525,8 @@ public:
         const auto values = count * m_header.values_per_sample();
         std::vector<T> out(static_cast<std::size_t>(values));
         const auto actual = read_samples(count, std::span<T>(out));
-        out.resize(static_cast<std::size_t>(actual * m_header.values_per_sample()));
+        out.resize(
+            static_cast<std::size_t>(actual * m_header.values_per_sample()));
         return out;
     }
 
@@ -532,16 +545,14 @@ public:
         const std::span<std::byte> native(m_scratch_bytes.data(), needed);
         const auto got = read_block(take, native);
         detail::arrange_dual_pol(
-            native.first(static_cast<std::size_t>(got * m_stride)),
-            got, nsamps, m_header.nchan, m_header.nbit,
+            native.first(static_cast<std::size_t>(got * m_stride)), got, nsamps,
+            m_header.nchan, m_header.nbit,
             how.frequency_ascending && m_header.foff < 0.0,
             how.order == VoltageOrder::kFreqMajor, dest);
         return got;
     }
 
-    [[nodiscard]] static std::size_t num_groups() noexcept {
-        return 1;
-    }
+    [[nodiscard]] static std::size_t num_groups() noexcept { return 1; }
 
     std::uint64_t read_native(std::uint64_t count, std::span<std::byte> dest) {
         return read_block(count, dest);
@@ -550,16 +561,19 @@ public:
     std::uint64_t read_groups(std::uint64_t count,
                               std::span<std::span<std::byte>> dest_groups) {
         if (dest_groups.size() != 1U) {
-            throw ValidationError("psrio: dest_groups size must match num_groups()");
+            throw ValidationError(
+                "psrio: dest_groups size must match num_groups()");
         }
-        return read_voltages(
-            count,
-            VoltageRead{.order = VoltageOrder::kFreqMajor,
-                        .frequency_ascending = true,},
-            dest_groups[0]);
+        return read_voltages(count,
+                             VoltageRead{
+                                 .order = VoltageOrder::kFreqMajor,
+                                 .frequency_ascending = true,
+                             },
+                             dest_groups[0]);
     }
 
-    [[nodiscard]] std::vector<std::vector<std::byte>> read_groups(std::uint64_t count) {
+    [[nodiscard]] std::vector<std::vector<std::byte>>
+    read_groups(std::uint64_t count) {
         std::vector<std::vector<std::byte>> buffers(1);
         buffers[0].resize(static_cast<std::size_t>(count * m_stride));
         std::array<std::span<std::byte>, 1> group_array{buffers[0]};
@@ -585,14 +599,14 @@ private:
 
     [[nodiscard]] detail::BasebandLayout layout() const {
         detail::BasebandLayout out;
-        out.nants           = m_header.nants;
-        out.nchan           = m_header.nchan;
-        out.npol            = m_header.npol;
-        out.nbit            = m_header.nbit;
-        out.ndim            = m_header.ndim;
-        out.samples_signed  = m_header.samples_signed;
-        out.msb_first       = m_header.msb_first;
-        out.channel_major   = m_header.order == BasebandOrder::kChannelMajor;
+        out.nants          = m_header.nants;
+        out.nchan          = m_header.nchan;
+        out.npol           = m_header.npol;
+        out.nbit           = m_header.nbit;
+        out.ndim           = m_header.ndim;
+        out.samples_signed = m_header.samples_signed;
+        out.msb_first      = m_header.msb_first;
+        out.channel_major  = m_header.order == BasebandOrder::kChannelMajor;
         return out;
     }
 
@@ -624,7 +638,8 @@ private:
             if (offset < 0) {
                 throw ValidationError("psrio: DADA OBS_OFFSET must be >= 0");
             }
-            items.push_back(Item{.path = file, .offset = static_cast<std::uint64_t>(offset)});
+            items.push_back(Item{.path   = file,
+                                 .offset = static_cast<std::uint64_t>(offset)});
         }
         std::ranges::stable_sort(items,
                                  [](const Item& left, const Item& right) {
@@ -645,34 +660,38 @@ private:
         }
         DadaHeader header;
         const auto hdr_bytes = header.parse(segment.mapped.bytes());
-        const auto filename  = m_header.filename.empty() ? path.string() : m_header.filename;
-        auto built           = header.to_baseband_header();
-        built.filename       = filename;
+        const auto filename =
+            m_header.filename.empty() ? path.string() : m_header.filename;
+        auto built     = header.to_baseband_header();
+        built.filename = filename;
         if (m_segments.empty()) {
-            m_header             = std::move(built);
-            m_header.nsamples    = 0;
-            m_header.has_nsamples = true;
-            m_header.overlap     = 0;
-            m_stride             = m_header.bytes_per_sample();
-            m_layout             = layout();
-            m_layout.pol_major   = m_header.npol > 1U && m_header.nchan > 1U;
+            m_header               = std::move(built);
+            m_header.nsamples      = 0;
+            m_header.has_nsamples  = true;
+            m_header.overlap       = 0;
+            m_stride               = m_header.bytes_per_sample();
+            m_layout               = layout();
+            m_layout.pol_major     = m_header.npol > 1U && m_header.nchan > 1U;
             m_layout.channel_major = false;
-            const auto resolution = header.int_or("RESOLUTION", std::int64_t{1});
+            const auto resolution =
+                header.int_or("RESOLUTION", std::int64_t{1});
             if (resolution > 1 &&
                 m_stride % static_cast<std::uint64_t>(resolution) != 0U) {
-                throw ValidationError(
-                    "psrio: DADA sample stride is not a multiple of RESOLUTION");
+                throw ValidationError("psrio: DADA sample stride is not a "
+                                      "multiple of RESOLUTION");
             }
-        } else if (built.npol != m_header.npol || built.nchan != m_header.nchan ||
+        } else if (built.npol != m_header.npol ||
+                   built.nchan != m_header.nchan ||
                    built.nbit != m_header.nbit || built.ndim != m_header.ndim ||
                    built.tsamp != m_header.tsamp) {
             throw ValidationError("psrio: DADA files do not share a geometry");
         }
         const auto file_size = segment.mapped.bytes().size();
         if (hdr_bytes > file_size) {
-            throw FormatError("psrio: DADA header extends past the end of the file");
+            throw FormatError(
+                "psrio: DADA header extends past the end of the file");
         }
-        const auto rest = file_size - hdr_bytes;
+        const auto rest     = file_size - hdr_bytes;
         const auto declared = header.int_or("FILE_SIZE", std::int64_t{0});
         if (declared < 0) {
             throw ValidationError("psrio: DADA FILE_SIZE must be >= 0");
@@ -681,7 +700,8 @@ private:
         if (declared > 0) {
             const auto dec = static_cast<std::uint64_t>(declared);
             if (dec > file_size) {
-                throw FormatError("psrio: DADA FILE_SIZE extends past the end of the file");
+                throw FormatError(
+                    "psrio: DADA FILE_SIZE extends past the end of the file");
             }
             if (dec == file_size || dec > rest) {
                 raw = dec - hdr_bytes;
@@ -700,11 +720,12 @@ private:
         if (overlap < 0) {
             throw ValidationError("psrio: DADA OBS_OVERLAP must be >= 0");
         }
-        const auto skip =
-            m_segments.empty() ? std::uint64_t{0}
-                               : static_cast<std::uint64_t>(overlap);
+        const auto skip = m_segments.empty()
+                              ? std::uint64_t{0}
+                              : static_cast<std::uint64_t>(overlap);
         if (skip > raw) {
-            throw ValidationError("psrio: DADA OBS_OVERLAP exceeds the payload");
+            throw ValidationError(
+                "psrio: DADA OBS_OVERLAP exceeds the payload");
         }
         const auto obs_offset = header.int_or("OBS_OFFSET", std::int64_t{0});
         if (obs_offset < 0) {
@@ -712,9 +733,11 @@ private:
         }
         if (!m_segments.empty()) {
             const auto& previous = m_segments.back();
-            const auto previous_end = previous.obs_offset + previous.raw_payload;
+            const auto previous_end =
+                previous.obs_offset + previous.raw_payload;
             if (static_cast<std::uint64_t>(obs_offset) + skip != previous_end) {
-                throw FormatError("psrio: DADA files do not meet in OBS_OFFSET");
+                throw FormatError(
+                    "psrio: DADA files do not meet in OBS_OFFSET");
             }
         }
         const auto valid = raw - skip;

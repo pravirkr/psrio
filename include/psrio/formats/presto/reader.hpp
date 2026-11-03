@@ -11,7 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <span>
 #include <string>
 #include <vector>
@@ -132,7 +132,7 @@ inline TimeSeriesReader::TimeSeriesReader(const std::filesystem::path& path) {
     }
 
     if (m_file.empty()) {
-        throw FormatError(std::format("psrio: PRESTO .dat file '{}' is empty",
+        throw FormatError(fmt::format("psrio: PRESTO .dat file '{}' is empty",
                                       dat_path.string()));
     }
 
@@ -141,7 +141,7 @@ inline TimeSeriesReader::TimeSeriesReader(const std::filesystem::path& path) {
         m_header.nsamples = m_available_samples;
     } else if (m_header.nsamples > m_available_samples) {
         m_warnings.push_back(
-            std::format("psrio: .inf declared {} samples but file only has {}",
+            fmt::format("psrio: .inf declared {} samples but file only has {}",
                         m_header.nsamples, m_available_samples));
         m_header.nsamples = m_available_samples;
     }
@@ -149,7 +149,7 @@ inline TimeSeriesReader::TimeSeriesReader(const std::filesystem::path& path) {
 
 inline void TimeSeriesReader::seek(std::uint64_t sample) {
     if (sample > m_header.nsamples) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: cannot seek to sample {} (total readable samples: {})",
             sample, m_header.nsamples));
     }
@@ -159,7 +159,7 @@ inline void TimeSeriesReader::seek(std::uint64_t sample) {
 inline std::uint64_t TimeSeriesReader::read_samples(std::uint64_t count,
                                                     std::span<float> dest) {
     if (dest.size() != count) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} values but the request needs {}",
             dest.size(), count));
     }
@@ -193,7 +193,7 @@ inline std::uint64_t TimeSeriesReader::read_samples(std::uint64_t count,
 inline std::uint64_t TimeSeriesReader::read_bytes(std::uint64_t nbytes,
                                                   std::span<std::byte> dest) {
     if (dest.size() != nbytes) {
-        throw ValidationError(std::format(
+        throw ValidationError(fmt::format(
             "psrio: destination has {} bytes but the request needs {}",
             dest.size(), nbytes));
     }

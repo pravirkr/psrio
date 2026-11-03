@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
-#include <format>
+#include <fmt/format.h>
 #include <fstream>
 #include <string>
 #include <variant>
@@ -188,38 +188,38 @@ inline void Header::make_inf(const std::filesystem::path& path) const {
     std::ofstream inf_out(path);
     if (!inf_out.is_open()) {
         throw IoError(
-            std::format("psrio: cannot create .inf file '{}'", path.string()));
+            fmt::format("psrio: cannot create .inf file '{}'", path.string()));
     }
     const std::string base = path.stem().string();
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Data file name without the suffix          =  {}\n", base);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Telescope used                             =  {}\n", telescope);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Instrument used                            =  {}\n", backend);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Object being observed                      =  {}\n", source);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " J2000 Right Ascension (hh:mm:ss.ssss)      =  {}\n", ra);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " J2000 Declination     (dd:mm:ss.ssss)      =  {}\n", dec);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Epoch of observation (MJD)                 =  {:.12f}\n", tstart);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Barycentered?           (1=yes, 0=no)      =  {}\n", barycentric);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Number of bins in the data                 =  {}\n", nsamples);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Width of each time bin (s)                 =  {:.12e}\n", tsamp);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Dispersion measure (cm-3 pc)               =  {:.5f}\n", dm);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Central freq of low channel (Mhz)          =  {:.6f}\n", fch1);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Total bandwidth (Mhz)                      =  {:.6f}\n", bandwidth());
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Number of channels                         =  {}\n", nchans);
-    inf_out << std::format(
+    inf_out << fmt::format(
         " Channel bandwidth (Mhz)                    =  {:.6f}\n", foff);
 }
 
