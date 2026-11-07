@@ -2,6 +2,7 @@
 #include "psrio/block_source.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/fbh5.hpp"
+#include "psrio/formats/sigproc/writer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -561,4 +562,36 @@ TEST_CASE("HDF5 foff may live on the file instead of the dataset", "[hdf5]") {
     write_filterbank(file.path(), 1, 1, 4, spec, cube);
     FilterbankFile source(file.path());
     CHECK(source.foff() == 0.25);
+}
+
+TEST_CASE("fbh5::open_block_source opens HDF5 beams and falls back to SIGPROC",
+          "[hdf5]") {
+    const TempFile file(".h5");
+    const std::vector<std::uint8_t> cube{1, 1, 1, 2, 2, 2};
+    write_filterbank(file.path(), 1, 2, 3, HeaderSpec{}, cube);
+
+    auto beam1 = psrio::formats::fbh5::open_block_source(file.path(), 1);
+    CHECK(beam1.nchans() == 3U);
+    std::vector<std::byte> gulp(3);
+    CHECK(beam1.read_block(1, gulp) == 1U);
+    CHECK(gulp[0] == std::byte{2});
+
+    CHECK_THROWS_AS(psrio::open_block_source(file.path()), psrio::FormatError);
+
+    const TempFile sigproc(".fil");
+    psrio::formats::sigproc::FilterbankHeader header;
+    header.nchans = 2;
+    header.nbits  = 8;
+    header.tsamp  = 1e-3;
+    header.fch1   = 1400.0;
+    header.foff   = -1.0;
+    {
+        psrio::formats::sigproc::FilterbankWriter writer(sigproc.path(),
+                                                         header);
+        const std::vector<std::uint8_t> data{9, 8};
+        writer.write_samples(1, std::span<const std::uint8_t>(data));
+    }
+    auto fallback = psrio::formats::fbh5::open_block_source(sigproc.path());
+    CHECK(fallback.nchans() == 2U);
+    CHECK(fallback.nsamples() == 1U);
 }

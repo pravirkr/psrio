@@ -1,11 +1,14 @@
+#include "psrio/detail/mmap.hpp"
 #include "psrio/psrio.hpp"
 
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/matchers/catch_matchers.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #include <array>
 #include <cstddef>
 #include <filesystem>
+#include <fstream>
 #include <span>
 #include <string>
 #include <string_view>
@@ -292,6 +295,241 @@ TEST_CASE("TimeSeriesReader error validation and boundary handling",
     REQUIRE_THROWS_AS(
         psrio::TimeSeriesReader(non_existent_dat, non_existent_inf),
         psrio::IoError);
+}
+
+namespace {
+
+class TempBase {
+public:
+    explicit TempBase(std::string_view name)
+        : m_base(std::filesystem::temp_directory_path() /
+                 ("psrio_tswriter_" + std::string(name))) {}
+    ~TempBase() {
+        std::error_code ec;
+        for (const char* ext : {".tim", ".dat", ".inf", ".ts"}) {
+            std::filesystem::remove(path(ext), ec);
+        }
+    }
+    TempBase(const TempBase&)            = delete;
+    TempBase& operator=(const TempBase&) = delete;
+    TempBase(TempBase&&)                 = delete;
+    TempBase& operator=(TempBase&&)      = delete;
+
+    [[nodiscard]] std::filesystem::path path(std::string_view ext) const {
+        return std::filesystem::path(m_base).concat(ext);
+    }
+
+private:
+    std::filesystem::path m_base;
+};
+
+psrio::Header streaming_header() {
+    psrio::Header hdr;
+    hdr.source    = "J0534+2200";
+    hdr.telescope = "GBT";
+    hdr.backend   = "BPSR";
+    hdr.tstart    = 60001.25;
+    hdr.tsamp     = 64e-6;
+    hdr.dm        = 56.77;
+    hdr.nchans    = 4;
+    hdr.fch1      = 1500.0;
+    hdr.foff      = -1.0;
+    hdr.ra        = "05:34:31.9700";
+    hdr.dec       = "+22:00:52.0700";
+    hdr.raj       = 53431.97;
+    hdr.dej       = 220052.07;
+    return hdr;
+}
+
+std::vector<float> ramp(std::size_t count) {
+    std::vector<float> values(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        values[i] = (static_cast<float>(i) * 0.5F) - 7.0F;
+    }
+    return values;
+}
+
+/// Write @p values in three uneven chunks.
+template <typename Writer>
+void write_in_chunks(Writer& writer, std::span<const float> values) {
+    writer.write_samples(values.first(7));
+    writer.write_samples(values.subspan(7, 0));
+    writer.write_samples(values.subspan(7));
+}
+
+void check_common(const psrio::TimeSeriesReader& reader, std::size_t nsamples) {
+    const auto& hdr = reader.header();
+    CHECK(reader.nsamples() == nsamples);
+    CHECK(hdr.source == "J0534+2200");
+    CHECK(hdr.telescope == "GBT");
+    CHECK_THAT(hdr.dm, WithinAbs(56.77, 1e-9));
+    CHECK_THAT(hdr.tsamp, WithinAbs(64e-6, 1e-15));
+    CHECK_THAT(hdr.tstart, WithinAbs(60001.25, 1e-10));
+}
+
+} // namespace
+
+TEST_CASE("SigprocTimeSeriesWriter streams chunks to a .tim file",
+          "[timeseries][writer]") {
+    const TempBase base("sigproc");
+    const auto values = ramp(29);
+    {
+        psrio::SigprocTimeSeriesWriter writer(base.path(".tim"),
+                                              streaming_header());
+        write_in_chunks(writer, values);
+        CHECK(writer.nsamples_written() == values.size());
+        CHECK(writer.header().nsamples == values.size());
+    }
+
+    psrio::TimeSeriesReader reader(base.path(".tim"));
+    check_common(reader, values.size());
+    CHECK(reader.header().nchans == 1);
+    CHECK(reader.header().backend == "BPSR");
+    CHECK(reader.fch1() == 1500.0);
+    CHECK(reader.foff() == -1.0);
+    CHECK(reader.raj() == 53431.97);
+    CHECK(reader.read_samples(values.size()) == values);
+}
+
+TEST_CASE("SigprocTimeSeriesWriter writes refdm at DM 0",
+          "[timeseries][writer]") {
+    const TempBase base("dm0");
+    auto hdr = streaming_header();
+    hdr.dm   = 0.0;
+    {
+        const psrio::SigprocTimeSeriesWriter writer(base.path(".tim"), hdr);
+    }
+    const psrio::detail::MappedFile file(base.path(".tim"));
+    const auto raw =
+        psrio::formats::sigproc::FilterbankHeader::parse(file.bytes());
+    CHECK(raw.refdm == 0.0);
+    CHECK(raw.data_type == 2);
+    CHECK(raw.telescope_id == 6);
+    CHECK(raw.machine_id == 10);
+}
+
+TEST_CASE("PrestoTimeSeriesWriter streams chunks and writes the .inf on close",
+          "[timeseries][writer]") {
+    const TempBase base("presto");
+    const auto values = ramp(31);
+
+    psrio::formats::presto::PrestoTimeSeriesWriter writer(base.path(".dat"),
+                                                          streaming_header());
+    CHECK(writer.dat_path() == base.path(".dat"));
+    CHECK(writer.inf_path() == base.path(".inf"));
+    write_in_chunks(writer, values);
+    CHECK_FALSE(std::filesystem::exists(base.path(".inf")));
+    writer.close();
+    REQUIRE(std::filesystem::exists(base.path(".inf")));
+    CHECK_THROWS_AS(writer.write_samples(values), psrio::IoError);
+
+    psrio::TimeSeriesReader reader(base.path(".dat"));
+    check_common(reader, values.size());
+    CHECK(reader.header().backend == "BPSR");
+    CHECK(reader.header().ra == "05:34:31.9700");
+    CHECK(reader.header().dec == "+22:00:52.0700");
+    CHECK_THAT(reader.fch1(), WithinAbs(1497.0, 1e-9));
+    CHECK_THAT(reader.foff(), WithinAbs(1.0, 1e-9));
+    CHECK(reader.read_samples(values.size()) == values);
+}
+
+TEST_CASE("TimeSeriesWriter picks the format", "[timeseries][writer]") {
+    const TempBase base("unified");
+    const auto values = ramp(12);
+
+    SECTION("from a .tim extension") {
+        {
+            psrio::TimeSeriesWriter writer(base.path(".tim"),
+                                           streaming_header());
+            CHECK(writer.format() == psrio::TimeSeriesFormat::kSigprocTim);
+            CHECK(writer.path() == base.path(".tim"));
+            write_in_chunks(writer, values);
+        }
+        psrio::TimeSeriesReader reader(base.path(".tim"));
+        check_common(reader, values.size());
+        CHECK(reader.read_samples(values.size()) == values);
+    }
+    SECTION("from a .dat extension") {
+        {
+            psrio::TimeSeriesWriter writer(base.path(".dat"),
+                                           streaming_header());
+            CHECK(writer.format() == psrio::TimeSeriesFormat::kPrestoDat);
+            CHECK(writer.path() == base.path(".dat"));
+            write_in_chunks(writer, values);
+            CHECK(writer.nsamples_written() == values.size());
+        }
+        psrio::TimeSeriesReader reader(base.path(".dat"));
+        check_common(reader, values.size());
+        CHECK(reader.read_samples(values.size()) == values);
+    }
+    SECTION("explicitly, whatever the extension") {
+        {
+            psrio::TimeSeriesWriter writer(
+                base.path(".ts"), streaming_header(),
+                psrio::TimeSeriesFormat::kSigprocTim);
+            writer.write_samples(values);
+            writer.close();
+            CHECK_FALSE(writer.is_open());
+        }
+        const psrio::TimeSeriesReader reader(base.path(".ts"));
+        check_common(reader, values.size());
+    }
+    SECTION("rejects an unknown extension") {
+        CHECK_THROWS_AS(
+            psrio::TimeSeriesWriter(base.path(".ts"), streaming_header()),
+            psrio::ValidationError);
+    }
+    SECTION("rejects a non-positive tsamp") {
+        auto hdr  = streaming_header();
+        hdr.tsamp = 0.0;
+        CHECK_THROWS_AS(psrio::TimeSeriesWriter(base.path(".tim"), hdr),
+                        psrio::ValidationError);
+        CHECK_THROWS_AS(psrio::TimeSeriesWriter(base.path(".dat"), hdr),
+                        psrio::ValidationError);
+    }
+}
+
+TEST_CASE("Header::make_inf writes PRESTO's full field layout",
+          "[timeseries][make_inf]") {
+    const TempBase base("layout");
+    streaming_header().make_inf(base.path(".inf"));
+
+    std::ifstream in(base.path(".inf"));
+    std::vector<std::string> labels;
+    for (std::string line; std::getline(in, line);) {
+        const auto eq = line.find('=');
+        if (eq != std::string::npos) {
+            const auto end = line.find_last_not_of(' ', eq - 1);
+            labels.push_back(line.substr(1, end));
+        }
+    }
+    const std::vector<std::string> expected{
+        "Data file name without suffix",
+        "Telescope used",
+        "Instrument used",
+        "Object being observed",
+        "J2000 Right Ascension (hh:mm:ss.ssss)",
+        "J2000 Declination     (dd:mm:ss.ssss)",
+        "Data observed by",
+        "Epoch of observation (MJD)",
+        "Barycentered?           (1 yes, 0 no)",
+        "Number of bins in the time series",
+        "Width of each time series bin (sec)",
+        "Any breaks in the data? (1 yes, 0 no)",
+        "Type of observation (EM band)",
+        "Beam diameter (arcsec)",
+        "Dispersion measure (cm-3 pc)",
+        "Central freq of low channel (MHz)",
+        "Total bandwidth (MHz)",
+        "Number of channels",
+        "Channel bandwidth (MHz)",
+        "Data analyzed by",
+    };
+    CHECK(labels == expected);
+
+    const auto parsed = psrio::Header::from_inffile(base.path(".inf"));
+    CHECK_THAT(parsed.fch1, WithinAbs(1497.0, 1e-9));
+    CHECK_THAT(parsed.foff, WithinAbs(1.0, 1e-9));
 }
 
 TEST_CASE("Header::make_inf produces valid parseable PRESTO metadata",

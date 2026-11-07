@@ -2,6 +2,7 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/memory.hpp"
 #include "psrio/formats/sigproc/reader.hpp"
+#include "psrio/open.hpp"
 #include "sigproc_bytes.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -166,10 +167,16 @@ TEST_CASE("BlockSource exposes metadata, fswap, multi-type unpacking, and "
     REQUIRE(block1[2] == std::byte{60});
     REQUIRE(block1[3] == std::byte{50});
 
-    // Rewind and read uint8_t samples
+    // Rewind and read uint8_t samples; fswap reverses each sample's channels
     source.rewind();
     REQUIRE(source.tell() == 0U);
     std::vector<std::uint8_t> u8_out(8);
+    REQUIRE(source.read_samples(2, std::span<std::uint8_t>{u8_out}) == 2U);
+    REQUIRE(u8_out ==
+            std::vector<std::uint8_t>{40, 30, 20, 10, 80, 70, 60, 50});
+
+    source.rewind();
+    source.set_fswap(false);
     REQUIRE(source.read_samples(2, std::span<std::uint8_t>{u8_out}) == 2U);
     REQUIRE(u8_out[0] == 10);
     REQUIRE(u8_out[3] == 40);
@@ -215,4 +222,26 @@ TEST_CASE("skip rejects a landing index outside the file", "[block]") {
     REQUIRE(reader.tell() == 2U);
     std::vector<std::byte> one(1);
     REQUIRE(reader.read_block(1, one) == 0U);
+}
+
+TEST_CASE("open_block_source opens SIGPROC filterbanks", "[block][open]") {
+    const auto tutorial =
+        std::filesystem::path(PSRIO_TEST_DATA_DIR) / "tutorial.fil";
+    const auto source = psrio::open_block_source(tutorial);
+    const FilterbankReader reader(tutorial);
+    CHECK(source.nchans() == reader.nchans());
+    CHECK(source.nsamples() == reader.nsamples());
+    CHECK(source.tsamp() == reader.tsamp());
+
+    CHECK_THROWS_AS(psrio::open_block_source(tutorial, 1),
+                    psrio::ValidationError);
+    CHECK_THROWS_AS(psrio::open_block_source("missing.h5"), psrio::FormatError);
+
+    const std::array<std::byte, 12> hdf5_head{
+        std::byte{0x89}, std::byte{'H'},  std::byte{'D'},  std::byte{'F'},
+        std::byte{'\r'}, std::byte{'\n'}, std::byte{0x1a}, std::byte{'\n'},
+    };
+    const TempFile disguised(hdf5_head);
+    CHECK_THROWS_AS(psrio::open_block_source(disguised.path()),
+                    psrio::FormatError);
 }

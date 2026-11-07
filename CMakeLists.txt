@@ -35,6 +35,7 @@ endif()
 
 # Configuration options
 option(PSRIO_BUILD_TESTS "Build test suite" ${PSRIO_IS_TOP_LEVEL})
+option(PSRIO_BUILD_APPLICATIONS "Build psrio CLI applications" ${PSRIO_IS_TOP_LEVEL})
 option(PSRIO_BUILD_DOCS "Build documentation" OFF)
 option(PSRIO_ENABLE_COVERAGE "Enable code coverage for tests" OFF)
 option(PSRIO_WITH_HDF5 "Enable the opt-in FBH5 reader" OFF)
@@ -73,14 +74,21 @@ endif()
 # fmt (header-only) formats diagnostic and metadata strings. libstdc++ before
 # GCC 13 has no std::format. A parent that already defines fmt::fmt-header-only
 # (fmt 12.1 or newer) shares that target; define it before adding psrio.
-# Otherwise fmt 12.1.0 is fetched. psrio does not install fmt.
+# Otherwise fmt 12.1.0 is fetched. psrio does not install fmt, except with the
+# applications: dmt installs spdlog unconditionally, and spdlog's export set
+# needs fmt in one too.
+if(PSRIO_BUILD_APPLICATIONS)
+  set(PSRIO_FMT_INSTALL ON)
+else()
+  set(PSRIO_FMT_INSTALL OFF)
+endif()
 if(NOT TARGET fmt::fmt-header-only)
   CPMAddPackage(
     NAME fmt
     VERSION 12.1.0
     URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
     URL_HASH SHA256=ea7de4299689e12b6dddd392f9896f08fb0777ac7168897a244a6d6085043fea
-    OPTIONS "FMT_INSTALL OFF"
+    OPTIONS "FMT_INSTALL ${PSRIO_FMT_INSTALL}"
     EXCLUDE_FROM_ALL YES
     SYSTEM YES
   )
@@ -136,12 +144,10 @@ if(PSRIO_WITH_PSRDADA)
 endif()
 
 # ------------------------------------------------------------------------------
-# Testing & Developer Builds
+# Testing, Applications & Developer Builds
 # ------------------------------------------------------------------------------
-if(PSRIO_BUILD_TESTS)
-  enable_testing()
-
-  # Developer warning & optimization flags - isolated to test targets
+if(PSRIO_BUILD_TESTS OR PSRIO_BUILD_APPLICATIONS)
+  # Developer warning & optimization flags - isolated to test and CLI targets
   add_library(psrio_developer_flags INTERFACE)
   target_compile_options(
     psrio_developer_flags
@@ -167,7 +173,15 @@ if(PSRIO_BUILD_TESTS)
     target_compile_options(psrio_developer_flags INTERFACE --coverage -O0 -g)
     target_link_options(psrio_developer_flags INTERFACE --coverage)
   endif()
+endif()
 
+# Applications come first so the tests can link the CLI command library.
+if(PSRIO_BUILD_APPLICATIONS)
+  add_subdirectory(applications)
+endif()
+
+if(PSRIO_BUILD_TESTS)
+  enable_testing()
   add_subdirectory(tests)
 endif()
 
@@ -226,6 +240,7 @@ message(STATUS "psrio ${PROJECT_VERSION} configured successfully")
 message(STATUS "  - Type: Header-only library")
 message(STATUS "  - Standard: C++20")
 message(STATUS "  - Build Tests: ${PSRIO_BUILD_TESTS}")
+message(STATUS "  - Build Applications: ${PSRIO_BUILD_APPLICATIONS}")
 message(STATUS "  - FBH5 (HDF5): ${PSRIO_WITH_HDF5}")
 message(STATUS "  - PSRDADA: ${PSRIO_WITH_PSRDADA}")
 message(STATUS "--------------------------------------------------------")

@@ -46,8 +46,10 @@ file(
   CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/*.cpp
 )
-# Opt-in formats compile only in their own test binaries.
-list(FILTER TEST_SOURCES EXCLUDE REGEX "test_fbh5\\.cpp$|test_psrdada\\.cpp$")
+# Opt-in formats and the CLI compile only in their own test binaries.
+list(FILTER TEST_SOURCES EXCLUDE REGEX
+     "test_fbh5\\.cpp$|test_psrdada\\.cpp$|test_cli_commands\\.cpp$"
+)
 
 add_executable(${TARGET_TESTS} ${TEST_SOURCES})
 
@@ -70,6 +72,22 @@ if(PSRIO_WITH_HDF5)
   )
   catch_discover_tests(
     psrio_fbh5_tests
+    PROPERTIES
+    ENVIRONMENT "HDF5_DISABLE_VERSION_CHECK=2"
+  )
+endif()
+
+if(TARGET psrio_cli_commands)
+  add_executable(psrio_cli_tests ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_commands.cpp)
+  target_link_libraries(
+    psrio_cli_tests PRIVATE psrio_cli_commands dmt::dmt Catch2::Catch2WithMain
+                            psrio_developer_flags
+  )
+  target_compile_definitions(
+    psrio_cli_tests PRIVATE "PSRIO_TEST_DATA_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/data\""
+  )
+  catch_discover_tests(
+    psrio_cli_tests
     PROPERTIES
     ENVIRONMENT "HDF5_DISABLE_VERSION_CHECK=2"
   )

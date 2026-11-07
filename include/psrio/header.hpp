@@ -10,7 +10,9 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <iterator>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
@@ -121,19 +123,43 @@ struct Header {
 
     // Factory methods
     [[nodiscard]] static Header from_sigproc(const std::filesystem::path& path);
+    /// Build from an already parsed SIGPROC header, without touching the file.
+    [[nodiscard]] static Header
+    from_sigproc(const formats::sigproc::FilterbankHeader& raw,
+                 std::string_view filename = "");
     [[nodiscard]] static Header from_inffile(const std::filesystem::path& path);
     [[nodiscard]] static Header from_file(const std::filesystem::path& path);
 
-    // Serialization
+    /// SIGPROC header with the same metadata.
+    ///
+    /// data_type is 2 for a single-channel time series and 1 otherwise.
+    /// telescope and backend map to ids only when the name is listed in the
+    /// SIGPROC tables. refdm is set when dm is non-zero, period when positive,
+    /// nbeams when positive. extra_keys are not carried over.
+    [[nodiscard]] formats::sigproc::FilterbankHeader to_sigproc() const;
+
+    /// Write a PRESTO `.inf` file in the field order PRESTO's readinf expects.
+    ///
+    /// The "Central freq of low channel" is the lowest channel centre and the
+    /// channel bandwidth is positive, whichever way foff points. nchans is the
+    /// number of channels summed into the series.
+    /// @throws IoError if the file cannot be written.
     void make_inf(const std::filesystem::path& path) const;
 };
 
 inline Header Header::from_sigproc(const std::filesystem::path& path) {
     const detail::MappedFile file(path);
-    const auto raw =
-        formats::sigproc::FilterbankHeader::parse(file.bytes(), path.string());
+    const auto path_str = path.string();
+    return from_sigproc(
+        formats::sigproc::FilterbankHeader::parse(file.bytes(), path_str),
+        path_str);
+}
+
+inline Header
+Header::from_sigproc(const formats::sigproc::FilterbankHeader& raw,
+                     std::string_view filename) {
     Header hdr;
-    hdr.filename    = path.string();
+    hdr.filename    = std::string(filename);
     hdr.tsamp       = raw.tsamp.value_or(0.0);
     hdr.tstart      = raw.tstart.value_or(0.0);
     hdr.nbits       = raw.nbits;
@@ -184,43 +210,88 @@ inline Header Header::from_sigproc(const std::filesystem::path& path) {
     return hdr;
 }
 
+inline formats::sigproc::FilterbankHeader Header::to_sigproc() const {
+    namespace sp = formats::sigproc;
+    sp::FilterbankHeader raw;
+    raw.nchans       = nchans;
+    raw.nifs         = nifs;
+    raw.nbits        = nbits;
+    raw.tsamp        = tsamp;
+    raw.tstart       = tstart;
+    raw.fch1         = fch1;
+    raw.foff         = foff;
+    raw.data_type    = (nchans == 1 && data_type == "time series") ? 2 : 1;
+    raw.telescope_id = sp::telescope_id_from_name(telescope);
+    raw.machine_id   = sp::machine_id_from_name(backend);
+    if (!source.empty()) {
+        raw.source_name = source;
+    }
+    raw.src_raj     = raj;
+    raw.src_dej     = dej;
+    raw.az_start    = az_start;
+    raw.za_start    = za_start;
+    raw.barycentric = barycentric;
+    raw.ibeam       = ibeam;
+    if (dm != 0.0) {
+        raw.refdm = dm;
+    }
+    if (period > 0.0) {
+        raw.period = period;
+    }
+    if (nbeams > 0) {
+        raw.nbeams = nbeams;
+    }
+    return raw;
+}
+
 inline void Header::make_inf(const std::filesystem::path& path) const {
     std::ofstream inf_out(path);
     if (!inf_out.is_open()) {
         throw IoError(
             fmt::format("psrio: cannot create .inf file '{}'", path.string()));
     }
-    const std::string base = path.stem().string();
-    inf_out << fmt::format(
-        " Data file name without the suffix          =  {}\n", base);
-    inf_out << fmt::format(
-        " Telescope used                             =  {}\n", telescope);
-    inf_out << fmt::format(
-        " Instrument used                            =  {}\n", backend);
-    inf_out << fmt::format(
-        " Object being observed                      =  {}\n", source);
-    inf_out << fmt::format(
-        " J2000 Right Ascension (hh:mm:ss.ssss)      =  {}\n", ra);
-    inf_out << fmt::format(
-        " J2000 Declination     (dd:mm:ss.ssss)      =  {}\n", dec);
-    inf_out << fmt::format(
-        " Epoch of observation (MJD)                 =  {:.12f}\n", tstart);
-    inf_out << fmt::format(
-        " Barycentered?           (1=yes, 0=no)      =  {}\n", barycentric);
-    inf_out << fmt::format(
-        " Number of bins in the data                 =  {}\n", nsamples);
-    inf_out << fmt::format(
-        " Width of each time bin (s)                 =  {:.12e}\n", tsamp);
-    inf_out << fmt::format(
-        " Dispersion measure (cm-3 pc)               =  {:.5f}\n", dm);
-    inf_out << fmt::format(
-        " Central freq of low channel (Mhz)          =  {:.6f}\n", fch1);
-    inf_out << fmt::format(
-        " Total bandwidth (Mhz)                      =  {:.6f}\n", bandwidth());
-    inf_out << fmt::format(
-        " Number of channels                         =  {}\n", nchans);
-    inf_out << fmt::format(
-        " Channel bandwidth (Mhz)                    =  {:.6f}\n", foff);
+    const int channels   = nchans > 0 ? nchans : 1;
+    const double chan_bw = std::abs(foff);
+    const double low_centre =
+        foff < 0.0 ? fch1 + (foff * static_cast<double>(channels - 1)) : fch1;
+
+    std::string text;
+    const auto field = [&text](std::string_view label, const auto& value) {
+        fmt::format_to(std::back_inserter(text), " {:<39}=  {}\n", label,
+                       value);
+    };
+    field("Data file name without suffix", path.stem().string());
+    field("Telescope used", telescope);
+    field("Instrument used", backend);
+    field("Object being observed", source);
+    field("J2000 Right Ascension (hh:mm:ss.ssss)",
+          ra.empty() ? "00:00:00.0000" : ra);
+    field("J2000 Declination     (dd:mm:ss.ssss)",
+          dec.empty() ? "00:00:00.0000" : dec);
+    field("Data observed by", "Unknown");
+    field("Epoch of observation (MJD)", fmt::format("{:.15f}", tstart));
+    field("Barycentered?           (1 yes, 0 no)", barycentric);
+    field("Number of bins in the time series", nsamples);
+    field("Width of each time series bin (sec)", fmt::format("{:.15g}", tsamp));
+    field("Any breaks in the data? (1 yes, 0 no)", 0);
+    field("Type of observation (EM band)", "Radio");
+    field("Beam diameter (arcsec)", 0);
+    field("Dispersion measure (cm-3 pc)", fmt::format("{:.12g}", dm));
+    field("Central freq of low channel (MHz)",
+          fmt::format("{:.12g}", low_centre));
+    field("Total bandwidth (MHz)",
+          fmt::format("{:.12g}", chan_bw * static_cast<double>(channels)));
+    field("Number of channels", channels);
+    field("Channel bandwidth (MHz)", fmt::format("{:.12g}", chan_bw));
+    field("Data analyzed by", "psrio");
+    text.append(" Any additional notes:\n    Written by psrio.\n\n");
+
+    inf_out << text;
+    inf_out.close();
+    if (!inf_out) {
+        throw IoError(fmt::format("psrio: failed to write .inf file '{}'",
+                                  path.string()));
+    }
 }
 
 } // namespace psrio

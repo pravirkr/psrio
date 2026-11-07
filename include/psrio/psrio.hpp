@@ -15,6 +15,7 @@
 #include "psrio/formats/presto.hpp"    // IWYU pragma: export
 #include "psrio/formats/sigproc.hpp"   // IWYU pragma: export
 #include "psrio/header.hpp"            // IWYU pragma: export
+#include "psrio/open.hpp"              // IWYU pragma: export
 #include "psrio/packed.hpp"            // IWYU pragma: export
 #include "psrio/timeseries.hpp"        // IWYU pragma: export
 
@@ -29,6 +30,8 @@ constexpr std::string_view version() noexcept { return "0.4.0"; }
 using formats::dada::DadaReader;
 using formats::guppi::GuppiReader;
 using formats::guppi::GuppiSet;
+using formats::presto::PrestoTimeSeriesWriter;
 using formats::sigproc::FilterbankReader;
+using formats::sigproc::FilterbankWriter;
 
 } // namespace psrio

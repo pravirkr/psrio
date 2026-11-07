@@ -1,12 +1,16 @@
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/memory.hpp"
 #include "psrio/formats/sigproc/reader.hpp"
 #include "sigproc_bytes.hpp"
 
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
 #include <chrono>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -159,17 +163,83 @@ TEST_CASE("MemoryBlock supports non-owning spans, zero-copy views, fswap, and "
     REQUIRE(reversed[2] == std::byte{2});
     REQUIRE(reversed[3] == std::byte{1});
 
-    // Multi-type unpacking
+    // Multi-type unpacking (fswap still enabled: channels per sample reversed)
     mem.rewind();
     std::vector<std::uint8_t> u8_out(8);
     REQUIRE(mem.read_samples(2, std::span<std::uint8_t>{u8_out}) == 2U);
-    REQUIRE(u8_out[0] == 1);
-    REQUIRE(u8_out[7] == 8);
+    REQUIRE(u8_out == std::vector<std::uint8_t>{4, 3, 2, 1, 8, 7, 6, 5});
 
-    // Allocating read_samples<float>
+    // Allocating read_samples<float> in file order
     mem.rewind();
+    mem.set_fswap(false);
     const auto float_out = mem.read_samples<float>(2);
     REQUIRE(float_out.size() == 8U);
     REQUIRE(float_out[0] == 1.0F);
     REQUIRE(float_out[7] == 8.0F);
+}
+
+namespace {
+
+template <typename T>
+void check_memory_fswap(int nbits, psrio::BitOrder order) {
+    psrio::MemoryInfo info;
+    info.nchans                    = 8;
+    info.nifs                      = 2;
+    info.nbits                     = nbits;
+    info.bit_order                 = order;
+    constexpr std::uint64_t kSamps = 4;
+    const auto values              = kSamps * info.nchans * info.nifs;
+    std::vector<std::byte> payload;
+    if (nbits == 32) {
+        for (std::uint64_t i = 0; i < values; ++i) {
+            const auto value = (static_cast<float>(i) * 0.75F) - 3.0F;
+            const auto* raw  = reinterpret_cast<const std::byte*>(&value);
+            payload.insert(payload.end(), raw, raw + sizeof(float));
+        }
+    } else {
+        payload.resize(values * static_cast<std::uint64_t>(nbits) / 8U);
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            payload[i] = std::byte{static_cast<unsigned char>((i * 53U) + 7U)};
+        }
+    }
+    psrio::MemoryBlock block(info, payload);
+    const auto plain = block.read_samples<T>(kSamps);
+    block.rewind();
+    block.set_fswap(true);
+    const auto swapped = block.read_samples<T>(kSamps);
+    REQUIRE(swapped.size() == plain.size());
+    const auto rows = kSamps * info.nifs;
+    for (std::uint64_t row = 0; row < rows; ++row) {
+        for (std::uint64_t chan = 0; chan < info.nchans; ++chan) {
+            REQUIRE(swapped[(row * info.nchans) + chan] ==
+                    plain[(row * info.nchans) + (info.nchans - 1U - chan)]);
+        }
+    }
+
+    // read_block reverses every IF row of a packed sample the same way.
+    if constexpr (std::same_as<T, float>) {
+        block.rewind();
+        const auto packed = block.read_block(kSamps);
+        psrio::MemoryBlock reread(info, packed);
+        REQUIRE(reread.read_samples<float>(kSamps) == swapped);
+    }
+}
+
+} // namespace
+
+TEST_CASE("MemoryBlock read_samples honours set_fswap for every bit depth",
+          "[memory][fswap]") {
+    for (const int nbits : {1, 2, 4, 8, 16, 32}) {
+        for (const auto order :
+             {psrio::BitOrder::kLsbFirst, psrio::BitOrder::kMsbFirst}) {
+            CAPTURE(nbits);
+            check_memory_fswap<float>(nbits, order);
+            if (nbits <= 8) {
+                check_memory_fswap<std::uint8_t>(nbits, order);
+            }
+            if (nbits == 16) {
+                check_memory_fswap<std::uint16_t>(nbits, order);
+            }
+        }
+    }
 }

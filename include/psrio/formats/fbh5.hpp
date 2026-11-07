@@ -4,6 +4,7 @@
 #include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/open.hpp"
 #include "psrio/packed.hpp"
 
 #include <algorithm>
@@ -822,6 +823,11 @@ inline std::uint64_t FilterbankFile::read_samples(std::uint64_t count,
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
+    }
     m_sample += to_read;
     return to_read;
 }
@@ -865,6 +871,11 @@ FilterbankFile::read_samples(std::uint64_t count,
     } catch (const std::exception& e) {
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+    }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
     }
     m_sample += to_read;
     return to_read;
@@ -910,6 +921,11 @@ FilterbankFile::read_samples(std::uint64_t count,
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
     }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
+    }
     m_sample += to_read;
     return to_read;
 }
@@ -947,6 +963,20 @@ inline std::vector<std::byte> FilterbankFile::read_bytes(std::uint64_t nbytes) {
     const auto actual = read_bytes(nbytes, std::span<std::byte>(out));
     out.resize(static_cast<std::size_t>(actual));
     return out;
+}
+
+/// Open an HDF5 or SIGPROC filterbank as a type-erased BlockSource.
+///
+/// An HDF5 file (is_hdf5_filterbank()) opens beam @p beam as FilterbankFile.
+/// Anything else goes to psrio::open_block_source().
+[[nodiscard]] inline BlockSource
+open_block_source(const std::filesystem::path& path,
+                  std::uint64_t beam = 0,
+                  BitOrder bit_order = BitOrder::kLsbFirst) {
+    if (is_hdf5_filterbank(path)) {
+        return BlockSource(FilterbankFile(path, beam));
+    }
+    return ::psrio::open_block_source(path, beam, bit_order);
 }
 
 } // namespace psrio::formats::fbh5

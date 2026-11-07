@@ -852,6 +852,9 @@ inline void RingReader::unpack_to(std::span<const std::byte> packed,
     } else {
         throw FormatError("psrio: PSRDADA sample type cannot be unpacked");
     }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(output, samples, m_nchans);
+    }
 }
 
 template <typename T>

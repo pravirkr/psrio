@@ -5,6 +5,7 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -259,6 +260,36 @@ inline void reverse_channels(std::span<std::byte> gulp,
                              std::uint64_t nchans,
                              int nbits) {
     detail::reverse_channels_impl(gulp, nsamps, nchans, nbits);
+}
+
+/// Reverse channel order inside each unpacked time sample (and IF), in place.
+///
+/// Layout is time-major: `[nsamps][nifs][nchans]`. Each row of @p nchans
+/// values is reversed independently.
+/// @throws ValidationError if @p buffer holds fewer than
+///         `nsamps * nifs * nchans` values.
+template <typename T>
+inline void reverse_unpacked_channels(std::span<T> buffer,
+                                      std::uint64_t nsamps,
+                                      std::uint64_t nchans,
+                                      std::uint64_t nifs = 1) {
+    if (nchans <= 1U || nsamps == 0U || nifs == 0U) {
+        return;
+    }
+    if (nsamps > std::numeric_limits<std::uint64_t>::max() / nifs ||
+        nsamps * nifs > std::numeric_limits<std::uint64_t>::max() / nchans) {
+        throw ValidationError("psrio: channel reversal block is too large");
+    }
+    const auto total_rows = nsamps * nifs;
+    if (buffer.size() < total_rows * nchans) {
+        throw ValidationError(
+            "psrio: buffer too small for reverse_unpacked_channels");
+    }
+    const auto row_len = static_cast<std::size_t>(nchans);
+    for (std::uint64_t row = 0; row < total_rows; ++row) {
+        std::ranges::reverse(
+            buffer.subspan(static_cast<std::size_t>(row) * row_len, row_len));
+    }
 }
 
 // -----------------------------------------------------------------------------
