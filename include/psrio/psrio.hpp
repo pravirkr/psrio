@@ -9,6 +9,7 @@
 #include "psrio/common/concepts.hpp"   // IWYU pragma: export
 #include "psrio/common/types.hpp"      // IWYU pragma: export
 #include "psrio/detail/exceptions.hpp" // IWYU pragma: export
+#include "psrio/digifil.hpp"           // IWYU pragma: export
 #include "psrio/formats/dada.hpp"      // IWYU pragma: export
 #include "psrio/formats/guppi.hpp"     // IWYU pragma: export
 #include "psrio/formats/memory.hpp"    // IWYU pragma: export
@@ -17,6 +18,7 @@
 #include "psrio/header.hpp"            // IWYU pragma: export
 #include "psrio/open.hpp"              // IWYU pragma: export
 #include "psrio/packed.hpp"            // IWYU pragma: export
+#include "psrio/scrunch.hpp"           // IWYU pragma: export
 #include "psrio/timeseries.hpp"        // IWYU pragma: export
 
 #include <string_view>

@@ -440,6 +440,21 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
                                      static_cast<std::ptrdiff_t>(dm0.size())));
     }
 
+    SECTION("fdmt output does not depend on the gulp") {
+        for (const auto* fref : {"top", "bottom"}) {
+            for (const auto* gulp : {"1000", "4096", "262144"}) {
+                require_ok(psrio_run({"dedisperse", kTutorial.string(), "-o",
+                                      (dir.path() / gulp).string(), "-d",
+                                      "0,30", "--algo", "fdmt", "--fref", fref,
+                                      "--gulp", gulp}));
+            }
+            const auto whole = read_series(dir / "262144_DM30.16.tim");
+            REQUIRE(whole.size() > 100000U);
+            CHECK(read_series(dir / "1000_DM30.16.tim") == whole);
+            CHECK(read_series(dir / "4096_DM30.16.tim") == whole);
+        }
+    }
+
     SECTION("fdmt places an impulse on its own trace at the reference time") {
         const std::vector<float> grid{0.0F, 30.0F};
         const dmt::algorithms::FDMT plan_engine(

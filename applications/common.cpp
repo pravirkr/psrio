@@ -1,7 +1,6 @@
 #include "common.hpp"
 
 #include <psrio/detail/exceptions.hpp>
-#include <psrio/detail/mmap.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/formats/sigproc/reader.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
@@ -113,9 +112,7 @@ bool is_tim_path(const std::filesystem::path& path) {
 Input::Input(const std::filesystem::path& path) : m_path(path) {
     if (is_tim_path(path)) {
         m_series.emplace(path);
-        const detail::MappedFile file(path);
-        m_header =
-            sigproc::FilterbankHeader::parse(file.bytes(), path.string());
+        m_header = *m_series->sigproc_header();
         return;
     }
     if (is_presto_path(path)) {

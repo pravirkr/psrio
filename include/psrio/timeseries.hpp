@@ -68,6 +68,12 @@ public:
     /// Observational metadata header.
     [[nodiscard]] const Header& header() const noexcept { return m_header; }
 
+    /// The binary SIGPROC header of a `.tim` file, or nullptr for PRESTO.
+    [[nodiscard]] const formats::sigproc::FilterbankHeader*
+    sigproc_header() const noexcept {
+        return m_is_presto ? nullptr : &m_raw_sigproc;
+    }
+
     /// Number of time samples available to read.
     [[nodiscard]] std::uint64_t nsamples() const noexcept {
         return m_header.nsamples;
