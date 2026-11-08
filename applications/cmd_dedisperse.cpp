@@ -480,7 +480,7 @@ void add_dedisperse(CLI::App& app, Context& ctx) {
         "dedisperse",
         "Dedisperse a filterbank into time series with dmt (SIGPROC "
         "'dedisperse', PRESTO 'prepdata')");
-    sub->add_option("input", opts->input, "Input .fil or .h5")
+    sub->add_option("input", opts->input, "Input .fil, .sf/.fits, or .h5")
         ->required()
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,

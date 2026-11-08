@@ -39,7 +39,7 @@ void add_digifil(CLI::App& app, Context& ctx) {
     auto& config    = opts->config;
     auto* sub       = app.add_subcommand(
         "digifil", "Rescale and redigitise a filterbank, as dspsr's digifil");
-    sub->add_option("input", opts->input, "Input .fil or .h5")
+    sub->add_option("input", opts->input, "Input .fil, .sf/.fits, or .h5")
         ->required()
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output, "Output filterbank")

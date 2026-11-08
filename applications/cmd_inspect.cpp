@@ -341,9 +341,17 @@ Fields collect(const InspectOptions& opts) {
     if (is_presto_path(path)) {
         presto_fields(fields, TimeSeriesReader(path).header());
     } else {
-        const bool hdf5 = input.header().header_bytes == 0U;
-        sigproc_fields(fields, input.header(), input.nsamples(),
-                       hdf5 ? "FBH5" : "SIGPROC");
+        std::string_view format = "SIGPROC";
+        if (input.is_psrfits()) {
+            format = "PSRFITS";
+        } else if (input.header().header_bytes == 0U) {
+            format = "FBH5";
+        }
+        sigproc_fields(fields, input.header(), input.nsamples(), format);
+        if (input.is_psrfits()) {
+            fields.add("stored_nbits", "Stored bits per sample",
+                       input.stored_nbits());
+        }
     }
     if (opts.stats) {
         stats_fields(fields, input, opts.stats_samples);
@@ -412,8 +420,9 @@ void add_inspect(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "inspect", "Print the header of a data file (SIGPROC 'header')");
     sub->alias("header");
-    sub->add_option("input", opts->input,
-                    "Data file: .fil, .tim, .dat/.inf, .dada, .raw, or .h5")
+    sub->add_option(
+           "input", opts->input,
+           "Data file: .fil, .tim, .dat/.inf, .sf/.fits, .dada, .raw, or .h5")
         ->required()
         ->check(CLI::ExistingFile);
     sub->add_option("-k,--key", opts->key,

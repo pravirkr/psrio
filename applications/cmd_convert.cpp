@@ -112,7 +112,8 @@ void add_convert(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "convert",
         "Change bit depth or channel order, or convert .tim and .dat series");
-    sub->add_option("input", opts->input, "Input .fil, .tim, .dat, or .h5")
+    sub->add_option("input", opts->input,
+                    "Input .fil, .tim, .dat, .sf/.fits, or .h5")
         ->required()
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,

@@ -88,6 +88,10 @@ public:
     [[nodiscard]] std::uint64_t nifs() const;
     [[nodiscard]] int nbits() const;
     [[nodiscard]] double tsamp() const;
+    /// True when the input is a search-mode PSRFITS file.
+    [[nodiscard]] bool is_psrfits() const noexcept { return m_psrfits; }
+    /// Bits stored in a PSRFITS DATA column. Zero for other inputs.
+    [[nodiscard]] int stored_nbits() const noexcept { return m_stored_nbits; }
 
     /// Values in one time sample: nifs * nchans.
     [[nodiscard]] std::uint64_t row() const { return nifs() * nchans(); }
@@ -107,6 +111,8 @@ private:
     sigproc::FilterbankHeader m_header;
     std::optional<BlockSource> m_block;
     std::optional<TimeSeriesReader> m_series;
+    bool m_psrfits{false};
+    int m_stored_nbits{0};
 };
 
 /// A SIGPROC filterbank or a `.tim`/`.dat` time series being written.

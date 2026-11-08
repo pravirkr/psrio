@@ -59,7 +59,9 @@ target_link_libraries(
 )
 
 target_compile_definitions(
-  ${TARGET_TESTS} PRIVATE "PSRIO_TEST_DATA_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/data\""
+  ${TARGET_TESTS}
+  PRIVATE "PSRIO_TEST_DATA_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/data\""
+          "PSRIO_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\""
 )
 
 include(Catch)

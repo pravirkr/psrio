@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "psrfits_bytes.hpp"
 
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_message.hpp>
@@ -528,4 +529,101 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
                          "-d", "1", "--ignorechans", "64"})
                   .code == 1);
     }
+}
+
+TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
+          "[cli][psrfits]") {
+    using psrio::test::append_be;
+    using psrio::test::FitsFileBytes;
+    FitsFileBytes file;
+    file.begin_hdu();
+    file.key("SIMPLE", "T");
+    file.key("BITPIX", "8");
+    file.key("NAXIS", "0");
+    file.key("EXTEND", "T");
+    file.key("FITSTYPE", "'PSRFITS'");
+    file.key("OBS_MODE", "'SEARCH'");
+    file.key("TELESCOP", "'Parkes'");
+    file.key("SRC_NAME", "'CLITest'");
+    file.key("STT_IMJD", "50000");
+    file.key("STT_SMJD", "0");
+    file.key("STT_OFFS", "0.0");
+    file.end_header();
+    file.begin_hdu();
+    file.key("XTENSION", "'BINTABLE'");
+    file.key("BITPIX", "8");
+    file.key("NAXIS", "2");
+    file.key("NAXIS1", "58");
+    file.key("NAXIS2", "1");
+    file.key("PCOUNT", "0");
+    file.key("GCOUNT", "1");
+    file.key("TFIELDS", "7");
+    file.key("EXTNAME", "'SUBINT'");
+    file.key("TTYPE1", "'TSUBINT'");
+    file.key("TFORM1", "'1D'");
+    file.key("TTYPE2", "'OFFS_SUB'");
+    file.key("TFORM2", "'1D'");
+    file.key("TTYPE3", "'DAT_FREQ'");
+    file.key("TFORM3", "'2D'");
+    file.key("TTYPE4", "'DAT_WTS'");
+    file.key("TFORM4", "'2E'");
+    file.key("TTYPE5", "'DAT_OFFS'");
+    file.key("TFORM5", "'2E'");
+    file.key("TTYPE6", "'DAT_SCL'");
+    file.key("TFORM6", "'2E'");
+    file.key("TTYPE7", "'DATA'");
+    file.key("TFORM7", "'2B'");
+    file.key("NPOL", "1");
+    file.key("NCHAN", "2");
+    file.key("NBITS", "8");
+    file.key("NSBLK", "1");
+    file.key("TBIN", "0.001");
+    file.key("POL_TYPE", "'INTEN'");
+    file.key("ZERO_OFF", "0.0");
+    file.key("SIGNINT", "0");
+    file.end_header();
+    std::vector<std::byte> row;
+    append_be(row, 0.001);
+    append_be(row, 0.0005);
+    append_be(row, 1400.0);
+    append_be(row, 1399.0);
+    append_be(row, 1.0F);
+    append_be(row, 1.0F);
+    append_be(row, 0.0F);
+    append_be(row, 0.0F);
+    append_be(row, 1.0F);
+    append_be(row, 1.0F);
+    append_be(row, std::uint8_t{3});
+    append_be(row, std::uint8_t{4});
+    REQUIRE(row.size() == 58U);
+    file.raw(row);
+    file.pad_data();
+
+    TempDir dir;
+    const auto fits = dir.path() / "tiny.sf";
+    file.write(fits);
+    const auto source =
+        psrio_run({"inspect", fits.string(), "-k", "source_name"});
+    require_ok(source);
+    CHECK(source.out == "CLITest\n");
+    const auto bits = psrio_run({"inspect", fits.string(), "-k", "nbits"});
+    require_ok(bits);
+    CHECK(bits.out == "32\n");
+    const auto stored =
+        psrio_run({"inspect", fits.string(), "-k", "stored_nbits"});
+    require_ok(stored);
+    CHECK(stored.out == "8\n");
+    const auto format = psrio_run({"inspect", fits.string(), "-k", "format"});
+    require_ok(format);
+    CHECK(format.out == "PSRFITS\n");
+
+    const auto sliced = dir.path() / "out.fil";
+    require_ok(
+        psrio_run({"slice", fits.string(), "-o", sliced.string(), "-n", "1"}));
+    psrio::formats::sigproc::FilterbankReader reader(sliced);
+    CHECK(reader.nchans() == 2U);
+    CHECK(reader.nbits() == 32);
+    const auto samples = reader.read_samples<float>(1);
+    CHECK(samples[0] == 3.0F);
+    CHECK(samples[1] == 4.0F);
 }

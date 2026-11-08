@@ -171,7 +171,8 @@ void add_slice(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "slice", "Copy a time and channel range (SIGPROC 'extract')");
     sub->alias("extract");
-    sub->add_option("input", opts->input, "Input .fil, .tim, .dat, or .h5")
+    sub->add_option("input", opts->input,
+                    "Input .fil, .tim, .dat, .sf/.fits, or .h5")
         ->required()
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,

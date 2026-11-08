@@ -1,8 +1,8 @@
 #pragma once
 
 /// Umbrella header for the psrio public API.
-/// FBH5, PSRFITS, and the PSRDADA ring stay out of this header.
-/// DADA files are included.
+/// FBH5 and the PSRDADA ring stay out of this header.
+/// Search-mode PSRFITS and DADA files are included.
 #include "psrio/astro.hpp"             // IWYU pragma: export
 #include "psrio/baseband.hpp"          // IWYU pragma: export
 #include "psrio/block_source.hpp"      // IWYU pragma: export
@@ -14,6 +14,7 @@
 #include "psrio/formats/guppi.hpp"     // IWYU pragma: export
 #include "psrio/formats/memory.hpp"    // IWYU pragma: export
 #include "psrio/formats/presto.hpp"    // IWYU pragma: export
+#include "psrio/formats/psrfits.hpp"   // IWYU pragma: export
 #include "psrio/formats/sigproc.hpp"   // IWYU pragma: export
 #include "psrio/header.hpp"            // IWYU pragma: export
 #include "psrio/open.hpp"              // IWYU pragma: export
@@ -33,6 +34,7 @@ using formats::dada::DadaReader;
 using formats::guppi::GuppiReader;
 using formats::guppi::GuppiSet;
 using formats::presto::PrestoTimeSeriesWriter;
+using formats::psrfits::SearchFile;
 using formats::sigproc::FilterbankReader;
 using formats::sigproc::FilterbankWriter;
 

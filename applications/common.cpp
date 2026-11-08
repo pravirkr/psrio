@@ -1,10 +1,12 @@
 #include "common.hpp"
 
 #include <psrio/detail/exceptions.hpp>
+#include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/formats/sigproc/reader.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
 #include <psrio/header.hpp>
+#include <psrio/open.hpp>
 #include <psrio/timeseries.hpp>
 
 #ifdef PSRIO_CLI_HAS_HDF5
@@ -122,6 +124,14 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
         m_header.nchans    = 1;
         m_header.nifs      = 1;
         m_header.nbits     = 32;
+        return;
+    }
+    if (formats::psrfits::is_search_path(path)) {
+        formats::psrfits::SearchFile file(path);
+        m_header       = file.sigproc_header();
+        m_psrfits      = true;
+        m_stored_nbits = file.input_nbits();
+        m_block.emplace(std::move(file));
         return;
     }
 #ifdef PSRIO_CLI_HAS_HDF5
