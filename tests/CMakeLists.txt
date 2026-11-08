@@ -72,6 +72,9 @@ if(PSRIO_WITH_HDF5)
   target_link_libraries(
     psrio_fbh5_tests PRIVATE psrio::fbh5 Catch2::Catch2WithMain psrio_developer_flags
   )
+  target_compile_definitions(
+    psrio_fbh5_tests PRIVATE "PSRIO_TEST_DATA_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/data\""
+  )
   catch_discover_tests(
     psrio_fbh5_tests
     PROPERTIES

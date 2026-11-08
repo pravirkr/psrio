@@ -121,7 +121,7 @@ struct PolPlan {
         product =
             checked_mul(product, static_cast<std::uint64_t>(axis), "TDIM");
     }
-    if (product != data.repeat) {
+    if (!data.heap && product != data.repeat) {
         throw FormatError(fmt::format(
             "psrio: DATA TDIM product {} does not match TFORM repeat {}",
             product, data.repeat));
@@ -219,8 +219,7 @@ namespace psrio::formats::psrfits {
  * order, one IF. Coherence and two-product feeds (`AABBCRCI`, `AABB`, and the
  * XX/LL equivalents) sum the first two products. Intensity and Stokes labels
  * copy product 0. `DAT_SCL`, `DAT_OFFS`, `ZERO_OFF`, and `DAT_WTS` follow the
- * dspsr rules used by sigpyproc. Fold mode, tile compression, and heap columns
- * are rejected.
+ * dspsr rules used by sigpyproc. Fold mode and tile compression are rejected.
  */
 class SearchFile {
 public:
@@ -239,6 +238,28 @@ public:
 
     /// Bits stored in the SUBINT DATA column, before calibration.
     [[nodiscard]] int input_nbits() const noexcept { return m_input_nbits; }
+
+    /// Polarisation products stored in DATA, before the Stokes I sum.
+    [[nodiscard]] std::uint64_t input_npol() const noexcept { return m_npol; }
+
+    /// Samples in one SUBINT row (`NSBLK`).
+    [[nodiscard]] std::uint64_t subint_samples() const noexcept {
+        return m_nsblk;
+    }
+
+    /// True when Stokes I is the sum of the first two stored products.
+    [[nodiscard]] bool sums_polarisations() const noexcept { return m_sum; }
+
+    /// SUBINT rows in this file.
+    [[nodiscard]] std::uint64_t nrows() const noexcept { return m_table.nrows; }
+
+    /// `NSUBOFFS` from the sub-integration header, or the primary header.
+    [[nodiscard]] std::optional<std::int64_t> nsuboffs() const {
+        if (const auto value = m_table.subint.find_integer("NSUBOFFS")) {
+            return value;
+        }
+        return m_table.primary.find_integer("NSUBOFFS");
+    }
 
     [[nodiscard]] std::string_view pol_type() const noexcept {
         return m_pol_type;
@@ -366,6 +387,7 @@ private:
     std::uint64_t m_nchan{0};
     std::uint64_t m_npol{0};
     std::uint64_t m_nsblk{0};
+    std::uint64_t m_data_bytes{0};
     std::uint64_t m_nsamples{0};
     std::uint64_t m_sample{0};
     std::uint64_t m_bytes_per_sample{0};
@@ -487,6 +509,14 @@ inline void SearchFile::load_geometry() {
     m_npol          = static_cast<std::uint64_t>(npol);
     m_nchan         = static_cast<std::uint64_t>(nchan);
     m_nsblk         = static_cast<std::uint64_t>(nsblk);
+    auto data_bits  = detail::checked_mul(m_nchan, m_npol, "DATA");
+    data_bits       = detail::checked_mul(data_bits, m_nsblk, "DATA");
+    data_bits = detail::checked_mul(data_bits,
+                                    static_cast<std::uint64_t>(nbits), "DATA");
+    if (data_bits % 8U != 0U) {
+        throw FormatError("psrio: DATA does not fill a whole number of bytes");
+    }
+    m_data_bytes = data_bits / 8U;
     m_zero    = static_cast<float>(sub.find_number("ZERO_OFF").value_or(0.0));
     m_signint = sub.find_integer("SIGNINT").value_or(0) != 0;
     m_data    = detail::require_column(m_table, "DATA");
@@ -494,11 +524,12 @@ inline void SearchFile::load_geometry() {
     m_offsets_col    = detail::require_column(m_table, "DAT_OFFS");
     m_weights_col    = detail::require_column(m_table, "DAT_WTS");
     const auto count = m_npol * m_nchan;
-    if (m_scales_col.repeat < count || m_offsets_col.repeat < count) {
+    if ((!m_scales_col.heap && m_scales_col.repeat < count) ||
+        (!m_offsets_col.heap && m_offsets_col.repeat < count)) {
         throw FormatError("psrio: DAT_SCL and DAT_OFFS must cover every "
                           "polarisation and channel");
     }
-    if (m_weights_col.repeat < m_nchan) {
+    if (!m_weights_col.heap && m_weights_col.repeat < m_nchan) {
         throw FormatError("psrio: DAT_WTS must cover every channel");
     }
     int field = 0;
@@ -894,7 +925,12 @@ inline void SearchFile::decode_sample(std::uint64_t global,
     const auto isub  = global / m_nsblk;
     const auto isamp = global % m_nsblk;
     load_calibration(isub);
-    const auto cell   = detail::column_cell(m_bytes, m_table, isub, m_data);
+    const auto cell = detail::column_cell(m_bytes, m_table, isub, m_data);
+    if (cell.size() != static_cast<std::size_t>(m_data_bytes)) {
+        throw FormatError(
+            fmt::format("psrio: SUBINT row {} DATA has {} bytes, expected {}",
+                        isub, cell.size(), m_data_bytes));
+    }
     const auto* bytes = cell.data();
     if (m_input_nbits == 8 && m_layout.fast) {
         if (m_sum) {

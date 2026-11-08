@@ -17,7 +17,7 @@ namespace psrio::cli {
 namespace {
 
 struct SliceOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::filesystem::path output;
     std::optional<std::uint64_t> start;
     std::optional<double> start_time;
@@ -49,8 +49,8 @@ std::span<const T> take_columns(std::span<const T> in,
 }
 
 void run_slice(const SliceOptions& opts, const Context& ctx) {
-    require_distinct(opts.input, opts.output);
-    Input input(opts.input);
+    require_distinct(opts.inputs, opts.output);
+    Input input(opts.inputs);
     const auto range =
         resolve_range(ctx, input.nsamples(), input.tsamp(), opts.start,
                       opts.start_time, opts.nsamps, opts.duration);
@@ -171,9 +171,11 @@ void add_slice(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "slice", "Copy a time and channel range (SIGPROC 'extract')");
     sub->alias("extract");
-    sub->add_option("input", opts->input,
-                    "Input .fil, .tim, .dat, .sf/.fits, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Input files in time order: .fil or .sf/.fits, or one "
+                    ".tim, .dat, or .h5")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,
                     "Output file; .dat writes PRESTO, .tim a time series")

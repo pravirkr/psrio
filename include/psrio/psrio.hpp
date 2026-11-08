@@ -35,7 +35,9 @@ using formats::guppi::GuppiReader;
 using formats::guppi::GuppiSet;
 using formats::presto::PrestoTimeSeriesWriter;
 using formats::psrfits::SearchFile;
+using formats::psrfits::SearchStream;
 using formats::sigproc::FilterbankReader;
+using formats::sigproc::FilterbankStream;
 using formats::sigproc::FilterbankWriter;
 
 } // namespace psrio

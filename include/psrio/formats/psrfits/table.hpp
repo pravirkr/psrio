@@ -205,11 +205,17 @@ private:
 
 struct Column {
     std::string name;
+    /// Element type. For a heap column this is the array element, not `P`/`Q`.
     char code{'?'};
+    /// Elements in a fixed-width cell. A heap column stores one descriptor.
     std::uint64_t repeat{0};
     std::uint64_t element_bytes{0};
     std::uint64_t offset{0};
+    /// Bytes occupied in the row. A heap column occupies its descriptor.
     std::uint64_t nbytes{0};
+    bool heap{false};
+    /// 8 for a `P` descriptor, 16 for `Q`. Zero for a fixed-width column.
+    std::uint64_t descriptor_bytes{0};
 };
 
 struct ParsedTable {
@@ -218,6 +224,10 @@ struct ParsedTable {
     std::uint64_t data_offset{0};
     std::uint64_t row_bytes{0};
     std::uint64_t nrows{0};
+    /// Byte offset of the heap from the start of the table data (`THEAP`).
+    std::uint64_t heap_offset{0};
+    /// Heap size in bytes (`PCOUNT`).
+    std::uint64_t heap_bytes{0};
     std::vector<Column> columns;
 };
 
@@ -326,7 +336,30 @@ struct TForm {
     std::uint64_t repeat{0};
     char code{'?'};
     std::uint64_t element_bytes{0};
+    bool heap{false};
+    std::uint64_t descriptor_bytes{0};
 };
+
+[[nodiscard]] inline std::uint64_t element_width(char code,
+                                                 std::string_view text) {
+    switch (code) {
+    case 'L':
+    case 'B':
+    case 'A':
+        return 1;
+    case 'I':
+        return 2;
+    case 'J':
+    case 'E':
+        return 4;
+    case 'K':
+    case 'D':
+        return 8;
+    default:
+        throw FormatError(fmt::format(
+            "psrio: FITS TFORM '{}' uses an unsupported type", text));
+    }
+}
 
 [[nodiscard]] inline TForm parse_tform(std::string_view text) {
     text = trim(text);
@@ -356,42 +389,31 @@ struct TForm {
     const auto code = static_cast<char>(
         std::toupper(static_cast<unsigned char>(text[index])));
     const auto rest = trim(text.substr(index + 1));
-    if (code == 'P' || code == 'Q' ||
-        (!rest.empty() && (rest.front() == 'P' || rest.front() == 'Q' ||
-                           rest.front() == 'p' || rest.front() == 'q'))) {
-        throw FormatError(fmt::format(
-            "psrio: FITS heap column TFORM '{}' is not supported", text));
+    TForm parsed;
+    parsed.repeat = repeat;
+    if (code == 'P' || code == 'Q') {
+        if (rest.size() != 1U) {
+            throw FormatError(fmt::format(
+                "psrio: FITS heap TFORM '{}' needs one element type", text));
+        }
+        const auto element = static_cast<char>(
+            std::toupper(static_cast<unsigned char>(rest.front())));
+        if (repeat != 1U) {
+            throw FormatError(fmt::format(
+                "psrio: FITS heap TFORM '{}' must describe one array", text));
+        }
+        parsed.heap             = true;
+        parsed.code             = element;
+        parsed.element_bytes    = element_width(element, text);
+        parsed.descriptor_bytes = code == 'P' ? 8U : 16U;
+        return parsed;
     }
     if (!rest.empty()) {
         throw FormatError(fmt::format(
             "psrio: FITS TFORM '{}' is not a fixed-width binary column", text));
     }
-    std::uint64_t element = 0;
-    switch (code) {
-    case 'L':
-    case 'B':
-    case 'A':
-        element = 1;
-        break;
-    case 'I':
-        element = 2;
-        break;
-    case 'J':
-    case 'E':
-        element = 4;
-        break;
-    case 'K':
-    case 'D':
-        element = 8;
-        break;
-    default:
-        throw FormatError(fmt::format(
-            "psrio: FITS TFORM '{}' uses an unsupported type", text));
-    }
-    TForm parsed;
-    parsed.repeat        = repeat;
     parsed.code          = code;
-    parsed.element_bytes = element;
+    parsed.element_bytes = element_width(code, text);
     return parsed;
 }
 
@@ -419,11 +441,15 @@ inline void reject_compressed(const Cards& header) {
         column.name = header.value(fmt::format("TTYPE{}", index));
         const auto form =
             parse_tform(header.value(fmt::format("TFORM{}", index)));
-        column.code          = form.code;
-        column.repeat        = form.repeat;
-        column.element_bytes = form.element_bytes;
-        column.offset        = offset;
-        column.nbytes = checked_mul(form.repeat, form.element_bytes, "TFORM");
+        column.code             = form.code;
+        column.repeat           = form.repeat;
+        column.element_bytes    = form.element_bytes;
+        column.heap             = form.heap;
+        column.descriptor_bytes = form.descriptor_bytes;
+        column.offset           = offset;
+        const auto width =
+            form.heap ? form.descriptor_bytes : form.element_bytes;
+        column.nbytes = checked_mul(form.repeat, width, "TFORM");
         if (offset >
             std::numeric_limits<std::uint64_t>::max() - column.nbytes) {
             throw FormatError("psrio: FITS row width overflows");
@@ -517,7 +543,20 @@ inline void reject_compressed(const Cards& header) {
                     static_cast<std::uint64_t>(parsed.subint.integer("NAXIS1"));
                 parsed.nrows   = static_cast<std::uint64_t>(nrows);
                 parsed.columns = columns_of(parsed.subint);
-                saw_subint     = true;
+                const auto main =
+                    checked_mul(parsed.row_bytes, parsed.nrows, "SUBINT table");
+                const auto theap = parsed.subint.find_integer("THEAP");
+                if (theap.has_value() && *theap < 0) {
+                    throw FormatError("psrio: SUBINT THEAP is negative");
+                }
+                parsed.heap_offset = theap.has_value()
+                                         ? static_cast<std::uint64_t>(*theap)
+                                         : main;
+                const auto pcount  = parsed.subint.find_integer("PCOUNT");
+                parsed.heap_bytes  = pcount.has_value() && *pcount > 0
+                                         ? static_cast<std::uint64_t>(*pcount)
+                                         : 0U;
+                saw_subint         = true;
             }
             if (saw_subint) {
                 break;
@@ -624,14 +663,13 @@ inline void load_reals(std::span<const std::byte> cell,
         throw FormatError(fmt::format(
             "psrio: SUBINT column '{}' is not numeric", column.name));
     }
-    if (dest.size() > column.repeat) {
-        throw FormatError(
-            fmt::format("psrio: SUBINT column '{}' has {} values, needed {}",
-                        column.name, column.repeat, dest.size()));
-    }
-    if (cell.size() < column.nbytes) {
-        throw FormatError(
-            fmt::format("psrio: SUBINT column '{}' is truncated", column.name));
+    if (column.element_bytes == 0U ||
+        cell.size() / static_cast<std::size_t>(column.element_bytes) <
+            dest.size()) {
+        throw FormatError(fmt::format(
+            "psrio: SUBINT column '{}' has {} bytes, needed {}", column.name,
+            cell.size(),
+            dest.size() * static_cast<std::size_t>(column.element_bytes)));
     }
     for (std::size_t index = 0; index < dest.size(); ++index) {
         const auto* source =
@@ -664,8 +702,52 @@ column_cell(std::span<const std::byte> file,
             "psrio: SUBINT row {} column '{}' extends past the file", row,
             column.name));
     }
-    return file.subspan(static_cast<std::size_t>(start),
-                        static_cast<std::size_t>(column.nbytes));
+    if (!column.heap) {
+        return file.subspan(static_cast<std::size_t>(start),
+                            static_cast<std::size_t>(column.nbytes));
+    }
+    if (column.descriptor_bytes != 8U && column.descriptor_bytes != 16U) {
+        throw FormatError(
+            fmt::format("psrio: SUBINT column '{}' has a bad heap descriptor",
+                        column.name));
+    }
+    if (column.nbytes > file.size() - start) {
+        throw FormatError(fmt::format(
+            "psrio: SUBINT row {} column '{}' extends past the file", row,
+            column.name));
+    }
+    const auto* descriptor = file.data() + static_cast<std::size_t>(start);
+    std::int64_t count     = 0;
+    std::int64_t heap_at   = 0;
+    if (column.descriptor_bytes == 8U) {
+        count   = load_be<std::int32_t>(descriptor);
+        heap_at = load_be<std::int32_t>(descriptor + 4);
+    } else {
+        count   = load_be<std::int64_t>(descriptor);
+        heap_at = load_be<std::int64_t>(descriptor + 8);
+    }
+    if (count < 0 || heap_at < 0) {
+        throw FormatError(fmt::format(
+            "psrio: SUBINT row {} column '{}' has a negative heap descriptor",
+            row, column.name));
+    }
+    const auto nbytes = checked_mul(static_cast<std::uint64_t>(count),
+                                    column.element_bytes, "heap array");
+    const auto origin = table.data_offset + table.heap_offset +
+                        static_cast<std::uint64_t>(heap_at);
+    const auto limit =
+        table.data_offset +
+        checked_mul(table.row_bytes, table.nrows, "SUBINT table") +
+        table.heap_bytes;
+    if (origin > file.size() || nbytes > file.size() - origin ||
+        origin < table.data_offset || origin > limit ||
+        nbytes > limit - origin) {
+        throw FormatError(fmt::format(
+            "psrio: SUBINT row {} column '{}' heap array extends past the file",
+            row, column.name));
+    }
+    return file.subspan(static_cast<std::size_t>(origin),
+                        static_cast<std::size_t>(nbytes));
 }
 
 [[nodiscard]] inline std::vector<int> parse_tdim(std::string_view text) {

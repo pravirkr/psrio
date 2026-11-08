@@ -2,6 +2,7 @@
 #include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
 #include "psrio/detail/endian.hpp"
+#include "psrio/digifil.hpp"
 #include "psrio/formats/psrfits.hpp"
 
 #include <catch2/catch_approx.hpp>
@@ -413,8 +414,79 @@ TEST_CASE("SearchFile trims a short final sub-integration", "[psrfits]") {
     CHECK(samples[10] == 2.0F);
 }
 
-TEST_CASE("SearchFile rejects fold mode, heap columns, and a missing table",
-          "[psrfits]") {
+TEST_CASE("digifil sizes a search file from the stored sub-integration",
+          "[psrfits][digifil]") {
+    CHECK(psrio::digifil::psrfits_block_samples(8, 4, 6656, 8192, true, 1, 1) ==
+          8192U);
+}
+
+TEST_CASE("SearchFile reads DATA from the FITS heap", "[psrfits]") {
+    FitsFileBytes file;
+    primary_cards(file);
+    file.begin_hdu();
+    file.key("XTENSION", "'BINTABLE'");
+    file.key("BITPIX", "8");
+    file.key("NAXIS", "2");
+    file.key("NAXIS1", "64");
+    file.key("NAXIS2", "1");
+    file.key("PCOUNT", "4");
+    file.key("GCOUNT", "1");
+    file.key("TFIELDS", "7");
+    file.key("EXTNAME", "'SUBINT'");
+    file.key("TTYPE1", "'TSUBINT'");
+    file.key("TFORM1", "'1D'");
+    file.key("TTYPE2", "'OFFS_SUB'");
+    file.key("TFORM2", "'1D'");
+    file.key("TTYPE3", "'DAT_FREQ'");
+    file.key("TFORM3", "'2D'");
+    file.key("TTYPE4", "'DAT_WTS'");
+    file.key("TFORM4", "'2E'");
+    file.key("TTYPE5", "'DAT_OFFS'");
+    file.key("TFORM5", "'2E'");
+    file.key("TTYPE6", "'DAT_SCL'");
+    file.key("TFORM6", "'2E'");
+    file.key("TTYPE7", "'DATA'");
+    file.key("TFORM7", "'1PB'");
+    file.key("NPOL", "1");
+    file.key("NCHAN", "2");
+    file.key("NBITS", "8");
+    file.key("NSBLK", "2");
+    file.key("TBIN", "1.0");
+    file.key("POL_TYPE", "'INTEN'");
+    file.key("ZERO_OFF", "0.0");
+    file.key("SIGNINT", "0");
+    file.end_header();
+
+    std::vector<std::byte> row;
+    append_be(row, 2.0);
+    append_be(row, 1.0);
+    append_be(row, 100.0);
+    append_be(row, 101.0);
+    append_be(row, 1.0F);
+    append_be(row, 1.0F);
+    append_be(row, 0.0F);
+    append_be(row, 0.0F);
+    append_be(row, 1.0F);
+    append_be(row, 1.0F);
+    append_be(row, std::int32_t{4});
+    append_be(row, std::int32_t{0});
+    REQUIRE(row.size() == 64U);
+    file.raw(row);
+    file.raw(std::vector<std::byte>{std::byte{10}, std::byte{20}, std::byte{30},
+                                    std::byte{40}});
+    file.pad_data();
+    TempPath path("psrio-psrfits-heap.sf");
+    file.write(path.path());
+
+    SearchFile reader(path.path());
+    CHECK(reader.subint_samples() == 2U);
+    CHECK(reader.input_npol() == 1U);
+    CHECK_FALSE(reader.sums_polarisations());
+    const auto samples = reader.read_samples<float>(2);
+    CHECK(samples == std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F});
+}
+
+TEST_CASE("SearchFile rejects fold mode and a missing table", "[psrfits]") {
     {
         FitsFileBytes file;
         primary_cards(file, "PSR");
@@ -436,26 +508,6 @@ TEST_CASE("SearchFile rejects fold mode, heap columns, and a missing table",
         TempPath path("psrio-psrfits-fold.sf");
         file.write(path.path());
         CHECK_THROWS_WITH(SearchFile(path.path()), ContainsSubstring("SEARCH"));
-    }
-    {
-        FitsFileBytes file;
-        primary_cards(file);
-        file.begin_hdu();
-        file.key("XTENSION", "'BINTABLE'");
-        file.key("BITPIX", "8");
-        file.key("NAXIS", "2");
-        file.key("NAXIS1", "8");
-        file.key("NAXIS2", "1");
-        file.key("PCOUNT", "0");
-        file.key("GCOUNT", "1");
-        file.key("TFIELDS", "1");
-        file.key("EXTNAME", "'SUBINT'");
-        file.key("TTYPE1", "'DATA'");
-        file.key("TFORM1", "'1PB'");
-        file.end_header();
-        TempPath path("psrio-psrfits-heap.sf");
-        file.write(path.path());
-        CHECK_THROWS_WITH(SearchFile(path.path()), ContainsSubstring("heap"));
     }
     {
         FitsFileBytes file;

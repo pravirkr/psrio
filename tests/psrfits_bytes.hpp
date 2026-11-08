@@ -76,6 +76,14 @@ inline void append_be(std::vector<std::byte>& out, std::uint8_t value) {
     out.push_back(std::byte{value});
 }
 
+inline void append_be(std::vector<std::byte>& out, std::int32_t value) {
+    if (detail::host_is_little_endian()) {
+        value = detail::swap_endian(value);
+    }
+    const auto* raw = reinterpret_cast<const std::byte*>(&value);
+    out.insert(out.end(), raw, raw + sizeof(value));
+}
+
 inline void append_be(std::vector<std::byte>& out, std::int16_t value) {
     if (detail::host_is_little_endian()) {
         value = detail::swap_endian(value);

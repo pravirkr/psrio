@@ -2,6 +2,7 @@
 #include "psrio/block_source.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/fbh5.hpp"
+#include "psrio/formats/sigproc/reader.hpp"
 #include "psrio/formats/sigproc/writer.hpp"
 
 #include <catch2/catch_test_macros.hpp>
@@ -252,6 +253,7 @@ TEST_CASE("HDF5 filterbank header round-trips", "[hdf5]") {
     CHECK(header.nsamples == 2U);
     CHECK(header.telescope_id == 6);
     CHECK(header.has_telescope_id);
+    CHECK(source.telescope() == "GBT");
     CHECK(header.ibeam == 3);
     CHECK(header.has_src_raj);
     CHECK(header.src_raj == 123456.7);
@@ -594,4 +596,46 @@ TEST_CASE("fbh5::open_block_source opens HDF5 beams and falls back to SIGPROC",
     auto fallback = psrio::formats::fbh5::open_block_source(sigproc.path());
     CHECK(fallback.nchans() == 2U);
     CHECK(fallback.nsamples() == 1U);
+}
+
+TEST_CASE("Parkes filterbank round-trips through HDF5", "[hdf5][fbh5]") {
+    const std::filesystem::path fil =
+        std::filesystem::path(PSRIO_TEST_DATA_DIR) / "parkes_8bit_1.fil";
+    if (!std::filesystem::exists(fil)) {
+        SKIP("parkes_8bit_1.fil is not in the test data");
+    }
+    psrio::formats::sigproc::FilterbankReader reader(fil);
+    REQUIRE(reader.nbits() == 8);
+    REQUIRE(reader.nifs() == 1U);
+    const auto ntime = static_cast<std::size_t>(reader.nsamples());
+    const auto nchan = static_cast<std::size_t>(reader.nchans());
+    std::vector<std::uint8_t> packed(ntime * nchan);
+    REQUIRE(reader.read_samples(reader.nsamples(),
+                                std::span<std::uint8_t>(packed)) ==
+            reader.nsamples());
+
+    HeaderSpec spec;
+    spec.source_name = std::string{reader.source_name()};
+    spec.tstart      = reader.tstart();
+    spec.tsamp       = reader.tsamp();
+    spec.fch1        = reader.fch1();
+    spec.foff        = reader.foff();
+    spec.nbits       = 8;
+    spec.telescope_id =
+        static_cast<int>(reader.header().telescope_id.value_or(4));
+    spec.ibeam = reader.beam();
+
+    const TempFile hdf5(".h5");
+    write_filterbank(hdf5.path(), ntime, 1U, nchan, spec, packed);
+
+    FilterbankFile copy(hdf5.path());
+    CHECK(copy.nchans() == reader.nchans());
+    CHECK(copy.nsamples() == reader.nsamples());
+    CHECK(copy.tsamp() == reader.tsamp());
+    CHECK(copy.fch1() == reader.fch1());
+    CHECK(copy.foff() == reader.foff());
+    CHECK(copy.source_name() == reader.source_name());
+    CHECK(copy.telescope() == "Parkes");
+    const auto back = copy.read_samples<std::uint8_t>(copy.nsamples());
+    CHECK(back == packed);
 }

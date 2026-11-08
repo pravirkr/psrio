@@ -128,6 +128,28 @@ struct Config {
     return std::max(resolution, rounded);
 }
 
+/// Block length `spp_digifil` uses for one search-mode PSRFITS file.
+///
+/// The stored bit depth, polarisation count, and `NSBLK` size the block.
+/// Summing the two feeds counts as one extra float buffer, which is how
+/// sigpyproc sizes a coherence or `PPQQ` file. The calibrated stream is one
+/// float IF, so sizing from that stream picks a different block.
+[[nodiscard]] inline std::uint64_t
+psrfits_block_samples(int stored_nbits,
+                      std::uint64_t npol,
+                      std::uint64_t nchans,
+                      std::uint64_t subint_samples,
+                      bool sum_feeds,
+                      std::uint64_t tscrunch,
+                      std::uint64_t fscrunch) {
+    const auto time_factor = std::max<std::uint64_t>(tscrunch, 1U);
+    const auto chan_factor = std::max<std::uint64_t>(fscrunch, 1U);
+    const int copies       = 1 + (chan_factor > 1U ? 1 : 0) +
+                             (time_factor > 1U ? 1 : 0) + (sum_feeds ? 1 : 0);
+    return block_samples(stored_nbits, npol, nchans, copies, subint_samples,
+                         kDefaultMaxRamBytes);
+}
+
 /// Per-column rescaling to zero mean and unit variance, as dspsr `Rescale`.
 ///
 /// Sums and sums of squares accumulate in double over intervals of

@@ -29,7 +29,7 @@ namespace psrio::cli {
 namespace {
 
 struct InspectOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::string key;
     bool stats{false};
     std::uint64_t stats_samples{4096};
@@ -318,8 +318,28 @@ std::string lower(std::string_view text) {
 
 Fields collect(const InspectOptions& opts) {
     Fields fields;
-    const auto& path = opts.input;
+    if (opts.inputs.empty()) {
+        throw ValidationError("psrio: an input file is required");
+    }
+    const auto& path = opts.inputs.front();
     fields.add("filename", "Data file", path.string());
+    if (opts.inputs.size() > 1U) {
+        fields.add("nfiles", "Files", opts.inputs.size());
+        Input input(opts.inputs);
+        std::string_view format = "SIGPROC";
+        if (input.is_psrfits()) {
+            format = "PSRFITS";
+        }
+        sigproc_fields(fields, input.header(), input.nsamples(), format);
+        if (input.is_psrfits()) {
+            fields.add("stored_nbits", "Stored bits per sample",
+                       input.stored_nbits());
+        }
+        if (opts.stats) {
+            stats_fields(fields, input, opts.stats_samples);
+        }
+        return fields;
+    }
     const auto ext = lower(path.extension().string());
 
     if (ext == ".dada" || ext == ".raw" || ext == ".guppi") {
@@ -420,10 +440,12 @@ void add_inspect(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "inspect", "Print the header of a data file (SIGPROC 'header')");
     sub->alias("header");
-    sub->add_option(
-           "input", opts->input,
-           "Data file: .fil, .tim, .dat/.inf, .sf/.fits, .dada, .raw, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Data files in time order. One file may be .fil, .tim, "
+                    ".dat/.inf, .sf/.fits, .dada, .raw, or .h5; several files "
+                    "must be .fil or .sf/.fits")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-k,--key", opts->key,
                     "Print only the value of this key (e.g. tsamp, nchans)");

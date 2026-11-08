@@ -4,6 +4,7 @@
 #include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/formats/sigproc/reader.hpp>
+#include <psrio/formats/sigproc/stream.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
 #include <psrio/header.hpp>
 #include <psrio/open.hpp>
@@ -128,9 +129,12 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
     }
     if (formats::psrfits::is_search_path(path)) {
         formats::psrfits::SearchFile file(path);
-        m_header       = file.sigproc_header();
-        m_psrfits      = true;
-        m_stored_nbits = file.input_nbits();
+        m_header         = file.sigproc_header();
+        m_psrfits        = true;
+        m_stored_nbits   = file.input_nbits();
+        m_stored_npol    = file.input_npol();
+        m_subint_samples = file.subint_samples();
+        m_sum_feeds      = file.sums_polarisations();
         m_block.emplace(std::move(file));
         return;
     }
@@ -152,6 +156,55 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
     sigproc::FilterbankReader reader(path);
     m_header = reader.header();
     m_block.emplace(std::move(reader));
+}
+
+Input::Input(std::span<const std::filesystem::path> paths) {
+    if (paths.empty()) {
+        throw ValidationError("psrio: an input file is required");
+    }
+    if (paths.size() == 1U) {
+        *this = Input(paths.front());
+        return;
+    }
+    const bool search = formats::psrfits::is_search_path(paths.front());
+    for (const auto& path : paths) {
+        if (is_tim_path(path) || is_presto_path(path)) {
+            throw ValidationError(
+                "psrio: a time series does not join with other files");
+        }
+        if (formats::psrfits::is_search_path(path) != search) {
+            throw ValidationError(
+                "psrio: every file in a stream must be the same format");
+        }
+#ifdef PSRIO_CLI_HAS_HDF5
+        if (formats::fbh5::is_hdf5_filterbank(path)) {
+            throw ValidationError(
+                "psrio: an HDF5 filterbank does not join with other files");
+        }
+#else
+        if (open_detail::looks_like_hdf5(path)) {
+            throw FormatError(fmt::format(
+                "psrio: {} is an HDF5 file; this psrio was built without "
+                "PSRIO_WITH_HDF5",
+                path.string()));
+        }
+#endif
+    }
+    m_path = paths.front();
+    if (search) {
+        formats::psrfits::SearchStream stream(paths);
+        m_header         = stream.sigproc_header();
+        m_psrfits        = true;
+        m_stored_nbits   = stream.input_nbits();
+        m_stored_npol    = stream.input_npol();
+        m_subint_samples = stream.subint_samples();
+        m_sum_feeds      = stream.sums_polarisations();
+        m_block.emplace(std::move(stream));
+        return;
+    }
+    sigproc::FilterbankStream stream(paths);
+    m_header = stream.header();
+    m_block.emplace(std::move(stream));
 }
 
 std::uint64_t Input::nsamples() const {
@@ -237,6 +290,13 @@ void require_distinct(const std::filesystem::path& input,
     if (std::filesystem::equivalent(input, output, ec)) {
         throw ValidationError(fmt::format(
             "psrio: output {} would overwrite the input", output.string()));
+    }
+}
+
+void require_distinct(std::span<const std::filesystem::path> inputs,
+                      const std::filesystem::path& output) {
+    for (const auto& input : inputs) {
+        require_distinct(input, output);
     }
 }
 

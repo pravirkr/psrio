@@ -17,7 +17,7 @@ namespace psrio::cli {
 namespace {
 
 struct ConvertOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::filesystem::path output;
     std::optional<int> nbits;
     bool fswap{false};
@@ -43,8 +43,8 @@ void copy_floats(Input& input, Output& output, std::uint64_t gulp) {
 }
 
 void run_convert(const ConvertOptions& opts, const Context& ctx) {
-    require_distinct(opts.input, opts.output);
-    Input input(opts.input);
+    require_distinct(opts.inputs, opts.output);
+    Input input(opts.inputs);
     const bool to_series = is_series_path(opts.output);
     const int in_bits    = input.nbits();
     const int bits       = opts.nbits.value_or(to_series ? 32 : in_bits);
@@ -112,9 +112,11 @@ void add_convert(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "convert",
         "Change bit depth or channel order, or convert .tim and .dat series");
-    sub->add_option("input", opts->input,
-                    "Input .fil, .tim, .dat, .sf/.fits, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Input files in time order: .fil or .sf/.fits, or one "
+                    ".tim, .dat, or .h5")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,
                     "Output file; .dat writes PRESTO")

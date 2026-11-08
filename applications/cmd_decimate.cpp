@@ -19,7 +19,7 @@ namespace psrio::cli {
 namespace {
 
 struct DecimateOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::filesystem::path output;
     std::uint64_t time_factor{1};
     std::uint64_t chan_factor{1};
@@ -63,8 +63,8 @@ sigproc::FilterbankHeader decimated_header(const sigproc::FilterbankHeader& in,
 }
 
 void run_decimate(const DecimateOptions& opts, const Context& ctx) {
-    require_distinct(opts.input, opts.output);
-    Input input(opts.input);
+    require_distinct(opts.inputs, opts.output);
+    Input input(opts.inputs);
     const auto nchans = input.nchans();
     const auto nifs   = input.nifs();
     const auto tfac   = opts.time_factor;
@@ -120,9 +120,11 @@ void add_decimate(CLI::App& app, Context& ctx) {
     auto* sub       = app.add_subcommand(
         "decimate",
         "Average adjacent samples and channels (SIGPROC 'decimate')");
-    sub->add_option("input", opts->input,
-                    "Input .fil, .tim, .dat, .sf/.fits, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Input files in time order: .fil or .sf/.fits, or one "
+                    ".tim, .dat, or .h5")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,
                     "Output file; .tim or .dat when one channel remains")

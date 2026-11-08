@@ -74,6 +74,12 @@ public:
     /// @throws psrio::Error if the file cannot be opened.
     explicit Input(const std::filesystem::path& path);
 
+    /// Open one file, or several filterbank or search-mode PSRFITS files in
+    /// the order given. The files must be one contiguous observation.
+    /// @throws psrio::Error if a file cannot be opened or the files do not
+    ///         join.
+    explicit Input(std::span<const std::filesystem::path> paths);
+
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;
     }
@@ -92,6 +98,18 @@ public:
     [[nodiscard]] bool is_psrfits() const noexcept { return m_psrfits; }
     /// Bits stored in a PSRFITS DATA column. Zero for other inputs.
     [[nodiscard]] int stored_nbits() const noexcept { return m_stored_nbits; }
+    /// Polarisation products stored in a PSRFITS DATA column.
+    [[nodiscard]] std::uint64_t stored_npol() const noexcept {
+        return m_stored_npol;
+    }
+    /// Samples in one PSRFITS sub-integration. Zero for other inputs.
+    [[nodiscard]] std::uint64_t subint_samples() const noexcept {
+        return m_subint_samples;
+    }
+    /// True when the PSRFITS stream sums the first two polarisations.
+    [[nodiscard]] bool sums_polarisations() const noexcept {
+        return m_sum_feeds;
+    }
 
     /// Values in one time sample: nifs * nchans.
     [[nodiscard]] std::uint64_t row() const { return nifs() * nchans(); }
@@ -112,7 +130,10 @@ private:
     std::optional<BlockSource> m_block;
     std::optional<TimeSeriesReader> m_series;
     bool m_psrfits{false};
+    bool m_sum_feeds{false};
     int m_stored_nbits{0};
+    std::uint64_t m_stored_npol{0};
+    std::uint64_t m_subint_samples{0};
 };
 
 /// A SIGPROC filterbank or a `.tim`/`.dat` time series being written.
@@ -144,6 +165,10 @@ private:
 
 /// @throws ValidationError if @p output names the same file as @p input.
 void require_distinct(const std::filesystem::path& input,
+                      const std::filesystem::path& output);
+
+/// @throws ValidationError if @p output names the same file as any input.
+void require_distinct(std::span<const std::filesystem::path> inputs,
                       const std::filesystem::path& output);
 
 /// Time samples [start, start + count) selected by sample or time options.

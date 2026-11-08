@@ -2,6 +2,7 @@
 
 #include "psrio/block_source.hpp"
 #include "psrio/formats/psrfits/reader.hpp"
+#include "psrio/formats/psrfits/stream.hpp"
 
 #include <cctype>
 #include <filesystem>

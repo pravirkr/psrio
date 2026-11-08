@@ -6,23 +6,30 @@
 #include <memory>
 #include <optional>
 #include <psrio/digifil.hpp>
+#include <vector>
 
 namespace psrio::cli {
 
 namespace {
 
 struct DigifilOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::filesystem::path output;
     digifil::Config config;
     std::optional<std::uint64_t> gulp;
 };
 
 void run_digifil(const DigifilOptions& opts, const Context& ctx) {
-    require_distinct(opts.input, opts.output);
-    Input input(opts.input);
+    require_distinct(opts.inputs, opts.output);
+    Input input(opts.inputs);
     auto config = opts.config;
     config.gulp = opts.gulp;
+    if (!config.gulp.has_value() && input.is_psrfits()) {
+        config.gulp = digifil::psrfits_block_samples(
+            input.stored_nbits(), input.stored_npol(), input.nchans(),
+            input.subint_samples(), input.sums_polarisations(), config.tscrunch,
+            config.fscrunch);
+    }
     const auto summary =
         digifil::run(input.block(), input.header(), opts.output, config);
     ctx.debug("psrio digifil: {} input samples per block", summary.gulp);
@@ -39,8 +46,10 @@ void add_digifil(CLI::App& app, Context& ctx) {
     auto& config    = opts->config;
     auto* sub       = app.add_subcommand(
         "digifil", "Rescale and redigitise a filterbank, as dspsr's digifil");
-    sub->add_option("input", opts->input, "Input .fil, .sf/.fits, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Input files in time order: .fil or .sf/.fits, or one .h5")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output, "Output filterbank")
         ->required();

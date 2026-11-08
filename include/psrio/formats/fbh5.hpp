@@ -4,6 +4,7 @@
 #include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/formats/sigproc/header.hpp"
 #include "psrio/open.hpp"
 #include "psrio/packed.hpp"
 
@@ -352,6 +353,16 @@ public:
     }
 
     [[nodiscard]] std::string_view telescope() const noexcept {
+        if (!m_telescope_name.empty()) {
+            return m_telescope_name;
+        }
+        if (m_header.has_telescope_id) {
+            const auto name = ::psrio::formats::sigproc::telescope_name(
+                m_header.telescope_id);
+            if (name != "unknown") {
+                return name;
+            }
+        }
         return "Unknown";
     }
 
@@ -463,6 +474,7 @@ private:
     std::unique_ptr<HighFive::File> m_file;
     std::unique_ptr<HighFive::DataSet> m_dataset;
     FilterbankHeader m_header{};
+    std::string m_telescope_name;
     SampleType m_sample_type{SampleType::kUInt8};
     std::uint64_t m_beam_index{0};
     std::uint64_t m_sample{0};
@@ -655,6 +667,12 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
 }
 
 inline void FilterbankFile::read_optional() {
+    if (detail::has_attr(*m_dataset, *m_file, "telescope")) {
+        const auto attr = detail::get_attr(*m_dataset, *m_file, "telescope");
+        if (attr.getDataType().getClass() == HighFive::DataTypeClass::String) {
+            m_telescope_name = detail::read_text(attr, "telescope");
+        }
+    }
     if (detail::has_attr(*m_dataset, *m_file, "telescope_id")) {
         m_header.telescope_id = detail::read_int(
             detail::get_attr(*m_dataset, *m_file, "telescope_id"),

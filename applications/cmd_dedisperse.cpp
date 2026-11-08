@@ -32,7 +32,7 @@ namespace psrio::cli {
 namespace {
 
 struct DedisperseOptions {
-    std::filesystem::path input;
+    std::vector<std::filesystem::path> inputs;
     std::filesystem::path output;
     std::vector<double> dms;
     std::optional<double> dm_start;
@@ -183,7 +183,7 @@ Destinations destinations(const DedisperseOptions& opts,
         return out;
     }
     if (std::filesystem::is_directory(prefix)) {
-        prefix /= opts.input.stem();
+        prefix /= opts.inputs.front().stem();
     } else if (named) {
         prefix.replace_extension();
     }
@@ -366,7 +366,7 @@ void run_fdmt(const DedisperseOptions& opts,
 }
 
 void run_dedisperse(const DedisperseOptions& opts, const Context& ctx) {
-    Input input(opts.input);
+    Input input(opts.inputs);
     auto& source       = input.block();
     const auto& header = input.header();
     if (input.nifs() != 1U) {
@@ -480,8 +480,10 @@ void add_dedisperse(CLI::App& app, Context& ctx) {
         "dedisperse",
         "Dedisperse a filterbank into time series with dmt (SIGPROC "
         "'dedisperse', PRESTO 'prepdata')");
-    sub->add_option("input", opts->input, "Input .fil, .sf/.fits, or .h5")
+    sub->add_option("inputs", opts->inputs,
+                    "Input files in time order: .fil or .sf/.fits, or one .h5")
         ->required()
+        ->expected(1, -1)
         ->check(CLI::ExistingFile);
     sub->add_option("-o,--output", opts->output,
                     "Output .tim/.dat for one DM; otherwise a prefix or "

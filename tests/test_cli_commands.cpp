@@ -627,3 +627,58 @@ TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
     CHECK(samples[0] == 3.0F);
     CHECK(samples[1] == 4.0F);
 }
+
+TEST_CASE("psrio joins contiguous filterbanks in time", "[cli][stream]") {
+    const TempDir dir;
+    auto header = [](double tstart) {
+        psrio::formats::sigproc::FilterbankHeader out;
+        out.nchans      = 2;
+        out.nifs        = 1;
+        out.nbits       = 8;
+        out.tsamp       = 1.0;
+        out.tstart      = tstart;
+        out.fch1        = 1400.0;
+        out.foff        = -1.0;
+        out.source_name = "stream";
+        return out;
+    };
+    const auto write = [](const fs::path& path,
+                          const psrio::formats::sigproc::FilterbankHeader& hdr,
+                          std::initializer_list<std::uint8_t> samples) {
+        psrio::formats::sigproc::FilterbankWriter writer(path, hdr);
+        std::vector<std::byte> bytes(samples.size());
+        std::size_t index = 0;
+        for (const auto sample : samples) {
+            bytes[index++] = static_cast<std::byte>(sample);
+        }
+        writer.write_block(samples.size() / 2U, bytes);
+        writer.close();
+    };
+    const auto first  = dir.path() / "a.fil";
+    const auto second = dir.path() / "b.fil";
+    write(first, header(50000.0), {1, 2, 3, 4});
+    write(second, header(50000.0 + (2.0 / 86400.0)), {5, 6, 7, 8});
+
+    const auto count = psrio_run(
+        {"inspect", first.string(), second.string(), "-k", "nsamples"});
+    require_ok(count);
+    CHECK(count.out == "4\n");
+    const auto files =
+        psrio_run({"inspect", first.string(), second.string(), "-k", "nfiles"});
+    require_ok(files);
+    CHECK(files.out == "2\n");
+
+    const auto sliced = dir.path() / "joined.fil";
+    require_ok(psrio_run(
+        {"slice", first.string(), second.string(), "-o", sliced.string()}));
+    FilterbankReader out(sliced);
+    CHECK(out.nsamples() == 4U);
+    const auto got = out.read_samples<std::uint8_t>(4);
+    CHECK(got == std::vector<std::uint8_t>{1, 2, 3, 4, 5, 6, 7, 8});
+
+    const auto gapped = dir.path() / "gap.fil";
+    write(gapped, header(50000.0 + (4.0 / 86400.0)), {9, 10, 11, 12});
+    CHECK(psrio_run(
+              {"inspect", first.string(), gapped.string(), "-k", "nsamples"})
+              .code == 1);
+}
