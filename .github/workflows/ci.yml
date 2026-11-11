@@ -24,12 +24,13 @@ jobs:
       matrix:
         compiler:
           # Floor: GCC 11 and Clang 15 share Ubuntu 22.04's libstdc++, which has no std::format.
-          # Ubuntu 22.04's apt catch2 is v2, so those jobs omit it and FetchContent pins Catch2 v3.
+          # Every job builds the pinned Catch2 3.8.0 through FetchContent: Ubuntu 22.04 ships v2 and
+          # Ubuntu 24.04 ships 3.4.0, which tests/CMakeLists.txt rejects (see the comment there).
           # dmt requires Clang >= 17, so clang-15 tests the header-only library floor with PSRIO_BUILD_APPLICATIONS=OFF.
           - { cc: gcc-11, cpp: g++-11, pkgs: "gcc-11 g++-11", extra: "python3-dev libhdf5-dev libfftw3-dev git", apps: "ON", os: ubuntu-22.04 }
           - { cc: clang-15, cpp: clang++-15, pkgs: "clang-15 libomp-15-dev", extra: "python3-dev libhdf5-dev git", apps: "OFF", os: ubuntu-22.04 }
-          - { cc: gcc-13, cpp: g++-13, pkgs: "gcc-13 g++-13", extra: "python3-dev libhdf5-dev libfftw3-dev catch2 git", apps: "ON", os: ubuntu-24.04 }
-          - { cc: clang-18, cpp: clang++-18, pkgs: "clang-18 libomp-18-dev", extra: "python3-dev libhdf5-dev libfftw3-dev catch2 git", apps: "ON", os: ubuntu-24.04 }
+          - { cc: gcc-13, cpp: g++-13, pkgs: "gcc-13 g++-13", extra: "python3-dev libhdf5-dev libfftw3-dev git", apps: "ON", os: ubuntu-24.04 }
+          - { cc: clang-18, cpp: clang++-18, pkgs: "clang-18 libomp-18-dev", extra: "python3-dev libhdf5-dev libfftw3-dev git", apps: "ON", os: ubuntu-24.04 }
 
     steps:
       - uses: actions/checkout@v7
@@ -43,7 +44,7 @@ jobs:
             ${{ matrix.compiler.extra }}
 
       - name: Cache ccache object store
-        uses: hendrikmuhs/ccache-action@v1.2
+        uses: hendrikmuhs/ccache-action@v1.2.25
         with:
           key: cpp-tests-${{ matrix.compiler.cc }}
           max-size: 500M
@@ -73,7 +74,7 @@ jobs:
         run: scripts/check_architecture.sh
 
       - name: Run C++ unit tests
-        run: ctest --test-dir build/tests/ --output-on-failure
+        run: ctest --test-dir build/tests/ --output-on-failure --parallel "$(nproc)"
 
   clang-tidy:
     name: Lint & static analysis (LLVM 23)
@@ -92,7 +93,7 @@ jobs:
           sudo apt install -y --no-install-recommends \
             build-essential cmake ninja-build ccache git wget lsb-release \
             gnupg software-properties-common python3-dev python3-pip \
-            libhdf5-dev libfftw3-dev catch2
+            libhdf5-dev libfftw3-dev
           wget -qO llvm.sh https://apt.llvm.org/llvm.sh
           sudo bash llvm.sh "${LLVM_VERSION}"
           sudo apt install -y --no-install-recommends \
@@ -108,7 +109,7 @@ jobs:
             pre-commit==4.2.0
 
       - name: Cache pre-commit environments
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml') }}
@@ -118,12 +119,22 @@ jobs:
       - name: Warm pre-commit hook environments
         run: pre-commit install-hooks
 
+      # The build runs alongside the prebuild lint, and clang-tidy waits for it.
+      # ccache keeps it from being rebuilt from scratch on every run.
+      - name: Cache ccache object store
+        uses: hendrikmuhs/ccache-action@v1.2.25
+        with:
+          key: lint-clang-${{ env.LLVM_VERSION }}
+          max-size: 500M
+
       - name: Configure CMake
         env:
           CC: clang-23
           CXX: clang++-23
         run: >
           cmake -B "${BUILD_DIR}" -G Ninja
+          -DCMAKE_C_COMPILER_LAUNCHER=ccache
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
           -DCMAKE_BUILD_TYPE=Release
           -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
           -DPSRIO_BUILD_TESTS=ON
@@ -133,6 +144,10 @@ jobs:
           -DPSRIO_ENABLE_COVERAGE=OFF
 
       - name: Build and static analysis
+        env:
+          # The C++ test jobs already compile every public header standalone
+          # with -Werror, and this job's build compiles psrio_header_checks.
+          SKIP_COMPILE: "1"
         run: scripts/ci_lint_job.sh
 
   install-consumer:

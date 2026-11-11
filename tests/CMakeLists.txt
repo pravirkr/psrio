@@ -1,9 +1,12 @@
 include(FetchContent)
 
-# Catch2: prefer system package (apt/brew) when available; pin 3.16.0 otherwise.
+# Catch2: prefer a system package (apt/brew) when it is at least 3.8; otherwise
+# pin 3.8.0. Older releases are rejected: before 3.5.3 the assertion macros trip
+# clang-tidy's bugprone-chained-comparison, and before 3.8 catch_discover_tests
+# reports a SKIP as a failure. Ubuntu 24.04 ships 3.4.0.
 find_package(
   Catch2
-  3
+  3.8
   CONFIG
   QUIET
 )

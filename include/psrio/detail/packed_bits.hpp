@@ -262,6 +262,15 @@ inline void pack_sub_byte(std::span<const std::uint8_t> unpacked,
     }
 }
 
+// GCC 13 reports a false -Wstringop-overflow on the in-place stores below when
+// this is inlined into a caller whose buffer has a small, known size: it checks
+// a vectorized path that cannot run for that size. GCC 14 and later, and Clang,
+// do not warn.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ == 13
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+
 /// Pack unpacked 1-, 2-, or 4-bit samples in place within @p buffer.
 /// Returns the subspan containing the packed bytes.
 template <typename ByteT>
@@ -329,6 +338,10 @@ inline std::span<ByteT> pack_sub_byte_inplace(
     }
     return buffer.subspan(0, packed_bytes);
 }
+
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ == 13
+#pragma GCC diagnostic pop
+#endif
 
 /// Unpack 1-, 2-, or 4-bit samples in place backwards within @p buffer.
 template <typename ByteT>

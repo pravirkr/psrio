@@ -5,7 +5,7 @@
 
 #include <numbers>
 #include <stdexcept>
-#include <string>
+#include <string> // IWYU pragma: keep
 
 using Catch::Matchers::WithinAbs;
 using Catch::Matchers::WithinRel;

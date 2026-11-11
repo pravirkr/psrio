@@ -547,7 +547,7 @@ TEST_CASE("Parkes UWL search file matches sigpyproc Stokes I",
     CHECK(reader.nchans() == 6656U);
     CHECK(reader.nifs() == 1U);
     CHECK(reader.pol_type() == "AABBCRCI");
-    CHECK(reader.nsamples() == 9U * 8192U);
+    CHECK(reader.nsamples() == std::uint64_t{9} * 8192U);
     CHECK(reader.tsamp() == Catch::Approx(6.4e-5));
     CHECK(reader.fch1() == Catch::Approx(704.25));
     CHECK(reader.foff() == Catch::Approx(0.5));
@@ -562,7 +562,7 @@ TEST_CASE("Parkes UWL search file matches sigpyproc Stokes I",
         return std::bit_cast<std::uint32_t>(value) == bits;
     };
     auto first = reader.read_samples<float>(32);
-    REQUIRE(first.size() == 32U * 6656U);
+    REQUIRE(first.size() == std::size_t{32} * 6656U);
     CHECK(same_bits(first[0], 0x46b5e20c));
     CHECK(same_bits(first[1], 0x46b0c942));
     CHECK(same_bits(first[100], 0x479d814f));
@@ -579,7 +579,7 @@ TEST_CASE("Parkes UWL search file matches sigpyproc Stokes I",
 
     reader.seek(8191);
     auto edge = reader.read_samples<float>(2);
-    REQUIRE(edge.size() == 2U * 6656U);
+    REQUIRE(edge.size() == std::size_t{2} * 6656U);
     CHECK(same_bits(edge[0], 0x46abbd9e));
     CHECK(same_bits(edge[6656], 0x46aa5978));
     CHECK(same_bits(edge[6657], 0x46a6b188));

@@ -1,21 +1,28 @@
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/psrdada.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <ascii_header.h>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
 #include <functional>
 #include <ipcbuf.h>
 #include <ipcio.h>
+#include <memory>
 #include <random>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <sys/types.h> // IWYU pragma: keep (key_t on glibc)
+#include <type_traits>
 #include <unistd.h>
+#include <utility>
+#include <vector>
 
 using psrio::BlockSource;
 using psrio::IoError;
@@ -26,6 +33,7 @@ using psrio::formats::psrdada::RingReader;
 namespace {
 
 void set_header(char* header, const char* key, const char* fmt, auto value) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): PSRDADA C API
     if (ascii_header_set(header, key, fmt, value) < 0) {
         throw std::runtime_error(std::string("ascii_header_set failed for ") +
                                  key);
@@ -62,9 +70,9 @@ public:
         const std::uint64_t pages =
             data_bytes == 0U ? 4U : ((data_bytes + page - 1U) / page) + 2U;
         std::mt19937 rng{std::random_device{}()};
-        std::uniform_int_distribution<int> dist(0x1000, 0x7ffe);
+        std::uniform_int_distribution<unsigned> dist(0x1000U, 0x7ffeU);
         for (int attempt = 0; attempt < 32; ++attempt) {
-            const auto key  = static_cast<key_t>(dist(rng) & ~1);
+            const auto key  = static_cast<key_t>(dist(rng) & ~1U);
             ipcbuf_t header = IPCBUF_INIT;
             ipcio_t data    = IPCIO_INIT;
             if (ipcbuf_create(&header, key + 1, 4, header_bufsz, 1) < 0) {
@@ -74,22 +82,20 @@ public:
                 ipcbuf_destroy(&header);
                 continue;
             }
-            return RingPair(key, header, data, header_bufsz);
+            return {key, header, data, header_bufsz};
         }
         throw std::runtime_error("could not create a PSRDADA ring");
     }
 
     [[nodiscard]] key_t key() const { return m_key; }
 
-    void write_header(const std::function<void(char*)>& fill) {
+    void write_header(const std::function<void(char*)>& fill) const {
         ipcbuf_t writer = IPCBUF_INIT;
         if (ipcbuf_connect(&writer, m_key + 1) < 0) {
             throw std::runtime_error("header connect failed");
         }
-        struct Disconnect {
-            ipcbuf_t* buf;
-            ~Disconnect() { ipcbuf_disconnect(buf); }
-        } disconnect{&writer};
+        const std::unique_ptr<ipcbuf_t, decltype(&ipcbuf_disconnect)> connected(
+            &writer, &ipcbuf_disconnect);
 
         if (ipcbuf_lock_write(&writer) < 0) {
             throw std::runtime_error("header lock_write failed");
@@ -108,34 +114,30 @@ public:
         }
     }
 
-    void write_data(std::span<const std::uint8_t> bytes) {
+    void write_data(std::span<const std::uint8_t> bytes) const {
         ipcio_t writer = IPCIO_INIT;
         if (ipcio_connect(&writer, m_key) < 0) {
             throw std::runtime_error("data connect failed");
         }
-        struct Disconnect {
-            ipcio_t* buf;
-            bool open = false;
-            ~Disconnect() {
-                if (open) {
-                    ipcio_close(buf);
-                }
-                ipcio_disconnect(buf);
-            }
-        } disconnect{&writer, false};
+        const std::unique_ptr<ipcio_t, decltype(&ipcio_disconnect)> connected(
+            &writer, &ipcio_disconnect);
 
         // 'W' raises start-of-data on the first buffer. 'w' leaves the ring
         // inactive, so a reader blocks forever on a partial buffer.
         if (ipcio_open(&writer, 'W') < 0) {
             throw std::runtime_error("data open failed");
         }
-        disconnect.open = true;
+        // Declared after `connected`, so the ring closes before it disconnects.
+        const std::unique_ptr<ipcio_t, decltype(&ipcio_close)> opened(
+            &writer, &ipcio_close);
         if (!bytes.empty()) {
+            // ipcio_write takes char* but does not modify the buffer.
             const auto wrote = ipcio_write(
                 &writer,
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
                 const_cast<char*>(reinterpret_cast<const char*>(bytes.data())),
                 bytes.size());
-            if (wrote != static_cast<ssize_t>(bytes.size())) {
+            if (std::cmp_not_equal(wrote, bytes.size())) {
                 throw std::runtime_error("data write failed");
             }
         }
@@ -176,11 +178,12 @@ void fill_base(char* header, int nchan, int nbit) {
 
 std::time_t expected_utc() {
     std::tm broken{};
+    // NOLINTNEXTLINE(misc-include-cleaner): POSIX, declared by <ctime> on glibc
     if (strptime("2020-01-02-03:04:05", "%Y-%m-%d-%H:%M:%S", &broken) ==
         nullptr) {
         throw std::runtime_error("strptime failed");
     }
-    return timegm(&broken);
+    return timegm(&broken); // NOLINT(misc-include-cleaner): POSIX
 }
 
 std::vector<std::byte> as_bytes(const std::vector<std::uint8_t>& bytes) {
@@ -197,7 +200,7 @@ static_assert(psrio::concepts::BlockReader<RingReader>);
 static_assert(std::is_constructible_v<BlockSource, RingReader>);
 
 TEST_CASE("PSRDADA header sets frequency, sampling and beam", "[psrdada]") {
-    auto ring = RingPair::create(0);
+    const auto ring = RingPair::create(0);
     ring.write_header([](char* header) { fill_base(header, 4, 8); });
     ring.write_data({});
 
@@ -228,7 +231,7 @@ TEST_CASE("PSRDADA read returns the byte pattern then end of data",
           "[psrdada]") {
     constexpr int kNChan            = 4;
     constexpr std::uint64_t kNSamps = 16;
-    auto ring                       = RingPair::create(kNChan * kNSamps);
+    const auto ring                 = RingPair::create(kNChan * kNSamps);
     ring.write_header([](char* header) { fill_base(header, kNChan, 8); });
     std::vector<std::uint8_t> bytes(kNChan * kNSamps);
     for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -267,7 +270,7 @@ TEST_CASE("PSRDADA 4-bit samples use a packed stride", "[psrdada]") {
     constexpr int kNChan            = 8;
     constexpr std::uint64_t kStride = 4;
     constexpr std::uint64_t kNSamps = 10;
-    auto ring                       = RingPair::create(kStride * kNSamps);
+    const auto ring                 = RingPair::create(kStride * kNSamps);
     ring.write_header([](char* header) { fill_base(header, kNChan, 4); });
     std::vector<std::uint8_t> bytes(kStride * kNSamps);
     for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -287,7 +290,7 @@ TEST_CASE("PSRDADA 4-bit samples use a packed stride", "[psrdada]") {
 TEST_CASE("PSRDADA skip moves back inside the current page", "[psrdada]") {
     constexpr int kNChan            = 4;
     constexpr std::uint64_t kNSamps = 16;
-    auto ring                       = RingPair::create(kNChan * kNSamps);
+    const auto ring                 = RingPair::create(kNChan * kNSamps);
     ring.write_header([](char* header) { fill_base(header, kNChan, 8); });
     std::vector<std::uint8_t> bytes(kNChan * kNSamps);
     for (std::size_t index = 0; index < bytes.size(); ++index) {
@@ -314,8 +317,8 @@ TEST_CASE("PSRDADA skip moves back inside the current page", "[psrdada]") {
 
 TEST_CASE("PSRDADA rejects non-intensity headers and a missing ring",
           "[psrdada]") {
-    auto expect_invalid = [](const std::function<void(char*)>& fill) {
-        auto ring = RingPair::create(0);
+    const auto expect_invalid = [](const std::function<void(char*)>& fill) {
+        const auto ring = RingPair::create(0);
         ring.write_header(fill);
         REQUIRE_THROWS_AS(RingReader(static_cast<std::uint32_t>(ring.key())),
                           ValidationError);
@@ -343,10 +346,10 @@ TEST_CASE("PSRDADA rejects non-intensity headers and a missing ring",
     });
 
     std::mt19937 rng{std::random_device{}()};
-    std::uniform_int_distribution<int> dist(0x1000, 0x7ffe);
+    std::uniform_int_distribution<unsigned> dist(0x1000U, 0x7ffeU);
     bool threw = false;
     for (int attempt = 0; attempt < 32; ++attempt) {
-        const auto key = static_cast<key_t>(dist(rng) & ~1);
+        const auto key = static_cast<key_t>(dist(rng) & ~1U);
         ipcio_t probe  = IPCIO_INIT;
         if (ipcio_connect(&probe, key) == 0) {
             ipcio_disconnect(&probe);

@@ -5,6 +5,7 @@
 #   CXX=<compiler>              compiler for the standalone public-header check (default c++)
 #   SKIP_COMPILE=1              skip the standalone public-header check
 #   REQUIRE_OPTIONAL_HEADERS=1  fail if optional headers (fbh5.hpp, psrdada.hpp) cannot be compiled
+#   JOBS=<n>                    parallel compiles for the standalone check (default: CPU count)
 #
 # Exits non-zero and prints every violation found.
 
@@ -144,6 +145,24 @@ if [[ "${SKIP_COMPILE:-0}" != 1 ]]; then
         fi
     done
 
+    # Compile headers in parallel batches of $JOBS. Batched `wait` rather than
+    # `wait -n`, which macOS's bash 3.2 lacks. Each failure goes to its own
+    # file, since a background job cannot update $status.
+    jobs_max=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+    fail_dir=$(mktemp -d)
+    trap 'rm -rf "$fail_dir"' EXIT
+    check_header() {
+        local h=$1 out
+        shift
+        if ! out=$(echo "#include \"$h\"" |
+            "$cxx" -std=c++20 -Wall -Wextra -Wpedantic -Werror -fsyntax-only \
+                -DFMT_HEADER_ONLY -Iinclude "$@" -x c++ - 2>&1); then
+            printf '%s: %s\n' "$h" "$(echo "$out" | grep -m1 error)" \
+                >"$fail_dir/$(echo "$h" | tr / _)"
+        fi
+    }
+    running=0
+
     for h in $(cd include && find psrio -name '*.hpp' | sort); do
         header_flags=()
         if ((${#extra_includes[@]} > 0)); then
@@ -169,11 +188,16 @@ if [[ "${SKIP_COMPILE:-0}" != 1 ]]; then
             fi
         fi
 
-        if ! out=$(echo "#include \"$h\"" |
-            "$cxx" -std=c++20 -Wall -Wextra -Wpedantic -Werror -fsyntax-only \
-                -DFMT_HEADER_ONLY -Iinclude ${header_flags[@]+"${header_flags[@]}"} -x c++ - 2>&1); then
-            fail "$h: $(echo "$out" | grep -m1 error)"
+        check_header "$h" ${header_flags[@]+"${header_flags[@]}"} &
+        running=$((running + 1))
+        if ((running >= jobs_max)); then
+            wait
+            running=0
         fi
+    done
+    wait
+    for f in "$fail_dir"/*; do
+        [[ -e "$f" ]] && fail "$(cat "$f")"
     done
 fi
 

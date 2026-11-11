@@ -60,6 +60,7 @@ inline int header_get_real(const char* header, const char* key, double& value) {
     return ascii_header_get(header, key, "%lf", &value);
 }
 
+// NOLINTBEGIN(misc-const-correctness): ascii_header_get writes through dest
 inline int header_get_str(const char* header,
                           const char* key,
                           const char* format,
@@ -67,6 +68,7 @@ inline int header_get_str(const char* header,
     // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): PSRDADA C API
     return ascii_header_get(header, key, format, dest);
 }
+// NOLINTEND(misc-const-correctness)
 
 inline int require_int(const char* header, const char* key) {
     int value = 0;
