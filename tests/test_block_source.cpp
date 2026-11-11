@@ -1,4 +1,6 @@
+#include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/memory.hpp"
 #include "psrio/formats/sigproc/reader.hpp"
@@ -7,12 +9,17 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 using psrio::formats::sigproc::FilterbankReader;
@@ -106,8 +113,10 @@ TEST_CASE("read_block short-reads packed samples and skip moves backward",
     REQUIRE(unpacked[0] == 1.0F);
     REQUIRE(unpacked[11] == 12.0F);
 
-    psrio::BlockSource moved = std::move(source);
+    const psrio::BlockSource moved = std::move(source);
+    // NOLINTBEGIN(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
     REQUIRE_THROWS_AS(source.nchans(), psrio::ValidationError);
+    // NOLINTEND(bugprone-use-after-move,clang-analyzer-cplusplus.Move)
     REQUIRE(moved.tell() == 3U);
 }
 

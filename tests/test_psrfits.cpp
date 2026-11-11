@@ -1,7 +1,8 @@
 #include "psrfits_bytes.hpp"
 #include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
-#include "psrio/detail/endian.hpp"
+#include "psrio/common/types.hpp"
+#include "psrio/detail/exceptions.hpp"
 #include "psrio/digifil.hpp"
 #include "psrio/formats/psrfits.hpp"
 
@@ -11,10 +12,13 @@
 
 #include <array>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 using Catch::Matchers::ContainsSubstring;
@@ -26,13 +30,15 @@ namespace {
 
 class TempPath {
 public:
-    explicit TempPath(std::string name) {
+    explicit TempPath(std::string_view name) {
         m_path = std::filesystem::temp_directory_path() / name;
         std::filesystem::remove(m_path);
     }
     ~TempPath() { std::filesystem::remove(m_path); }
     TempPath(const TempPath&)            = delete;
     TempPath& operator=(const TempPath&) = delete;
+    TempPath(TempPath&&)                 = delete;
+    TempPath& operator=(TempPath&&)      = delete;
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
 private:
@@ -188,7 +194,7 @@ TEST_CASE("SearchFile streams calibrated Stokes I", "[psrfits]") {
     file.raw(table);
     file.pad_data();
 
-    TempPath path("psrio-psrfits-8.sf");
+    const TempPath path("psrio-psrfits-8.sf");
     file.write(path.path());
     SearchFile reader(path.path());
 
@@ -280,7 +286,7 @@ TEST_CASE("SearchFile unpacks 2-bit samples with dspsr levels", "[psrfits]") {
     subint_header(file, geo, table.size(), "'(4,2,1)'");
     file.raw(table);
     file.pad_data();
-    TempPath path("psrio-psrfits-2bit.sf");
+    const TempPath path("psrio-psrfits-2bit.sf");
     file.write(path.path());
 
     SearchFile reader(path.path());
@@ -291,8 +297,8 @@ TEST_CASE("SearchFile unpacks 2-bit samples with dspsr levels", "[psrfits]") {
     const std::array<float, 4> expected{4.0F, 1.0F, -1.0F, -4.0F};
     for (int sample = 0; sample < 4; ++sample) {
         for (int chan = 0; chan < 4; ++chan) {
-            CHECK(samples[static_cast<std::size_t>(sample * 4 + chan)] ==
-                  expected[chan]);
+            CHECK(samples[static_cast<std::size_t>((sample * 4) + chan)] ==
+                  expected[static_cast<std::size_t>(chan)]);
         }
     }
 }
@@ -319,7 +325,7 @@ TEST_CASE("SearchFile keeps an irregular frequency table", "[psrfits]") {
     subint_header(file, geo, table.size());
     file.raw(table);
     file.pad_data();
-    TempPath path("psrio-psrfits-irregular.sf");
+    const TempPath path("psrio-psrfits-irregular.sf");
     file.write(path.path());
 
     SearchFile reader(path.path());
@@ -349,7 +355,7 @@ TEST_CASE("SearchFile honours SIGNINT and a transposed DATA axis",
     std::vector<std::uint8_t> data(60, 0);
     // Fortran TDIM (5, 4, 3) is C order (chan, pol, time) with time fastest.
     const auto at = [](int chan, int pol, int sample) {
-        return (chan * 4 + pol) * 5 + sample;
+        return (((chan * 4) + pol) * 5) + sample;
     };
     data[static_cast<std::size_t>(at(0, 0, 0))] = 200;
     data[static_cast<std::size_t>(at(0, 1, 0))] = 10;
@@ -366,7 +372,7 @@ TEST_CASE("SearchFile honours SIGNINT and a transposed DATA axis",
     subint_header(file, geo, table.size(), "'(5,4,3)'");
     file.raw(table);
     file.pad_data();
-    TempPath path("psrio-psrfits-transpose.sf");
+    const TempPath path("psrio-psrfits-transpose.sf");
     file.write(path.path());
 
     SearchFile reader(path.path());
@@ -403,7 +409,7 @@ TEST_CASE("SearchFile trims a short final sub-integration", "[psrfits]") {
     subint_header(file, geo, table.size() / 2U);
     file.raw(table);
     file.pad_data();
-    TempPath path("psrio-psrfits-short.sf");
+    const TempPath path("psrio-psrfits-short.sf");
     file.write(path.path());
 
     SearchFile reader(path.path());
@@ -420,16 +426,17 @@ TEST_CASE("digifil sizes a search file from the stored sub-integration",
           8192U);
 }
 
-TEST_CASE("SearchFile reads DATA from the FITS heap", "[psrfits]") {
+TEST_CASE("SearchFile reads DATA and DAT_FREQ from the FITS heap",
+          "[psrfits]") {
     FitsFileBytes file;
     primary_cards(file);
     file.begin_hdu();
     file.key("XTENSION", "'BINTABLE'");
     file.key("BITPIX", "8");
     file.key("NAXIS", "2");
-    file.key("NAXIS1", "64");
+    file.key("NAXIS1", "56");
     file.key("NAXIS2", "1");
-    file.key("PCOUNT", "4");
+    file.key("PCOUNT", "20");
     file.key("GCOUNT", "1");
     file.key("TFIELDS", "7");
     file.key("EXTNAME", "'SUBINT'");
@@ -438,7 +445,7 @@ TEST_CASE("SearchFile reads DATA from the FITS heap", "[psrfits]") {
     file.key("TTYPE2", "'OFFS_SUB'");
     file.key("TFORM2", "'1D'");
     file.key("TTYPE3", "'DAT_FREQ'");
-    file.key("TFORM3", "'2D'");
+    file.key("TFORM3", "'1PD'");
     file.key("TTYPE4", "'DAT_WTS'");
     file.key("TFORM4", "'2E'");
     file.key("TTYPE5", "'DAT_OFFS'");
@@ -460,8 +467,8 @@ TEST_CASE("SearchFile reads DATA from the FITS heap", "[psrfits]") {
     std::vector<std::byte> row;
     append_be(row, 2.0);
     append_be(row, 1.0);
-    append_be(row, 100.0);
-    append_be(row, 101.0);
+    append_be(row, std::int32_t{2});
+    append_be(row, std::int32_t{0});
     append_be(row, 1.0F);
     append_be(row, 1.0F);
     append_be(row, 0.0F);
@@ -469,18 +476,27 @@ TEST_CASE("SearchFile reads DATA from the FITS heap", "[psrfits]") {
     append_be(row, 1.0F);
     append_be(row, 1.0F);
     append_be(row, std::int32_t{4});
-    append_be(row, std::int32_t{0});
-    REQUIRE(row.size() == 64U);
+    append_be(row, std::int32_t{16});
+    REQUIRE(row.size() == 56U);
     file.raw(row);
-    file.raw(std::vector<std::byte>{std::byte{10}, std::byte{20}, std::byte{30},
-                                    std::byte{40}});
+    std::vector<std::byte> heap;
+    append_be(heap, 100.0);
+    append_be(heap, 101.0);
+    heap.push_back(std::byte{10});
+    heap.push_back(std::byte{20});
+    heap.push_back(std::byte{30});
+    heap.push_back(std::byte{40});
+    REQUIRE(heap.size() == 20U);
+    file.raw(heap);
     file.pad_data();
-    TempPath path("psrio-psrfits-heap.sf");
+    const TempPath path("psrio-psrfits-heap.sf");
     file.write(path.path());
 
     SearchFile reader(path.path());
     CHECK(reader.subint_samples() == 2U);
     CHECK(reader.input_npol() == 1U);
+    CHECK(reader.fch1() == Catch::Approx(100.0));
+    CHECK(reader.foff() == Catch::Approx(1.0));
     CHECK_FALSE(reader.sums_polarisations());
     const auto samples = reader.read_samples<float>(2);
     CHECK(samples == std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F});
@@ -505,14 +521,14 @@ TEST_CASE("SearchFile rejects fold mode and a missing table", "[psrfits]") {
         file.end_header();
         file.raw(std::vector<std::byte>{std::byte{0}});
         file.pad_data();
-        TempPath path("psrio-psrfits-fold.sf");
+        const TempPath path("psrio-psrfits-fold.sf");
         file.write(path.path());
         CHECK_THROWS_WITH(SearchFile(path.path()), ContainsSubstring("SEARCH"));
     }
     {
         FitsFileBytes file;
         primary_cards(file);
-        TempPath path("psrio-psrfits-empty.sf");
+        const TempPath path("psrio-psrfits-empty.sf");
         file.write(path.path());
         CHECK_THROWS_WITH(SearchFile(path.path()), ContainsSubstring("SUBINT"));
     }
@@ -552,7 +568,7 @@ TEST_CASE("Parkes UWL search file matches sigpyproc Stokes I",
     CHECK(same_bits(first[100], 0x479d814f));
     CHECK(same_bits(first[6655], 0x472baf84));
     CHECK(same_bits(first[6656], 0x46bcd85a));
-    CHECK(same_bits(first[10U * 6656U], 0x46c468bc));
+    CHECK(same_bits(first[10UL * 6656UL], 0x46c468bc));
     std::uint32_t fold = 0;
     for (std::size_t index = 0; index < first.size(); index += 997U) {
         const auto bits = std::bit_cast<std::uint32_t>(first[index]);

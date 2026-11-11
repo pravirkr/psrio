@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <array>
 #include <cstddef>
+#include <ios>
 #include <ostream>
 #include <span>
 

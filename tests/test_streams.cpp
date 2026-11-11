@@ -2,16 +2,21 @@
 #include "psrio/block_source.hpp"
 #include "psrio/formats/psrfits.hpp"
 #include "psrio/formats/sigproc.hpp"
+#include "psrio/open.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 using Catch::Matchers::ContainsSubstring;
@@ -26,14 +31,17 @@ namespace {
 
 class TempPath {
 public:
-    explicit TempPath(std::string name) {
+    explicit TempPath(std::string_view name) {
         m_path = std::filesystem::temp_directory_path() /
-                 ("psrio_stream_" + std::to_string(::getpid()) + "_" + name);
+                 ("psrio_stream_" + std::to_string(::getpid()) + "_" +
+                  std::string(name));
         std::filesystem::remove(m_path);
     }
     ~TempPath() { std::filesystem::remove(m_path); }
     TempPath(const TempPath&)            = delete;
     TempPath& operator=(const TempPath&) = delete;
+    TempPath(TempPath&&)                 = delete;
+    TempPath& operator=(TempPath&&)      = delete;
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
 private:
@@ -159,15 +167,16 @@ TEST_CASE("FilterbankStream joins contiguous SIGPROC files",
           "[sigproc][stream]") {
     static_assert(psrio::concepts::BlockReader<FilterbankStream>);
 
-    TempPath first("a.fil");
-    TempPath second("b.fil");
-    const std::uint8_t left[]  = {1, 2, 3, 4};
-    const std::uint8_t right[] = {5, 6, 7, 8};
-    write_fil(first.path(), 50000.0, left);
-    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), right, "stream",
+    const TempPath first("a.fil");
+    const TempPath second("b.fil");
+    constexpr std::array<std::uint8_t, 4> kLeft  = {1, 2, 3, 4};
+    constexpr std::array<std::uint8_t, 4> kRight = {5, 6, 7, 8};
+    write_fil(first.path(), 50000.0, kLeft);
+    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), kRight, "stream",
               "raw.dat");
 
-    const std::filesystem::path paths[] = {first.path(), second.path()};
+    const std::array<std::filesystem::path, 2> paths = {first.path(),
+                                                        second.path()};
     FilterbankStream stream(paths);
     CHECK(stream.nsamples() == 4U);
     CHECK(stream.header().nsamples() == 4U);
@@ -194,33 +203,41 @@ TEST_CASE("FilterbankStream joins contiguous SIGPROC files",
     CHECK(raw[2] == std::byte{5});
     CHECK(raw[4] == std::byte{7});
 
-    psrio::BlockSource block{FilterbankStream(paths)};
+    psrio::BlockSource block =
+        psrio::open_block_source(std::span<const std::filesystem::path>(paths));
     CHECK(block.nsamples() == 4U);
     std::vector<float> floats(2);
     block.seek(3);
     CHECK(block.read_samples(1, std::span<float>(floats)) == 1U);
     CHECK(floats[0] == 7.0F);
     CHECK(floats[1] == 8.0F);
+
+    stream.rewind();
+    CHECK(stream.read_samples<std::uint8_t>(2) ==
+          std::vector<std::uint8_t>{1, 2, 3, 4});
 }
 
 TEST_CASE("FilterbankStream rejects a gap or a different header",
           "[sigproc][stream]") {
-    TempPath first("a.fil");
-    TempPath second("b.fil");
-    const std::uint8_t samples[] = {1, 2, 3, 4};
-    write_fil(first.path(), 50000.0, samples);
-    write_fil(second.path(), mjd_after(50000.0, 3, 1.0), samples);
-    const std::filesystem::path gapped[] = {first.path(), second.path()};
+    const TempPath first("a.fil");
+    const TempPath second("b.fil");
+    constexpr std::array<std::uint8_t, 4> kSamples = {1, 2, 3, 4};
+    write_fil(first.path(), 50000.0, kSamples);
+    write_fil(second.path(), mjd_after(50000.0, 3, 1.0), kSamples);
+    const std::array<std::filesystem::path, 2> gapped = {first.path(),
+                                                         second.path()};
     CHECK_THROWS_WITH(FilterbankStream(gapped),
                       ContainsSubstring("not contiguous"));
 
-    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), samples, "other");
-    const std::filesystem::path renamed[] = {first.path(), second.path()};
+    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), kSamples, "other");
+    const std::array<std::filesystem::path, 2> renamed = {first.path(),
+                                                          second.path()};
     CHECK_THROWS_WITH(FilterbankStream(renamed),
                       ContainsSubstring("source_name"));
 
-    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), samples);
-    const std::filesystem::path reversed[] = {second.path(), first.path()};
+    write_fil(second.path(), mjd_after(50000.0, 2, 1.0), kSamples);
+    const std::array<std::filesystem::path, 2> reversed = {second.path(),
+                                                           first.path()};
     CHECK_THROWS_WITH(FilterbankStream(reversed),
                       ContainsSubstring("not contiguous"));
 }
@@ -228,13 +245,14 @@ TEST_CASE("FilterbankStream rejects a gap or a different header",
 TEST_CASE("SearchStream reads across the file boundary", "[psrfits][stream]") {
     static_assert(psrio::concepts::BlockReader<SearchStream>);
 
-    TempPath first("a.sf");
-    TempPath second("b.sf");
-    const std::uint8_t left[]  = {10, 20, 30, 40};
-    const std::uint8_t right[] = {50, 60, 70, 80};
-    write_search(first.path(), 0.0, 0, "Join", left);
-    write_search(second.path(), 2.0, 1, "Join", right);
-    const std::filesystem::path paths[] = {first.path(), second.path()};
+    const TempPath first("a.sf");
+    const TempPath second("b.sf");
+    constexpr std::array<std::uint8_t, 4> kLeft  = {10, 20, 30, 40};
+    constexpr std::array<std::uint8_t, 4> kRight = {50, 60, 70, 80};
+    write_search(first.path(), 0.0, 0, "Join", kLeft);
+    write_search(second.path(), 2.0, 1, "Join", kRight);
+    const std::array<std::filesystem::path, 2> paths = {first.path(),
+                                                        second.path()};
 
     SearchStream stream(paths);
     std::vector<float> got(6);
@@ -247,36 +265,46 @@ TEST_CASE("SearchStream reads across the file boundary", "[psrfits][stream]") {
     REQUIRE(stream.read_samples(2, std::span<float>(swapped)) == 2U);
     CHECK(swapped == std::vector<float>{60.0F, 50.0F, 80.0F, 70.0F});
 
-    psrio::BlockSource block{SearchStream(paths)};
+    const psrio::BlockSource block =
+        psrio::open_block_source(std::span<const std::filesystem::path>(paths));
     CHECK(block.nsamples() == 4U);
+
+    stream.rewind();
+    stream.set_fswap(false);
+    CHECK(stream.read_samples<float>(2) ==
+          std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F});
 }
 
 TEST_CASE("SearchStream rejects a gap, a header change, and a bad NSUBOFFS",
           "[psrfits][stream]") {
-    TempPath first("a.sf");
-    TempPath second("b.sf");
-    const std::uint8_t data[] = {1, 2, 3, 4};
-    write_search(first.path(), 0.0, 0, "Join", data);
-    write_search(second.path(), 3.0, 1, "Join", data);
-    const std::filesystem::path gapped[] = {first.path(), second.path()};
+    const TempPath first("a.sf");
+    const TempPath second("b.sf");
+    constexpr std::array<std::uint8_t, 4> kData = {1, 2, 3, 4};
+    write_search(first.path(), 0.0, 0, "Join", kData);
+    write_search(second.path(), 3.0, 1, "Join", kData);
+    const std::array<std::filesystem::path, 2> gapped = {first.path(),
+                                                         second.path()};
     CHECK_THROWS_WITH(SearchStream(gapped),
                       ContainsSubstring("not contiguous"));
 
-    write_search(second.path(), 2.0, 5, "Join", data);
-    const std::filesystem::path shifted[] = {first.path(), second.path()};
+    write_search(second.path(), 2.0, 5, "Join", kData);
+    const std::array<std::filesystem::path, 2> shifted = {first.path(),
+                                                          second.path()};
     CHECK_THROWS_WITH(SearchStream(shifted), ContainsSubstring("NSUBOFFS"));
 
-    write_search(second.path(), 2.0, std::nullopt, "Join", data);
-    const std::filesystem::path partial[] = {first.path(), second.path()};
+    write_search(second.path(), 2.0, std::nullopt, "Join", kData);
+    const std::array<std::filesystem::path, 2> partial = {first.path(),
+                                                          second.path()};
     CHECK_THROWS_WITH(SearchStream(partial), ContainsSubstring("NSUBOFFS"));
 
-    write_search(first.path(), 0.0, std::nullopt, "Join", data);
-    write_search(second.path(), 2.0, std::nullopt, "Other", data);
-    const std::filesystem::path renamed[] = {first.path(), second.path()};
+    write_search(first.path(), 0.0, std::nullopt, "Join", kData);
+    write_search(second.path(), 2.0, std::nullopt, "Other", kData);
+    const std::array<std::filesystem::path, 2> renamed = {first.path(),
+                                                          second.path()};
     CHECK_THROWS_WITH(SearchStream(renamed),
                       ContainsSubstring("observing setup"));
 
-    write_search(second.path(), 2.0, std::nullopt, "Join", data);
+    write_search(second.path(), 2.0, std::nullopt, "Join", kData);
     SearchStream open{std::span<const std::filesystem::path>(renamed)};
     CHECK(open.nsamples() == 4U);
 }

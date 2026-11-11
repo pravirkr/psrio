@@ -12,6 +12,7 @@
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
@@ -19,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -733,19 +735,25 @@ column_cell(std::span<const std::byte> file,
     }
     const auto nbytes = checked_mul(static_cast<std::uint64_t>(count),
                                     column.element_bytes, "heap array");
-    const auto origin = table.data_offset + table.heap_offset +
-                        static_cast<std::uint64_t>(heap_at);
-    const auto limit =
-        table.data_offset +
-        checked_mul(table.row_bytes, table.nrows, "SUBINT table") +
-        table.heap_bytes;
-    if (origin > file.size() || nbytes > file.size() - origin ||
-        origin < table.data_offset || origin > limit ||
-        nbytes > limit - origin) {
+    const auto main_bytes =
+        checked_mul(table.row_bytes, table.nrows, "SUBINT table");
+    if (table.data_offset > file.size() ||
+        main_bytes > file.size() - table.data_offset ||
+        table.heap_bytes > file.size() - table.data_offset - main_bytes) {
         throw FormatError(fmt::format(
             "psrio: SUBINT row {} column '{}' heap array extends past the file",
             row, column.name));
     }
+    const auto hdu_bytes = main_bytes + table.heap_bytes;
+    const auto heap_pos  = static_cast<std::uint64_t>(heap_at);
+    if (table.heap_offset > hdu_bytes ||
+        heap_pos > hdu_bytes - table.heap_offset ||
+        nbytes > hdu_bytes - table.heap_offset - heap_pos) {
+        throw FormatError(fmt::format(
+            "psrio: SUBINT row {} column '{}' heap array extends past the file",
+            row, column.name));
+    }
+    const auto origin = table.data_offset + table.heap_offset + heap_pos;
     return file.subspan(static_cast<std::size_t>(origin),
                         static_cast<std::size_t>(nbytes));
 }

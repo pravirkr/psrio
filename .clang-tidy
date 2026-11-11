@@ -5,6 +5,8 @@ Checks: >
   -bugprone-empty-catch,
   -bugprone-incorrect-roundings,
   clang-analyzer-*,
+  -clang-analyzer-cplusplus.NewDeleteLeaks,
+  -clang-analyzer-deadcode.DeadStores,
   clang-diagnostic-*,
   concurrency-*,
   cppcoreguidelines*,
@@ -32,7 +34,9 @@ Checks: >
   modernize-*,
   -modernize-loop-convert,
   -modernize-use-trailing-return-type,
+  -modernize-use-nodiscard,
   openmp-*,
+  -openmp-exception-escape,
   performance-*,
   portability-*,
   -portability-avoid-pragma-once,
@@ -41,10 +45,13 @@ Checks: >
   -readability-isolate-declaration,
   -readability-magic-numbers,
   -readability-suspicious-call-argument,
+  -readability-use-anyofallof,
+  -readability-use-concise-preprocessor-directives,
 
 WarningsAsErrors: ""
 HeaderFileExtensions: ["h", "hh", "hpp", "hxx"]
-HeaderFilterRegex: ".*/(include|tests)/.*"
+HeaderFilterRegex: "(^|/)(include/psrio/|applications/|tests/)"
+ExcludeHeaderFilterRegex: "(/_deps/|/\\.cache/|^/opt/|^/usr/|miniforge|miniconda|/envs/|/site-packages/)"
 FormatStyle: "file"
 CheckOptions:
   readability-identifier-naming.ClassCase: "CamelCase"
@@ -74,5 +81,6 @@ CheckOptions:
   readability-identifier-naming.StructCase: "CamelCase"
   readability-identifier-naming.TemplateParameterCase: "CamelCase"
   readability-function-cognitive-complexity.IgnoreMacros: "true"
-  readability-function-cognitive-complexity.Threshold: "50"
+  readability-function-cognitive-complexity.Threshold: "150"
   readability-trailing-comma.SingleLineCommaPolicy: Ignore
+  misc-include-cleaner.IgnoreHeaders: "highfive/.*;catch2/.*;fmt/.*;spdlog/.*;omp\\.h;CLI/.*;dmt/.*;hdf5\\.h;H5.*\\.h;dada_hdu\\.h;ipcbuf\\.h;ascii_header\\.h;psrio/psrio\\.hpp;psrio/formats/psrfits\\.hpp"

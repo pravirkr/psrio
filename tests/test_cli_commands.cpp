@@ -599,7 +599,7 @@ TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
     file.raw(row);
     file.pad_data();
 
-    TempDir dir;
+    const TempDir dir;
     const auto fits = dir.path() / "tiny.sf";
     file.write(fits);
     const auto source =
@@ -630,7 +630,7 @@ TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
 
 TEST_CASE("psrio joins contiguous filterbanks in time", "[cli][stream]") {
     const TempDir dir;
-    auto header = [](double tstart) {
+    const auto header = [](double tstart) {
         psrio::formats::sigproc::FilterbankHeader out;
         out.nchans      = 2;
         out.nifs        = 1;

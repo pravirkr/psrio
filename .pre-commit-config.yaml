@@ -1,5 +1,7 @@
 minimum_pre_commit_version: "3.5.0"
 
+exclude: ^(build[^/]*|tmp_files|\.cache|\.venv)/
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -22,6 +24,7 @@ repos:
     hooks:
       - id: clang-format
         types_or: [c++, c, cuda]
+        files: ^(include|tests|applications)/
 
   - repo: https://github.com/cheshirekow/cmake-format-precommit
     rev: v0.6.13
@@ -34,3 +37,14 @@ repos:
         additional_dependencies: [pyyaml]
         args: [--config-files=.cmake-format.yaml]
         exclude: cmake/(CPM|FindFFTW)\.cmake$
+
+  # Layout, include and namespace rules from AGENTS.md. The
+  # standalone-header compile runs in CI; locally it is skipped for speed.
+  - repo: local
+    hooks:
+      - id: check-architecture
+        name: architecture rules (AGENTS.md)
+        entry: env SKIP_COMPILE=1 scripts/check_architecture.sh
+        language: system
+        pass_filenames: false
+        files: ^(include|tests|applications)/

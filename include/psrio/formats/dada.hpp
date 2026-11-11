@@ -3,8 +3,14 @@
 /// PSRDADA file reader. One ASCII header of `HDR_SIZE` bytes and one payload.
 /// Included from `psrio.hpp`. The live ring stays in `formats/psrdada.hpp`.
 
+#include "psrio/astro.hpp"
 #include "psrio/baseband.hpp"
+#include "psrio/common/types.hpp"
+#include "psrio/detail/baseband_layout.hpp"
+#include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
+#include "psrio/detail/skip.hpp"
+#include "psrio/header.hpp"
 
 #include <algorithm>
 #include <array>
@@ -325,10 +331,12 @@ private:
 
     [[nodiscard]] static std::time_t parse_utc(const std::string& text) {
         std::tm broken{};
+        // NOLINTNEXTLINE(misc-include-cleaner): POSIX strptime is in <ctime>
         if (strptime(text.c_str(), "%Y-%m-%d-%H:%M:%S", &broken) == nullptr) {
             throw FormatError(
                 "psrio: DADA UTC_START must be YYYY-MM-DD-HH:MM:SS");
         }
+        // NOLINTNEXTLINE(misc-include-cleaner): timegm is in <ctime>
         const auto utc = timegm(&broken);
         if (utc == static_cast<std::time_t>(-1)) {
             throw FormatError("psrio: DADA UTC_START is not a valid time");
@@ -638,8 +646,10 @@ private:
             if (offset < 0) {
                 throw ValidationError("psrio: DADA OBS_OFFSET must be >= 0");
             }
-            items.push_back(Item{.path   = file,
-                                 .offset = static_cast<std::uint64_t>(offset)});
+            items.push_back(Item{
+                .path   = file,
+                .offset = static_cast<std::uint64_t>(offset),
+            });
         }
         std::ranges::stable_sort(items,
                                  [](const Item& left, const Item& right) {

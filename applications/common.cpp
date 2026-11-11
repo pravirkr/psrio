@@ -7,7 +7,7 @@
 #include <psrio/formats/sigproc/stream.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
 #include <psrio/header.hpp>
-#include <psrio/open.hpp>
+#include <psrio/open.hpp> // IWYU pragma: keep
 #include <psrio/timeseries.hpp>
 
 #ifdef PSRIO_CLI_HAS_HDF5
@@ -208,21 +208,38 @@ Input::Input(std::span<const std::filesystem::path> paths) {
 }
 
 std::uint64_t Input::nsamples() const {
-    return m_series ? m_series->nsamples() : m_block->nsamples();
+    if (m_series) {
+        return m_series->nsamples();
+    }
+    return m_block ? m_block->nsamples() : 0U;
 }
 
 std::uint64_t Input::nchans() const {
-    return m_series ? 1U : m_block->nchans();
+    if (m_series) {
+        return 1U;
+    }
+    return m_block ? m_block->nchans() : 0U;
 }
 
-std::uint64_t Input::nifs() const { return m_series ? 1U : m_block->nifs(); }
+std::uint64_t Input::nifs() const {
+    if (m_series) {
+        return 1U;
+    }
+    return m_block ? m_block->nifs() : 0U;
+}
 
 int Input::nbits() const {
-    return m_series ? m_series->nbits() : m_block->nbits();
+    if (m_series) {
+        return m_series->nbits();
+    }
+    return m_block ? m_block->nbits() : 0;
 }
 
 double Input::tsamp() const {
-    return m_series ? m_series->tsamp() : m_block->tsamp();
+    if (m_series) {
+        return m_series->tsamp();
+    }
+    return m_block ? m_block->tsamp() : 0.0;
 }
 
 BlockSource& Input::block() {
@@ -237,15 +254,17 @@ BlockSource& Input::block() {
 void Input::seek(std::uint64_t sample) {
     if (m_series) {
         m_series->seek(sample);
-    } else {
+    } else if (m_block) {
         m_block->seek(sample);
     }
 }
 
 std::uint64_t Input::read_floats(std::uint64_t count, std::span<float> dest) {
     const auto values = dest.first(static_cast<std::size_t>(count * row()));
-    return m_series ? m_series->read_samples(count, values)
-                    : m_block->read_samples(count, values);
+    if (m_series) {
+        return m_series->read_samples(count, values);
+    }
+    return block().read_samples(count, values);
 }
 
 Output::Output(const std::filesystem::path& path,

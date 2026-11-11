@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <span>
 #include <utility>

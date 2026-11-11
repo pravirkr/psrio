@@ -4,6 +4,7 @@
 #include "psrio/detail/exceptions.hpp"
 
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <memory>

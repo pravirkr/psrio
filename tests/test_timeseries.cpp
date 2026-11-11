@@ -304,10 +304,13 @@ public:
     explicit TempBase(std::string_view name)
         : m_base(std::filesystem::temp_directory_path() /
                  ("psrio_tswriter_" + std::string(name))) {}
-    ~TempBase() {
-        std::error_code ec;
-        for (const char* ext : {".tim", ".dat", ".inf", ".ts"}) {
-            std::filesystem::remove(path(ext), ec);
+    ~TempBase() noexcept {
+        try {
+            std::error_code ec;
+            for (const char* ext : {".tim", ".dat", ".inf", ".ts"}) {
+                std::filesystem::remove(path(ext), ec);
+            }
+        } catch (...) {
         }
     }
     TempBase(const TempBase&)            = delete;

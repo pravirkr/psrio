@@ -1,5 +1,6 @@
 #pragma once
 
+#include "psrio/astro.hpp"
 #include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
@@ -7,19 +8,22 @@
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/detail/write.hpp"
-#include "psrio/formats/presto/inf.hpp"
+#include "psrio/formats/presto/inf.hpp" // IWYU pragma: keep
 #include "psrio/formats/presto/writer.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/header.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <span>

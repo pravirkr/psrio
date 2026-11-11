@@ -3,16 +3,20 @@
 /// PSRDADA ring support. Opt in with this header; psrio.hpp does not include
 /// it. Linking `psrio::psrdada` supplies the PSRDADA include path and library.
 
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/packed.hpp"
 
 #include <algorithm>
 #include <array>
 #include <ascii_header.h>
 #include <cctype>
 #include <cmath>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -23,6 +27,8 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <sys/ipc.h>   // IWYU pragma: keep
+#include <sys/types.h> // IWYU pragma: keep
 #include <utility>
 #include <vector>
 
@@ -44,9 +50,27 @@ inline bool equal_ignore_case(std::string_view left, std::string_view right) {
     return true;
 }
 
+inline int header_get_int(const char* header, const char* key, int& value) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): PSRDADA C API
+    return ascii_header_get(header, key, "%d", &value);
+}
+
+inline int header_get_real(const char* header, const char* key, double& value) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): PSRDADA C API
+    return ascii_header_get(header, key, "%lf", &value);
+}
+
+inline int header_get_str(const char* header,
+                          const char* key,
+                          const char* format,
+                          char* dest) {
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg): PSRDADA C API
+    return ascii_header_get(header, key, format, dest);
+}
+
 inline int require_int(const char* header, const char* key) {
     int value = 0;
-    if (ascii_header_get(header, key, "%d", &value) < 0) {
+    if (header_get_int(header, key, value) < 0) {
         throw ValidationError(
             fmt::format("psrio: PSRDADA header missing {}", key));
     }
@@ -56,9 +80,9 @@ inline int require_int(const char* header, const char* key) {
 inline double
 require_real(const char* header, const char* key, const char* alternate) {
     double value = 0.0;
-    if (ascii_header_get(header, key, "%lf", &value) < 0 &&
+    if (header_get_real(header, key, value) < 0 &&
         (alternate == nullptr ||
-         ascii_header_get(header, alternate, "%lf", &value) < 0)) {
+         header_get_real(header, alternate, value) < 0)) {
         throw ValidationError(
             fmt::format("psrio: PSRDADA header missing {}", key));
     }
@@ -67,10 +91,12 @@ require_real(const char* header, const char* key, const char* alternate) {
 
 inline std::time_t parse_utc_start(const char* text) {
     std::tm broken{};
+    // NOLINTNEXTLINE(misc-include-cleaner): POSIX strptime is in <ctime>
     if (strptime(text, "%Y-%m-%d-%H:%M:%S", &broken) == nullptr) {
         throw ValidationError(
             "psrio: PSRDADA UTC_START must be YYYY-MM-DD-HH:MM:SS");
     }
+    // NOLINTNEXTLINE(misc-include-cleaner): timegm is in <ctime>
     const auto utc = timegm(&broken);
     if (utc == static_cast<std::time_t>(-1)) {
         throw ValidationError("psrio: PSRDADA UTC_START is not a valid time");
@@ -148,7 +174,7 @@ public:
     ~RingReader()                                = default;
 
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchans; }
-    [[nodiscard]] std::uint64_t nifs() const noexcept { return 1U; }
+    [[nodiscard]] static std::uint64_t nifs() noexcept { return 1U; }
     [[nodiscard]] int nbits() const noexcept { return m_nbits; }
     [[nodiscard]] SampleType sample_type() const noexcept { return m_type; }
     [[nodiscard]] std::uint64_t bytes_per_sample() const noexcept {
@@ -165,7 +191,7 @@ public:
     [[nodiscard]] double tsamp() const noexcept { return m_tsamp; }
 
     /// Zero. The ring header carries `UTC_START` rather than an MJD.
-    [[nodiscard]] double tstart() const noexcept { return 0.0; }
+    [[nodiscard]] static double tstart() noexcept { return 0.0; }
 
     [[nodiscard]] std::string_view source_name() const noexcept {
         return m_source_name;
@@ -175,8 +201,8 @@ public:
         return m_telescope;
     }
 
-    [[nodiscard]] double raj() const noexcept { return 0.0; }
-    [[nodiscard]] double dej() const noexcept { return 0.0; }
+    [[nodiscard]] static double raj() noexcept { return 0.0; }
+    [[nodiscard]] static double dej() noexcept { return 0.0; }
 
     /// Centre frequency of channel 0, in MHz.
     [[nodiscard]] double fch1() const noexcept { return m_fch1; }
@@ -297,6 +323,7 @@ private:
             if (m_hdu == nullptr) {
                 throw IoError("psrio: failed to create a PSRDADA HDU");
             }
+            // NOLINTNEXTLINE(misc-include-cleaner): POSIX key_t
             dada_hdu_set_key(m_hdu, static_cast<key_t>(key));
             if (dada_hdu_connect(m_hdu) < 0) {
                 throw IoError(fmt::format(
@@ -378,41 +405,39 @@ private:
 
     static constexpr std::size_t kDiscardBytes = 4096U;
 
-    HduGuard m_guard;
-    ipcbuf_t* m_data            = nullptr;
-    char* m_page                = nullptr;
-    std::uint64_t m_page_origin = 0;
-    std::uint64_t m_page_size   = 0;
-    bool m_page_final           = false;
-    std::uint64_t m_next_origin = 0;
-    std::vector<std::byte> m_carry;
+    ipcbuf_t* m_data             = nullptr;
+    char* m_page                 = nullptr;
+    std::uint64_t m_page_origin  = 0;
+    std::uint64_t m_page_size    = 0;
+    std::uint64_t m_next_origin  = 0;
     std::uint64_t m_carry_origin = 0;
     std::uint64_t m_byte         = 0;
-
+    std::uint64_t m_nchans       = 0;
+    std::uint64_t m_stride       = 0;
+    double m_tsamp               = 0.0;
+    double m_fch1                = 0.0;
+    double m_foff                = 0.0;
+    double m_spectra_rate        = 0.0;
+    std::time_t m_utc            = 0;
+    std::uint64_t m_nsamples     = 0;
+    std::vector<std::byte> m_carry;
     std::string m_source_name{"Unknown"};
     std::string m_telescope{"Unknown"};
-    bool m_apply_fswap{false};
-
-    std::uint64_t m_nchans   = 0;
-    int m_nbits              = 0;
-    SampleType m_type        = SampleType::kUInt8;
-    std::uint64_t m_stride   = 0;
-    int m_beam               = 0;
-    double m_tsamp           = 0.0;
-    double m_fch1            = 0.0;
-    double m_foff            = 0.0;
-    double m_spectra_rate    = 0.0;
-    std::time_t m_utc        = 0;
-    bool m_has_nsamples      = false;
-    std::uint64_t m_nsamples = 0;
-    bool m_eod               = false;
+    HduGuard m_guard;
+    int m_nbits         = 0;
+    int m_beam          = 0;
+    bool m_page_final   = false;
+    bool m_apply_fswap  = false;
+    SampleType m_type   = SampleType::kUInt8;
+    bool m_has_nsamples = false;
+    bool m_eod          = false;
 };
 
 inline RingReader::RingReader(std::uint32_t key) {
     m_guard.open(key);
     m_data                     = m_guard.data();
     std::uint64_t header_bytes = 0;
-    char* header = ipcbuf_get_next_read(m_guard.header(), &header_bytes);
+    const char* header = ipcbuf_get_next_read(m_guard.header(), &header_bytes);
     if (header == nullptr) {
         throw IoError(
             "psrio: PSRDADA ring closed before a header was available");
@@ -444,26 +469,26 @@ inline void RingReader::parse_header(const char* header) {
             "psrio: PSRDADA NPOL must be 1 (detected intensity)");
     }
     int ndim = 1;
-    if (ascii_header_get(header, "NDIM", "%d", &ndim) >= 0 && ndim != 1) {
+    if (detail::header_get_int(header, "NDIM", ndim) >= 0 && ndim != 1) {
         throw ValidationError(
             "psrio: PSRDADA NDIM must be 1 (real intensity samples)");
     }
     std::array<char, 16> order{};
-    if (ascii_header_get(header, "ORDER", "%15s", order.data()) >= 0 &&
+    if (detail::header_get_str(header, "ORDER", "%15s", order.data()) >= 0 &&
         !detail::equal_ignore_case(order.data(), "TF")) {
         throw ValidationError(
             "psrio: PSRDADA ORDER must be TF (time then frequency)");
     }
 
     std::array<char, 64> src{};
-    if (ascii_header_get(header, "SRC_NAME", "%63s", src.data()) >= 0 ||
-        ascii_header_get(header, "SOURCE", "%63s", src.data()) >= 0) {
+    if (detail::header_get_str(header, "SRC_NAME", "%63s", src.data()) >= 0 ||
+        detail::header_get_str(header, "SOURCE", "%63s", src.data()) >= 0) {
         m_source_name = src.data();
     } else {
         m_source_name = "Unknown";
     }
     std::array<char, 64> tel{};
-    if (ascii_header_get(header, "TELESCOPE", "%63s", tel.data()) >= 0) {
+    if (detail::header_get_str(header, "TELESCOPE", "%63s", tel.data()) >= 0) {
         m_telescope = tel.data();
     } else {
         m_telescope = "Unknown";
@@ -476,17 +501,17 @@ inline void RingReader::parse_header(const char* header) {
             "psrio: PSRDADA frequency keywords must be finite");
     }
     double tsamp_us = 0.0;
-    if (ascii_header_get(header, "TSAMP", "%lf", &tsamp_us) < 0 ||
+    if (detail::header_get_real(header, "TSAMP", tsamp_us) < 0 ||
         !std::isfinite(tsamp_us) || !(tsamp_us > 0.0)) {
         throw ValidationError(
             "psrio: PSRDADA TSAMP must be positive microseconds");
     }
     std::array<char, 64> utc{};
-    if (ascii_header_get(header, "UTC_START", "%63s", utc.data()) < 0) {
+    if (detail::header_get_str(header, "UTC_START", "%63s", utc.data()) < 0) {
         throw ValidationError("psrio: PSRDADA header missing UTC_START");
     }
     int beam = 0;
-    if (ascii_header_get(header, "BEAM", "%d", &beam) < 0) {
+    if (detail::header_get_int(header, "BEAM", beam) < 0) {
         beam = 0;
     }
     if (beam < 0) {

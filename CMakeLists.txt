@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21...3.30)
 
 project(
   psrio
-  VERSION 0.4.0
+  VERSION 0.5.0
   LANGUAGES CXX
   DESCRIPTION "High-Performance Header-Only Pulsar & FRB I/O Library"
 )
@@ -129,18 +129,38 @@ endif()
 if(PSRIO_WITH_PSRDADA)
   find_path(PSRDADA_INCLUDE_DIR NAMES dada_hdu.h)
   find_library(PSRDADA_LIBRARY NAMES psrdada)
-  if(NOT PSRDADA_INCLUDE_DIR OR NOT PSRDADA_LIBRARY)
-    message(
-      FATAL_ERROR
-        "PSRIO_WITH_PSRDADA=ON but PSRDADA was not found (need dada_hdu.h and libpsrdada)."
-    )
-  endif()
   add_library(psrio_psrdada INTERFACE)
   add_library(psrio::psrdada ALIAS psrio_psrdada)
   set_target_properties(psrio_psrdada PROPERTIES EXPORT_NAME psrdada)
   target_compile_features(psrio_psrdada INTERFACE cxx_std_20)
-  target_include_directories(psrio_psrdada INTERFACE ${PSRDADA_INCLUDE_DIR})
-  target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} ${PSRDADA_LIBRARY})
+  if(PSRDADA_INCLUDE_DIR AND PSRDADA_LIBRARY)
+    target_include_directories(psrio_psrdada INTERFACE ${PSRDADA_INCLUDE_DIR})
+    target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} ${PSRDADA_LIBRARY})
+  else()
+    if(NOT TARGET psrdada)
+      enable_language(C)
+      set(CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit TRUE)
+      set(CMAKE_DISABLE_FIND_PACKAGE_CUDA TRUE)
+      set(BUILD_TESTING OFF)
+      CPMAddPackage(
+        NAME psrdada
+        GIT_REPOSITORY https://git.code.sf.net/p/psrdada/code
+        GIT_TAG 151198ea3ec4a3a237f51e6217a5a2d7ff39194e
+        EXCLUDE_FROM_ALL YES
+        SYSTEM YES
+      )
+      unset(CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit)
+      unset(CMAKE_DISABLE_FIND_PACKAGE_CUDA)
+      unset(BUILD_TESTING)
+    endif()
+    if(NOT TARGET psrdada)
+      message(
+        FATAL_ERROR
+          "PSRIO_WITH_PSRDADA=ON but PSRDADA was not found (need dada_hdu.h and libpsrdada)."
+      )
+    endif()
+    target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} $<BUILD_INTERFACE:psrdada>)
+  endif()
 endif()
 
 # ------------------------------------------------------------------------------

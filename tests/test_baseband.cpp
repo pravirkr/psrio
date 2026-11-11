@@ -1,5 +1,7 @@
 #include "psrio/baseband.hpp"
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
+#include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/dada.hpp"
 #include "psrio/formats/guppi.hpp"
 
@@ -18,6 +20,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -193,7 +196,7 @@ TEST_CASE("GuppiReader transposes channel-major blocks", "[baseband][guppi]") {
     const std::vector<std::byte> payload{
         std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4},
         std::byte{5}, std::byte{6}, std::byte{7}, std::byte{8}};
-    const std::string_view cards[] = {
+    const std::array<std::string_view, 8> cards = {
         "OBSNCHAN= 2",      "NPOL    = 1",   "NBITS   = 8",      "BLOCSIZE= 8",
         "OBSFREQ = 1400.0", "CHAN_BW = 1.0", "TBIN    = 1.0e-6", "PKTIDX  = 0"};
     const TempFile file(guppi_block(cards, payload));

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
@@ -15,7 +16,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fmt/format.h>
-#include <limits>
 #include <optional>
 #include <span>
 #include <utility>

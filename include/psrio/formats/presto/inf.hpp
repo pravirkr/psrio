@@ -13,6 +13,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 
 namespace psrio::formats::presto {
 
@@ -187,7 +188,7 @@ namespace detail {
  * @throws IoError If the file cannot be opened.
  */
 [[nodiscard]] inline Header parse_inf_file(const std::filesystem::path& path) {
-    std::ifstream file(path);
+    const std::ifstream file(path);
     if (!file.is_open()) {
         throw IoError(fmt::format("psrio: cannot open PRESTO .inf file '{}'",
                                   path.string()));

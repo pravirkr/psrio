@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fmt/format.h>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <ostream>

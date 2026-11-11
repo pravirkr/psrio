@@ -14,9 +14,12 @@
 #include <array>
 #include <bit>
 #include <cmath>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
@@ -266,16 +269,16 @@ public:
     }
 
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchan; }
-    [[nodiscard]] std::uint64_t nifs() const noexcept { return 1; }
-    [[nodiscard]] int nbits() const noexcept { return 32; }
-    [[nodiscard]] SampleType sample_type() const noexcept {
+    [[nodiscard]] static std::uint64_t nifs() noexcept { return 1; }
+    [[nodiscard]] static int nbits() noexcept { return 32; }
+    [[nodiscard]] static SampleType sample_type() noexcept {
         return SampleType::kFloat32;
     }
     [[nodiscard]] std::uint64_t bytes_per_sample() const noexcept {
         return m_bytes_per_sample;
     }
     [[nodiscard]] std::uint64_t nsamples() const noexcept { return m_nsamples; }
-    [[nodiscard]] bool has_nsamples() const noexcept { return true; }
+    [[nodiscard]] static bool has_nsamples() noexcept { return true; }
     [[nodiscard]] double tsamp() const noexcept { return m_tsamp; }
     [[nodiscard]] double tstart() const noexcept { return m_tstart; }
     [[nodiscard]] std::string_view source_name() const noexcept {
@@ -308,10 +311,10 @@ public:
 
     std::uint64_t read_block(std::uint64_t count, std::span<std::byte> dest);
     std::uint64_t read_samples(std::uint64_t count, std::span<float> dest);
-    std::uint64_t read_samples(std::uint64_t count,
-                               std::span<std::uint8_t> dest);
-    std::uint64_t read_samples(std::uint64_t count,
-                               std::span<std::uint16_t> dest);
+    static std::uint64_t read_samples(std::uint64_t count,
+                                      std::span<std::uint8_t> dest);
+    static std::uint64_t read_samples(std::uint64_t count,
+                                      std::span<std::uint16_t> dest);
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
 
     template <typename T>
@@ -553,7 +556,7 @@ inline void SearchFile::load_geometry() {
 
 inline void SearchFile::load_frequencies() {
     const auto& freq_col = detail::require_column(m_table, "DAT_FREQ");
-    if (freq_col.repeat < m_nchan) {
+    if (!freq_col.heap && freq_col.repeat < m_nchan) {
         throw FormatError("psrio: DAT_FREQ is shorter than NCHAN");
     }
     m_freqs.resize(static_cast<std::size_t>(m_nchan));
@@ -820,7 +823,7 @@ inline void SearchFile::decode_u8(const std::byte* cell,
         float first = Signed && raw0 >= 128 ? static_cast<float>(raw0) - 256.0F
                                             : static_cast<float>(raw0);
         first       = ((first - zero) * m_scales[chan]) + m_offsets[chan];
-        float value = first;
+        float value = first; // NOLINT(misc-const-correctness): modified in Sum
         if constexpr (Sum) {
             const auto raw1 = static_cast<std::uint8_t>(base[m_nchan + chan]);
             float second    = Signed && raw1 >= 128
@@ -840,11 +843,12 @@ inline void SearchFile::decode_i16(const std::byte* cell,
                                    std::span<float> dest) const {
     const auto* base = cell + ((isamp * m_npol) * m_nchan * 2U);
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-        const float first = static_cast<float>(
+        const auto first = static_cast<float>(
             detail::load_be<std::int16_t>(base + (chan * 2U)));
+        // NOLINTNEXTLINE(misc-const-correctness): modified in Sum
         float value = (first * m_scales[chan]) + m_offsets[chan];
         if constexpr (Sum) {
-            const float second = static_cast<float>(
+            const auto second = static_cast<float>(
                 detail::load_be<std::int16_t>(base + ((m_nchan + chan) * 2U)));
             value +=
                 (second * m_scales[m_nchan + chan]) + m_offsets[m_nchan + chan];
@@ -900,16 +904,16 @@ inline void SearchFile::decode_indexed(const std::byte* cell,
         if (m_input_nbits == 16) {
             return static_cast<float>(detail::load_be<std::int16_t>(source));
         }
-        const auto byte = static_cast<std::uint8_t>(source[0]);
-        float value     = (m_signint && byte >= 128U)
-                              ? static_cast<float>(byte) - 256.0F
-                              : static_cast<float>(byte);
+        const auto byte   = static_cast<std::uint8_t>(source[0]);
+        const float value = (m_signint && byte >= 128U)
+                                ? static_cast<float>(byte) - 256.0F
+                                : static_cast<float>(byte);
         return value - m_zero;
     };
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
         float first = raw_at(0, chan);
         first       = (first * m_scales[chan]) + m_offsets[chan];
-        float value = first;
+        float value = first; // NOLINT(misc-const-correctness): modified in Sum
         if constexpr (Sum) {
             float second = raw_at(1, chan);
             second =

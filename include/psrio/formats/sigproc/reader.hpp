@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psrio/astro.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
 #include "psrio/detail/packed_bits.hpp"
@@ -9,15 +10,20 @@
 #include "psrio/packed.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace psrio::formats::sigproc {
 

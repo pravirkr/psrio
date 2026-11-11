@@ -86,8 +86,9 @@ std::vector<float> dm_trials(const DedisperseOptions& opts) {
 }
 
 std::uint64_t parse_channel(std::string_view text, std::uint64_t nchans) {
-    std::uint64_t value  = 0;
-    const auto* end      = text.data() + text.size();
+    std::uint64_t value = 0;
+    const auto* end     = text.data() + text.size();
+    // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
     const auto [ptr, ec] = std::from_chars(text.data(), end, value);
     if (ec != std::errc{} || ptr != end) {
         throw ValidationError(
@@ -196,18 +197,19 @@ Destinations destinations(const DedisperseOptions& opts,
 
 /// Time series metadata for one trial.
 Header series_header(const Input& input, double dm, double offset_samples) {
-    const auto& raw = input.header();
-    auto header     = Header::from_sigproc(raw, input.path().string());
-    const double df = std::abs(*raw.foff);
-    const double top =
-        std::max(*raw.fch1, *raw.fch1 + (*raw.foff * (raw.nchans - 1)));
-    header.data_type = "time series";
-    header.nbits     = 32;
-    header.nifs      = 1;
-    header.fch1      = top;
-    header.foff      = -df;
-    header.dm        = dm;
-    header.nsamples  = 0;
+    const auto& raw   = input.header();
+    auto header       = Header::from_sigproc(raw, input.path().string());
+    const double fch1 = raw.fch1.value_or(0.0);
+    const double foff = raw.foff.value_or(0.0);
+    const double df   = std::abs(foff);
+    const double top  = std::max(fch1, fch1 + (foff * (raw.nchans - 1)));
+    header.data_type  = "time series";
+    header.nbits      = 32;
+    header.nifs       = 1;
+    header.fch1       = top;
+    header.foff       = -df;
+    header.dm         = dm;
+    header.nsamples   = 0;
     header.tstart += offset_samples * input.tsamp() / 86400.0;
     return header;
 }

@@ -1,11 +1,18 @@
 #pragma once
 
+#include "psrio/astro.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/contiguity.hpp"
+#include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/formats/psrfits/reader.hpp"
+#include "psrio/formats/sigproc/header.hpp"
 
 #include <algorithm>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
@@ -108,16 +115,16 @@ public:
     }
 
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchan; }
-    [[nodiscard]] std::uint64_t nifs() const noexcept { return 1; }
-    [[nodiscard]] int nbits() const noexcept { return 32; }
-    [[nodiscard]] SampleType sample_type() const noexcept {
+    [[nodiscard]] static std::uint64_t nifs() noexcept { return 1; }
+    [[nodiscard]] static int nbits() noexcept { return 32; }
+    [[nodiscard]] static SampleType sample_type() noexcept {
         return SampleType::kFloat32;
     }
     [[nodiscard]] std::uint64_t bytes_per_sample() const noexcept {
         return m_bytes_per_sample;
     }
     [[nodiscard]] std::uint64_t nsamples() const noexcept { return m_nsamples; }
-    [[nodiscard]] bool has_nsamples() const noexcept { return true; }
+    [[nodiscard]] static bool has_nsamples() noexcept { return true; }
     [[nodiscard]] double tsamp() const noexcept { return m_tsamp; }
     [[nodiscard]] double tstart() const noexcept { return m_tstart; }
     [[nodiscard]] std::string_view source_name() const noexcept {
@@ -157,11 +164,43 @@ public:
 
     std::uint64_t read_block(std::uint64_t count, std::span<std::byte> dest);
     std::uint64_t read_samples(std::uint64_t count, std::span<float> dest);
-    std::uint64_t read_samples(std::uint64_t count,
-                               std::span<std::uint8_t> dest);
-    std::uint64_t read_samples(std::uint64_t count,
-                               std::span<std::uint16_t> dest);
+    static std::uint64_t read_samples(std::uint64_t count,
+                                      std::span<std::uint8_t> dest);
+    static std::uint64_t read_samples(std::uint64_t count,
+                                      std::span<std::uint16_t> dest);
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
+
+    template <typename T>
+        requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
+                 std::same_as<T, std::uint16_t>
+    std::uint64_t read(std::uint64_t count, std::span<T> dest) {
+        return read_samples(count, dest);
+    }
+
+    [[nodiscard]] std::vector<std::byte> read_block(std::uint64_t count) {
+        std::vector<std::byte> out(
+            static_cast<std::size_t>(count * m_bytes_per_sample));
+        const auto actual = read_block(count, out);
+        out.resize(static_cast<std::size_t>(actual * m_bytes_per_sample));
+        return out;
+    }
+
+    [[nodiscard]] std::vector<std::byte> read_bytes(std::uint64_t nbytes) {
+        std::vector<std::byte> out(static_cast<std::size_t>(nbytes));
+        const auto actual = read_bytes(nbytes, out);
+        out.resize(static_cast<std::size_t>(actual));
+        return out;
+    }
+
+    template <typename T = float>
+        requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
+                 std::same_as<T, std::uint16_t>
+    [[nodiscard]] std::vector<T> read_samples(std::uint64_t count) {
+        std::vector<T> buffer(static_cast<std::size_t>(count * m_nchan));
+        const auto actual = read_samples(count, std::span<T>(buffer));
+        buffer.resize(static_cast<std::size_t>(actual * m_nchan));
+        return buffer;
+    }
 
 private:
     struct File {
@@ -176,7 +215,7 @@ private:
     std::uint64_t read_across(std::uint64_t count,
                               std::span<T> dest,
                               std::uint64_t per_sample,
-                              Read&& read);
+                              const Read& read);
 
     std::vector<File> m_files;
     sigproc::FilterbankHeader m_header{};
@@ -210,7 +249,11 @@ inline SearchStream::SearchStream(
     }
     m_files.reserve(paths.size());
     for (const auto& path : paths) {
-        m_files.push_back(File{SearchFile(path), 0, 0});
+        m_files.push_back(File{
+            .reader = SearchFile(path),
+            .first  = 0,
+            .count  = 0,
+        });
     }
     const auto& first  = m_files.front().reader;
     m_header           = first.sigproc_header();
@@ -282,7 +325,7 @@ template <typename T, typename Read>
 inline std::uint64_t SearchStream::read_across(std::uint64_t count,
                                                std::span<T> dest,
                                                std::uint64_t per_sample,
-                                               Read&& read) {
+                                               const Read& read) {
     if (count > 0U &&
         per_sample > (std::numeric_limits<std::uint64_t>::max() / count)) {
         throw ValidationError("psrio: requested sample block is too large");

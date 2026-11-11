@@ -4,11 +4,14 @@ if(NOT TARGET CLI11::CLI11)
     VERSION 2.6.2
     URL https://github.com/CLIUtils/CLI11/archive/refs/tags/v2.6.2.tar.gz
     URL_HASH SHA256=c6ea6b2e5608b3ea8617999bd5f47420c71b2ebdb8dc4767c1034d1da5785711
-    OPTIONS "CLI11_BUILD_TESTS OFF" "CLI11_BUILD_EXAMPLES OFF" "CLI11_BUILD_DOCS OFF"
-            "CLI11_INSTALL OFF"
+    DOWNLOAD_ONLY YES
     EXCLUDE_FROM_ALL YES
     SYSTEM YES
   )
+  if(CLI11_ADDED)
+    add_library(CLI11::CLI11 INTERFACE IMPORTED GLOBAL)
+    target_include_directories(CLI11::CLI11 SYSTEM INTERFACE "${CLI11_SOURCE_DIR}/include")
+  endif()
 endif()
 if(NOT TARGET CLI11::CLI11)
   message(FATAL_ERROR "CLI11::CLI11 target not available after CPM setup.")

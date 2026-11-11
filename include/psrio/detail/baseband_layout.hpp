@@ -4,6 +4,8 @@
 #include "psrio/detail/exceptions.hpp"
 
 #include <complex>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <limits>

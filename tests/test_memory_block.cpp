@@ -8,13 +8,17 @@
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
 #include <chrono>
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <ios>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -36,6 +40,11 @@ public:
 
     ~TempFile() { std::filesystem::remove(m_path); }
 
+    TempFile(const TempFile&)            = delete;
+    TempFile& operator=(const TempFile&) = delete;
+    TempFile(TempFile&&)                 = delete;
+    TempFile& operator=(TempFile&&)      = delete;
+
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
 private:
@@ -45,7 +54,7 @@ private:
 } // namespace
 
 TEST_CASE("MemoryBlock rejects an incomplete stride", "[memory]") {
-    psrio::MemoryInfo empty;
+    const psrio::MemoryInfo empty;
     REQUIRE_THROWS_AS(psrio::MemoryBlock(empty, {}), psrio::ValidationError);
 
     psrio::MemoryInfo odd_bits;
@@ -64,14 +73,14 @@ TEST_CASE("MemoryBlock rejects an incomplete stride", "[memory]") {
 TEST_CASE("MemoryBlock matches FilterbankReader packed bytes and floats",
           "[memory]") {
     auto bytes = psrio::test::minimal_filterbank(4, 8, 6.4e-5, 1400.0, -1.0);
-    const std::uint8_t payload[] = {9, 8, 7, 6, 5, 4, 3, 2};
-    for (const auto value : payload) {
+    constexpr std::array<std::uint8_t, 8> kPayload = {9, 8, 7, 6, 5, 4, 3, 2};
+    for (const auto value : kPayload) {
         bytes.u8(value);
     }
-    const auto header_bytes = bytes.out.size() - sizeof(payload);
-    std::vector<std::byte> packed(bytes.out.begin() +
-                                      static_cast<std::ptrdiff_t>(header_bytes),
-                                  bytes.out.end());
+    const auto header_bytes = bytes.out.size() - kPayload.size();
+    const std::vector<std::byte> packed(
+        bytes.out.begin() + static_cast<std::ptrdiff_t>(header_bytes),
+        bytes.out.end());
 
     const TempFile file(bytes.out);
     psrio::formats::sigproc::FilterbankReader file_reader(file.path());
@@ -112,9 +121,9 @@ TEST_CASE("MemoryBlock matches FilterbankReader packed bytes and floats",
 TEST_CASE("MemoryBlock supports non-owning spans, zero-copy views, fswap, and "
           "metadata",
           "[memory]") {
-    const std::uint8_t raw[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    std::span<const std::byte> byte_view{
-        reinterpret_cast<const std::byte*>(raw), sizeof(raw)};
+    const std::array<std::uint8_t, 8> raw = {1, 2, 3, 4, 5, 6, 7, 8};
+    const std::span<const std::byte> byte_view{
+        reinterpret_cast<const std::byte*>(raw.data()), raw.size()};
 
     psrio::MemoryInfo info;
     info.nchans    = 4;

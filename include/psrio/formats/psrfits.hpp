@@ -1,8 +1,8 @@
 #pragma once
 
 #include "psrio/block_source.hpp"
-#include "psrio/formats/psrfits/reader.hpp"
-#include "psrio/formats/psrfits/stream.hpp"
+#include "psrio/formats/psrfits/reader.hpp" // IWYU pragma: export
+#include "psrio/formats/psrfits/stream.hpp" // IWYU pragma: export
 
 #include <cctype>
 #include <filesystem>

@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.0] - 2026-11-11
+
+- **Search-mode PSRFITS reader (`psrio::formats::psrfits`)**:
+  - Header-only `SearchFile` reads uncompressed `SUBINT` binary tables without CFITSIO and streams calibrated float32 Stokes I (`BlockReader`), matching `sigpyproc` / `dspsr` scale, offset, zero-offset, weight, and 2-bit level rules.
+  - Supports 1, 2, 4, 8 (signed/unsigned), and 16-bit samples, arbitrary `TDIM` axis permutations, and `1PB`/`1QB`/`1PE`/`1PD` FITS heap columns (`THEAP`).
+- **Contiguous multi-file streams**:
+  - `FilterbankStream` (SIGPROC `.fil`) and `SearchStream` (search-mode PSRFITS `.sf`/`.fits`/`.sfits`) join time-ordered split observations into a single `BlockReader` after verifying header identity, `sigpyproc` sample-gap tolerance (`1e-8 + 0.1 * tsamp`), and `NSUBOFFS` progression.
+  - `psrio::open_block_source` and `psrio::formats::fbh5::open_block_source` open single files or contiguous multi-file spans as a type-erased `BlockSource`.
+- **Filterbank and time-series writers**:
+  - `FilterbankHeader::to_bytes()` and `write_to()` serialize SIGPROC headers while preserving unknown vendor keys in order and omitting legacy `nsamples`.
+  - `FilterbankWriter` streams packed bytes (`write_block`, `write_bytes`) or unpacked samples (`write_samples`) across 1, 2, 4, 8 (signed/unsigned), 16, and 32-bit depths.
+  - `SigprocTimeSeriesWriter` (`.tim`), `PrestoTimeSeriesWriter` (`.dat`/`.inf`), and format-dispatching `TimeSeriesWriter` stream single-channel 32-bit float time series and write the final sample count on `close()`.
+- **Processing & redigitisation (`scrunch.hpp`, `digifil.hpp`)**:
+  - `fscrunch_inplace` and gulp-invariant `TimeScruncher`.
+  - `psrio::digifil::Pipeline` and `digifil::run`: port of `dspsr`'s `digifil` / `sigpyproc`'s `spp_digifil` (IF selection, `fscrunch`, `tscrunch`, running or constant rescaling, and 1/2/4/8/16/-32-bit digitisation).
+- **CLI application (`PSRIO_BUILD_APPLICATIONS`)**:
+  - Unified `psrio` executable (built only when `PSRIO_BUILD_APPLICATIONS=ON`; `psrio::psrio` remains strictly header-only) with subcommands `inspect`, `slice`, `splice`, `decimate`, `convert`, `digifil`, and `dedisperse` (powered by `dmt` `ddmt`, `sdmt`, and `fdmt`).
+
 ## [0.4.0] - 2026-11-03
 
 - **Lower compiler floor**: GCC 11+ and Clang 15+ (was GCC 13+ / Clang 18+).

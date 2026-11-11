@@ -4,12 +4,14 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
 #include "psrio/formats/presto/inf.hpp"
+#include "psrio/header.hpp"
 
 #include <algorithm>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <span>

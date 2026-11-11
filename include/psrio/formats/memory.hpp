@@ -1,13 +1,16 @@
 #pragma once
 
 #include "psrio/astro.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/packed.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -16,6 +19,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 

@@ -22,8 +22,10 @@ namespace sigproc = ::psrio::formats::sigproc;
 
 /// Output streams and verbosity shared by every subcommand.
 struct Context {
-    std::ostream& out;
-    std::ostream& err;
+    std::ostream&
+        out; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
+    std::ostream&
+        err; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     int verbosity{0};
     bool quiet{false};
 

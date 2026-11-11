@@ -67,8 +67,48 @@ target_compile_definitions(
 include(Catch)
 catch_discover_tests(${TARGET_TESTS})
 
+# Standalone header check: compile every public header on its own as a one-line
+# translation unit so missing self-includes fail the build immediately.
+file(
+  GLOB_RECURSE
+  PSRIO_PUBLIC_HEADERS
+  CONFIGURE_DEPENDS
+  RELATIVE ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/include/psrio/*.hpp
+)
+list(FILTER PSRIO_PUBLIC_HEADERS EXCLUDE REGEX
+     "^psrio/formats/fbh5\\.hpp$|^psrio/formats/psrdada\\.hpp$"
+)
+
+set(PSRIO_HEADER_CHECK_DIR "${CMAKE_CURRENT_BINARY_DIR}/header_checks")
+set(PSRIO_HEADER_CHECK_SOURCES "")
+foreach(header IN LISTS PSRIO_PUBLIC_HEADERS)
+  string(MAKE_C_IDENTIFIER "${header}" _header_id)
+  set(_check_src "${PSRIO_HEADER_CHECK_DIR}/${_header_id}.cpp")
+  file(
+    GENERATE
+    OUTPUT "${_check_src}"
+    CONTENT "#include \"${header}\" // IWYU pragma: associated\n"
+  )
+  list(APPEND PSRIO_HEADER_CHECK_SOURCES "${_check_src}")
+endforeach()
+
+add_library(psrio_header_checks OBJECT ${PSRIO_HEADER_CHECK_SOURCES})
+target_link_libraries(
+  psrio_header_checks PRIVATE ${PROJECT_NAME}::${PROJECT_NAME} psrio_developer_flags
+)
+add_dependencies(${TARGET_TESTS} psrio_header_checks)
+
 if(PSRIO_WITH_HDF5)
-  add_executable(psrio_fbh5_tests ${CMAKE_CURRENT_SOURCE_DIR}/test_fbh5.cpp)
+  set(_fbh5_check_src "${PSRIO_HEADER_CHECK_DIR}/psrio_formats_fbh5_hpp.cpp")
+  file(
+    GENERATE
+    OUTPUT "${_fbh5_check_src}"
+    CONTENT "#include \"psrio/formats/fbh5.hpp\" // IWYU pragma: associated\n"
+  )
+  add_executable(
+    psrio_fbh5_tests ${_fbh5_check_src} ${CMAKE_CURRENT_SOURCE_DIR}/test_fbh5.cpp
+  )
   target_link_libraries(
     psrio_fbh5_tests PRIVATE psrio::fbh5 Catch2::Catch2WithMain psrio_developer_flags
   )
@@ -99,7 +139,15 @@ if(TARGET psrio_cli_commands)
 endif()
 
 if(PSRIO_WITH_PSRDADA)
-  add_executable(psrio_psrdada_tests ${CMAKE_CURRENT_SOURCE_DIR}/test_psrdada.cpp)
+  set(_psrdada_check_src "${PSRIO_HEADER_CHECK_DIR}/psrio_formats_psrdada_hpp.cpp")
+  file(
+    GENERATE
+    OUTPUT "${_psrdada_check_src}"
+    CONTENT "#include \"psrio/formats/psrdada.hpp\" // IWYU pragma: associated\n"
+  )
+  add_executable(
+    psrio_psrdada_tests ${_psrdada_check_src} ${CMAKE_CURRENT_SOURCE_DIR}/test_psrdada.cpp
+  )
   target_link_libraries(
     psrio_psrdada_tests PRIVATE psrio::psrdada Catch2::Catch2WithMain psrio_developer_flags
   )
