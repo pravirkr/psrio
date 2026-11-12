@@ -262,6 +262,15 @@ inline void pack_sub_byte(std::span<const std::uint8_t> unpacked,
     }
 }
 
+// GCC 13 reports a false -Wstringop-overflow on the in-place stores below when
+// this is inlined into a caller whose buffer has a small, known size: it checks
+// a vectorized path that cannot run for that size. GCC 14 and later, and Clang,
+// do not warn.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ == 13
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overflow"
+#endif
+
 /// Pack unpacked 1-, 2-, or 4-bit samples in place within @p buffer.
 /// Returns the subspan containing the packed bytes.
 template <typename ByteT>
@@ -329,6 +338,10 @@ inline std::span<ByteT> pack_sub_byte_inplace(
     }
     return buffer.subspan(0, packed_bytes);
 }
+
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ == 13
+#pragma GCC diagnostic pop
+#endif
 
 /// Unpack 1-, 2-, or 4-bit samples in place backwards within @p buffer.
 template <typename ByteT>
@@ -636,7 +649,7 @@ inline void write_sample_impl(std::span<std::byte> data,
     }
 
     // Sub-byte integers: 1, 2, or 4 bits
-    const int nbits             = bits_of(type);
+    const auto nbits            = static_cast<unsigned>(bits_of(type));
     const auto samples_per_byte = 8U / static_cast<std::uint64_t>(nbits);
     const auto byte_offset      = sample_index / samples_per_byte;
     const auto sub_index        = sample_index % samples_per_byte;
@@ -647,15 +660,16 @@ inline void write_sample_impl(std::span<std::byte> data,
 
     const auto shift =
         (bit_order == BitOrder::kLsbFirst)
-            ? (sub_index * static_cast<std::uint64_t>(nbits))
-            : (8U - ((sub_index + 1U) * static_cast<std::uint64_t>(nbits)));
-    const auto mask = static_cast<std::uint8_t>((1U << nbits) - 1U);
-    const auto raw  = static_cast<std::uint8_t>(std::max(0.0F, value)) & mask;
+            ? static_cast<unsigned>(sub_index * nbits)
+            : static_cast<unsigned>(8U - ((sub_index + 1U) * nbits));
+    const auto mask = (1U << nbits) - 1U;
+    const auto raw  = static_cast<unsigned>(std::max(0.0F, value)) & mask;
 
-    auto current      = std::to_integer<std::uint8_t>(data[byte_offset]);
-    current           = static_cast<std::uint8_t>(current & ~(mask << shift));
-    current           = static_cast<std::uint8_t>(current | (raw << shift));
-    data[byte_offset] = static_cast<std::byte>(current);
+    auto current =
+        static_cast<unsigned>(std::to_integer<std::uint8_t>(data[byte_offset]));
+    current = (current & ~(mask << shift)) | (raw << shift);
+    data[byte_offset] =
+        static_cast<std::byte>(static_cast<std::uint8_t>(current));
 }
 
 } // namespace psrio::detail

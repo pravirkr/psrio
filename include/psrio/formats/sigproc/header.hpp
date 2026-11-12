@@ -11,8 +11,10 @@
 #include <cstdint>
 #include <cstring>
 #include <fmt/format.h>
+#include <ios>
 #include <limits>
 #include <optional>
+#include <ostream>
 #include <span>
 #include <string>
 #include <string_view>
@@ -79,6 +81,32 @@ inline constexpr auto kMachines = std::to_array<NameId>({
 
 [[nodiscard]] inline std::string_view machine_name(std::int32_t id) noexcept {
     return name_from(kMachines, id);
+}
+
+/// Id whose name matches @p name, ignoring ASCII case.
+[[nodiscard]] inline std::optional<std::int32_t>
+id_from(std::span<const NameId> table, std::string_view name) noexcept {
+    const auto lower = [](char c) {
+        return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c;
+    };
+    for (const NameId& entry : table) {
+        if (std::ranges::equal(entry.name, name, {}, lower, lower)) {
+            return entry.id;
+        }
+    }
+    return std::nullopt;
+}
+
+/// telescope_id for a telescope name, or nullopt when it is not listed.
+[[nodiscard]] inline std::optional<std::int32_t>
+telescope_id_from_name(std::string_view name) noexcept {
+    return id_from(kTelescopes, name);
+}
+
+/// machine_id for a backend name, or nullopt when it is not listed.
+[[nodiscard]] inline std::optional<std::int32_t>
+machine_id_from_name(std::string_view name) noexcept {
+    return id_from(kMachines, name);
 }
 
 inline constexpr auto kDataTypes = std::to_array<NameId>({
@@ -213,6 +241,24 @@ struct FilterbankHeader {
     /// Parse as parse(file), including @p path in error messages.
     [[nodiscard]] static FilterbankHeader parse(std::span<const std::byte> file,
                                                 std::string_view path);
+
+    /// Serialize this header into the binary HEADER_START..HEADER_END format.
+    ///
+    /// Engaged keys are written little-endian in SIGPROC order, then the
+    /// frequency table (FREQUENCY_START, one fchannel per entry,
+    /// FREQUENCY_END) when non-empty. Each ExtraKey is written verbatim, in
+    /// order, directly after a schema key so that parse() can size it.
+    /// data_type defaults to 1 when disengaged. nsamples is written only when
+    /// declared_nsamples is engaged and non-zero. An empty string value is
+    /// omitted. header_bytes, data_bytes, and file_bytes are not used.
+    /// @throws ValidationError if nchans, nifs, or nbits is not writable, the
+    ///         frequency table length is not nchans, or a string is longer
+    ///         than a SIGPROC token allows.
+    [[nodiscard]] std::vector<std::byte> to_bytes() const;
+
+    /// Write the serialized header (to_bytes()) to @p out.
+    /// @throws IoError if the stream fails.
+    void write_to(std::ostream& out) const;
 
     /// Check that this header describes readable filterbank data.
     /// A declared nsamples that disagrees with the file is not an error.
@@ -607,6 +653,89 @@ inline void skip_unknown(ByteCursor& cursor,
                     name)));
 }
 
+/// Little-endian SIGPROC header byte builder.
+///
+/// The parser sizes an unknown key by finding a schema token right after its
+/// value, so each pending extra key is placed directly after a schema key.
+class HeaderEncoder {
+public:
+    explicit HeaderEncoder(std::span<const ExtraKey> extras) noexcept
+        : m_extras(extras) {}
+
+    void start() {
+        token("HEADER_START");
+        emit_extra();
+    }
+
+    void finish() {
+        if (m_next_extra < m_extras.size()) {
+            throw ValidationError(
+                "psrio: too many unknown header keys to place between "
+                "SIGPROC keys");
+        }
+        token("HEADER_END");
+    }
+
+    void token(std::string_view text) {
+        if (text.empty() || text.size() > kMaxTokenLength) {
+            throw ValidationError(fmt::format(
+                "psrio: SIGPROC string must be 1 to {} bytes, got {}",
+                kMaxTokenLength, text.size()));
+        }
+        number(static_cast<std::uint32_t>(text.size()));
+        const auto* const raw = reinterpret_cast<const std::byte*>(text.data());
+        m_out.insert(m_out.end(), raw, raw + text.size());
+    }
+
+    template <typename T> void number(T value) {
+        const T stored        = ::psrio::detail::to_little_endian(value);
+        const auto* const raw = reinterpret_cast<const std::byte*>(&stored);
+        m_out.insert(m_out.end(), raw, raw + sizeof(T));
+    }
+
+    /// A schema key and its value, followed by the next pending extra key.
+    template <typename T> void key(std::string_view name, T value) {
+        token(name);
+        number(value);
+        emit_extra();
+    }
+
+    template <typename T>
+    void key(std::string_view name, const std::optional<T>& value) {
+        if (value.has_value()) {
+            key(name, *value);
+        }
+    }
+
+    void key_string(std::string_view name,
+                    const std::optional<std::string>& value) {
+        if (value.has_value() && !value->empty()) {
+            token(name);
+            token(*value);
+            emit_extra();
+        }
+    }
+
+    [[nodiscard]] std::vector<std::byte> take() noexcept {
+        return std::move(m_out);
+    }
+
+private:
+    void emit_extra() {
+        if (m_next_extra >= m_extras.size()) {
+            return;
+        }
+        const ExtraKey& extra = m_extras[m_next_extra++];
+        token(extra.name);
+        m_out.insert(m_out.end(), extra.raw.begin(), extra.raw.end());
+    }
+
+    static constexpr std::size_t kMaxTokenLength = 4096;
+    std::span<const ExtraKey> m_extras;
+    std::size_t m_next_extra{0};
+    std::vector<std::byte> m_out;
+};
+
 } // namespace detail
 
 inline FilterbankHeader
@@ -739,6 +868,65 @@ inline void FilterbankHeader::validate() const {
             "psrio: data_type {} ({}) is not filterbank data; other SIGPROC "
             "types are read by a separate reader",
             *data_type, sigproc::data_type_name(*data_type)));
+    }
+}
+
+inline std::vector<std::byte> FilterbankHeader::to_bytes() const {
+    (void)bytes_per_sample();
+    if (!frequency_table.empty() &&
+        frequency_table.size() != static_cast<std::size_t>(nchans)) {
+        throw ValidationError(
+            "psrio: frequency table length does not equal nchans");
+    }
+
+    detail::HeaderEncoder enc(extra);
+    enc.start();
+    enc.key("telescope_id", telescope_id);
+    enc.key("machine_id", machine_id);
+    enc.key("data_type", data_type.value_or(1));
+    enc.key_string("rawdatafile", rawdatafile);
+    enc.key_string("source_name", source_name);
+    enc.key("barycentric", barycentric);
+    enc.key("pulsarcentric", pulsarcentric);
+    enc.key("az_start", az_start);
+    enc.key("za_start", za_start);
+    enc.key("src_raj", src_raj);
+    enc.key("src_dej", src_dej);
+    enc.key("tstart", tstart);
+    enc.key("tsamp", tsamp);
+    enc.key("nbits", nbits);
+    if (declared_nsamples.has_value() && *declared_nsamples > 0U) {
+        enc.key("nsamples", *declared_nsamples);
+    }
+    enc.key("fch1", fch1);
+    enc.key("foff", foff);
+    if (!frequency_table.empty()) {
+        enc.token("FREQUENCY_START");
+        for (const double freq : frequency_table) {
+            enc.token("fchannel");
+            enc.number(freq);
+        }
+        enc.token("FREQUENCY_END");
+    }
+    enc.key("nchans", nchans);
+    enc.key("nifs", nifs);
+    enc.key("refdm", refdm);
+    enc.key("period", period);
+    enc.key("nbins", nbins);
+    enc.key("npuls", npuls);
+    enc.key("signed", signed_data);
+    enc.key("ibeam", ibeam);
+    enc.key("nbeams", nbeams);
+    enc.finish();
+    return enc.take();
+}
+
+inline void FilterbankHeader::write_to(std::ostream& out) const {
+    const auto bytes = to_bytes();
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    if (!out) {
+        throw IoError("psrio: failed to write SIGPROC header");
     }
 }
 

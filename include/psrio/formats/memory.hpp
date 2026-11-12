@@ -1,13 +1,16 @@
 #pragma once
 
 #include "psrio/astro.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/packed.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -16,6 +19,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -157,7 +161,8 @@ public:
                     static_cast<std::size_t>(nbytes));
         if (m_apply_fswap && to_read > 0U) {
             reverse_channels(dest.first(static_cast<std::size_t>(nbytes)),
-                             to_read, m_info.nchans, m_info.nbits);
+                             to_read * m_info.nifs, m_info.nchans,
+                             m_info.nbits);
         }
         m_sample += to_read;
         return to_read;
@@ -284,6 +289,10 @@ public:
             throw ValidationError("psrio: 32-bit samples unpack to float");
         }
 
+        if (m_apply_fswap) {
+            reverse_unpacked_channels(output, to_read, m_info.nchans,
+                                      m_info.nifs);
+        }
         m_sample += to_read;
         return to_read;
     }

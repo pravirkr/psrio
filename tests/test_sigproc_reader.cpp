@@ -1,3 +1,4 @@
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
@@ -5,6 +6,7 @@
 #include "psrio/formats/sigproc/reader.hpp"
 #include "sigproc_bytes.hpp"
 
+#include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
@@ -359,4 +361,106 @@ TEST_CASE("reader convenience allocating methods read_samples and read_bytes",
     REQUIRE(std::to_integer<unsigned char>(raw_bytes[0]) == 10);
     REQUIRE(std::to_integer<unsigned char>(raw_bytes[3]) == 40);
     REQUIRE(reader.tell() == 2U);
+}
+
+namespace {
+
+/// 8 channels, 2 IFs, 5 samples of deterministic payload at @p nbits.
+SigprocBytes fswap_file(std::int32_t nbits) {
+    constexpr std::int32_t kChans = 8;
+    constexpr std::int32_t kIfs   = 2;
+    constexpr std::size_t kSamps  = 5;
+    SigprocBytes bytes;
+    bytes.string("HEADER_START");
+    bytes.key_i32("nchans", kChans);
+    bytes.key_i32("nifs", kIfs);
+    bytes.key_i32("nbits", nbits);
+    bytes.key_f64("tsamp", 1.0);
+    bytes.key_f64("fch1", 1400.0);
+    bytes.key_f64("foff", -1.0);
+    bytes.string("HEADER_END");
+    const std::size_t values = kSamps * kChans * kIfs;
+    if (nbits == 32) {
+        for (std::size_t i = 0; i < values; ++i) {
+            bytes.u32(std::bit_cast<std::uint32_t>(
+                (static_cast<float>(i) * 1.5F) - 7.0F));
+        }
+    } else {
+        const auto nbytes = values * static_cast<std::size_t>(nbits) / 8U;
+        for (std::size_t i = 0; i < nbytes; ++i) {
+            bytes.u8(static_cast<std::uint8_t>(((i * 37U) + 11U) & 0xFFU));
+        }
+    }
+    return bytes;
+}
+
+template <typename T> void check_fswap_read_samples(std::int32_t nbits) {
+    const TempFile file(fswap_file(nbits).out);
+    FilterbankReader reader(file.path());
+    const auto nchans = reader.nchans();
+    const auto rows   = reader.nsamples() * reader.nifs();
+    REQUIRE(reader.nsamples() == 5U);
+
+    for (const auto order :
+         {psrio::BitOrder::kLsbFirst, psrio::BitOrder::kMsbFirst}) {
+        reader.rewind();
+        reader.set_fswap(false);
+        const auto plain = reader.read_samples<T>(reader.nsamples(), order);
+        reader.rewind();
+        reader.set_fswap(true);
+        // Two reads, so reversal must be applied per call and per row.
+        auto swapped      = reader.read_samples<T>(2, order);
+        const auto second = reader.read_samples<T>(3, order);
+        swapped.insert(swapped.end(), second.begin(), second.end());
+        REQUIRE(plain.size() == rows * nchans);
+        REQUIRE(swapped.size() == plain.size());
+        for (std::uint64_t row = 0; row < rows; ++row) {
+            for (std::uint64_t chan = 0; chan < nchans; ++chan) {
+                REQUIRE(swapped[(row * nchans) + chan] ==
+                        plain[(row * nchans) + (nchans - 1U - chan)]);
+            }
+        }
+    }
+}
+
+} // namespace
+
+TEST_CASE("read_samples honours set_fswap for every bit depth",
+          "[sigproc][reader][fswap]") {
+    for (const std::int32_t nbits : {1, 2, 4, 8, 16, 32}) {
+        CAPTURE(nbits);
+        check_fswap_read_samples<float>(nbits);
+        if (nbits <= 8) {
+            check_fswap_read_samples<std::uint8_t>(nbits);
+        }
+        if (nbits == 16) {
+            check_fswap_read_samples<std::uint16_t>(nbits);
+        }
+    }
+}
+
+TEST_CASE("read_samples fswap agrees with read_block fswap",
+          "[sigproc][reader][fswap]") {
+    for (const std::int32_t nbits : {1, 2, 4, 8, 16, 32}) {
+        CAPTURE(nbits);
+        const TempFile file(fswap_file(nbits).out);
+        FilterbankReader reader(file.path());
+        reader.set_fswap(true);
+        const auto unpacked = reader.read_samples<float>(reader.nsamples());
+        reader.rewind();
+        const auto packed = reader.read_block(reader.nsamples());
+        std::vector<float> expected(unpacked.size());
+        const auto view = std::span<const std::byte>(packed);
+        if (nbits <= 4) {
+            psrio::detail::unpack_sub_byte(view, std::span<float>(expected),
+                                           nbits);
+        } else if (nbits == 8) {
+            psrio::detail::unpack_8bit(view, std::span<float>(expected), false);
+        } else if (nbits == 16) {
+            psrio::detail::unpack_16le(view, std::span<float>(expected));
+        } else {
+            psrio::detail::unpack_32le(view, std::span<float>(expected));
+        }
+        REQUIRE(unpacked == expected);
+    }
 }

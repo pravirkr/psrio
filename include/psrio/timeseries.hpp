@@ -1,28 +1,36 @@
 #pragma once
 
+#include "psrio/astro.hpp"
 #include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/detail/write.hpp"
+#include "psrio/formats/presto/inf.hpp" // IWYU pragma: keep
+#include "psrio/formats/presto/writer.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/header.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <ios>
 #include <limits>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 namespace psrio {
@@ -63,6 +71,12 @@ public:
 
     /// Observational metadata header.
     [[nodiscard]] const Header& header() const noexcept { return m_header; }
+
+    /// The binary SIGPROC header of a `.tim` file, or nullptr for PRESTO.
+    [[nodiscard]] const formats::sigproc::FilterbankHeader*
+    sigproc_header() const noexcept {
+        return m_is_presto ? nullptr : &m_raw_sigproc;
+    }
 
     /// Number of time samples available to read.
     [[nodiscard]] std::uint64_t nsamples() const noexcept {
@@ -416,9 +430,8 @@ private:
         }
         m_payload = mapped.subspan(
             static_cast<std::size_t>(m_raw_sigproc.header_bytes));
-        m_header          = Header::from_sigproc(path);
-        m_header.filename = path_str;
-        m_is_presto       = false;
+        m_header    = Header::from_sigproc(m_raw_sigproc, path_str);
+        m_is_presto = false;
 
         if (m_raw_sigproc.nbits <= 4) {
             m_header.nsamples = (m_payload.size() * 8U) /
@@ -490,6 +503,238 @@ private:
     formats::sigproc::FilterbankHeader m_raw_sigproc;
     BitOrder m_bit_order{BitOrder::kLsbFirst};
     std::vector<std::string> m_warnings;
+};
+
+/// Streaming writer for a SIGPROC `.tim` time series of float32 samples.
+///
+/// The constructor truncates @p path and writes the header from
+/// Header::to_sigproc() with data_type 2, nchans 1, nifs 1, nbits 32, and
+/// refdm set to the header dm. fch1 and foff are written as given. Each write
+/// appends little-endian float32 samples.
+class SigprocTimeSeriesWriter {
+public:
+    /// @throws ValidationError if tsamp is not positive.
+    /// @throws IoError if the file cannot be created or the header write
+    ///         fails.
+    explicit SigprocTimeSeriesWriter(std::filesystem::path path, Header header);
+
+    SigprocTimeSeriesWriter(const SigprocTimeSeriesWriter&)            = delete;
+    SigprocTimeSeriesWriter& operator=(const SigprocTimeSeriesWriter&) = delete;
+    SigprocTimeSeriesWriter(SigprocTimeSeriesWriter&&) noexcept = default;
+    SigprocTimeSeriesWriter&
+    operator=(SigprocTimeSeriesWriter&&) noexcept = default;
+
+    /// Closes the file. A failure is ignored; call close() to observe it.
+    ~SigprocTimeSeriesWriter() noexcept {
+        try {
+            close();
+        } catch (...) {
+            // Destructors must not throw; close() reports the failure.
+        }
+    }
+
+    /// Append @p samples.
+    /// @throws IoError if the writer is closed or the write fails.
+    void write_samples(std::span<const float> samples) {
+        if (!m_out.is_open()) {
+            throw IoError(fmt::format("psrio: .tim writer for '{}' is closed",
+                                      m_path.string()));
+        }
+        if (!detail::write_float32_le(m_out, samples)) {
+            throw IoError(fmt::format("psrio: failed to write .tim file '{}'",
+                                      m_path.string()));
+        }
+        m_samples_written += samples.size();
+        m_header.nsamples = m_samples_written;
+    }
+
+    /// Alias for write_samples().
+    void write(std::span<const float> samples) { write_samples(samples); }
+
+    [[nodiscard]] std::uint64_t nsamples_written() const noexcept {
+        return m_samples_written;
+    }
+
+    [[nodiscard]] const Header& header() const noexcept { return m_header; }
+
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return m_path;
+    }
+
+    [[nodiscard]] bool is_open() const noexcept { return m_out.is_open(); }
+
+    /// Flush and close the file. Does nothing when already closed.
+    /// @throws IoError if the close fails.
+    void close() {
+        if (!m_out.is_open()) {
+            return;
+        }
+        m_out.close();
+        if (!m_out) {
+            throw IoError(fmt::format("psrio: failed to close .tim file '{}'",
+                                      m_path.string()));
+        }
+    }
+
+private:
+    std::ofstream m_out;
+    Header m_header;
+    std::filesystem::path m_path;
+    std::uint64_t m_samples_written{0};
+};
+
+inline SigprocTimeSeriesWriter::SigprocTimeSeriesWriter(
+    std::filesystem::path path, Header header)
+    : m_header(std::move(header)),
+      m_path(std::move(path)) {
+    if (!(m_header.tsamp > 0.0)) {
+        throw ValidationError("psrio: time series tsamp must be positive");
+    }
+    m_header.filename = m_path.string();
+    m_header.nbits    = 32;
+    m_header.nsamples = 0;
+
+    auto raw         = m_header.to_sigproc();
+    raw.data_type    = 2;
+    raw.nchans       = 1;
+    raw.nifs         = 1;
+    raw.nbits        = 32;
+    raw.refdm        = m_header.dm;
+    const auto bytes = raw.to_bytes();
+
+    m_out.open(m_path, std::ios::binary | std::ios::trunc);
+    if (!m_out) {
+        throw IoError(fmt::format("psrio: cannot create .tim file '{}'",
+                                  m_path.string()));
+    }
+    m_out.write(reinterpret_cast<const char*>(bytes.data()),
+                static_cast<std::streamsize>(bytes.size()));
+    if (!m_out) {
+        throw IoError(fmt::format("psrio: failed to write .tim header to '{}'",
+                                  m_path.string()));
+    }
+}
+
+/// On-disk format of a single-channel time series.
+enum class TimeSeriesFormat : std::uint8_t {
+    kAuto,       ///< Chosen from the path extension.
+    kSigprocTim, ///< SIGPROC `.tim`.
+    kPrestoDat,  ///< PRESTO `.dat` with an `.inf` file.
+};
+
+/// Format implied by the extension of @p path: `.tim` is SIGPROC, `.dat` and
+/// `.inf` are PRESTO.
+/// @throws ValidationError for any other extension.
+[[nodiscard]] inline TimeSeriesFormat
+time_series_format_for(const std::filesystem::path& path) {
+    const auto ext = path.extension();
+    if (ext == ".tim") {
+        return TimeSeriesFormat::kSigprocTim;
+    }
+    if (ext == ".dat" || ext == ".inf") {
+        return TimeSeriesFormat::kPrestoDat;
+    }
+    throw ValidationError(fmt::format(
+        "psrio: cannot infer a time series format from '{}'; use .tim, .dat, "
+        "or .inf",
+        path.string()));
+}
+
+namespace detail {
+
+/// Call @p fn on the active writer. Uses get_if rather than std::visit so
+/// that noexcept accessors cannot throw std::bad_variant_access; the variant
+/// is never valueless because both alternatives are built in place.
+template <typename Variant, typename Fn>
+decltype(auto) visit_time_series_writer(Variant& writer, Fn&& fn) {
+    if (auto* tim = std::get_if<SigprocTimeSeriesWriter>(&writer)) {
+        return std::forward<Fn>(fn)(*tim);
+    }
+    return std::forward<Fn>(fn)(
+        *std::get_if<formats::presto::PrestoTimeSeriesWriter>(&writer));
+}
+
+} // namespace detail
+
+/// Streaming time-series writer for SIGPROC `.tim` or PRESTO `.dat`/`.inf`.
+class TimeSeriesWriter {
+public:
+    /// @param format kAuto picks the format from the extension of @p path.
+    /// @throws ValidationError if kAuto cannot infer a format.
+    /// @throws IoError if the output cannot be created.
+    TimeSeriesWriter(const std::filesystem::path& path,
+                     Header header,
+                     TimeSeriesFormat format = TimeSeriesFormat::kAuto)
+        : m_writer(make(path, std::move(header), format)) {}
+
+    void write_samples(std::span<const float> samples) {
+        detail::visit_time_series_writer(m_writer, [samples](auto& writer) {
+            writer.write_samples(samples);
+        });
+    }
+
+    /// Alias for write_samples().
+    void write(std::span<const float> samples) { write_samples(samples); }
+
+    [[nodiscard]] std::uint64_t nsamples_written() const noexcept {
+        return detail::visit_time_series_writer(
+            m_writer,
+            [](const auto& writer) { return writer.nsamples_written(); });
+    }
+
+    [[nodiscard]] const Header& header() const noexcept {
+        return detail::visit_time_series_writer(
+            m_writer, [](const auto& writer) -> const Header& {
+                return writer.header();
+            });
+    }
+
+    /// SIGPROC or PRESTO; never kAuto.
+    [[nodiscard]] TimeSeriesFormat format() const noexcept {
+        return std::holds_alternative<SigprocTimeSeriesWriter>(m_writer)
+                   ? TimeSeriesFormat::kSigprocTim
+                   : TimeSeriesFormat::kPrestoDat;
+    }
+
+    /// The `.tim` file, or the `.dat` file for PRESTO output.
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        if (const auto* tim = std::get_if<SigprocTimeSeriesWriter>(&m_writer)) {
+            return tim->path();
+        }
+        return std::get_if<formats::presto::PrestoTimeSeriesWriter>(&m_writer)
+            ->dat_path();
+    }
+
+    [[nodiscard]] bool is_open() const noexcept {
+        return detail::visit_time_series_writer(
+            m_writer, [](const auto& writer) { return writer.is_open(); });
+    }
+
+    /// Close the output. PRESTO output writes its `.inf` file here.
+    void close() {
+        detail::visit_time_series_writer(m_writer,
+                                         [](auto& writer) { writer.close(); });
+    }
+
+private:
+    using Variant = std::variant<SigprocTimeSeriesWriter,
+                                 formats::presto::PrestoTimeSeriesWriter>;
+    static Variant make(const std::filesystem::path& path,
+                        Header header,
+                        TimeSeriesFormat format) {
+        if (format == TimeSeriesFormat::kAuto) {
+            format = time_series_format_for(path);
+        }
+        if (format == TimeSeriesFormat::kSigprocTim) {
+            return Variant(std::in_place_type<SigprocTimeSeriesWriter>, path,
+                           std::move(header));
+        }
+        return Variant(
+            std::in_place_type<formats::presto::PrestoTimeSeriesWriter>, path,
+            std::move(header));
+    }
+
+    Variant m_writer;
 };
 
 /**
@@ -581,69 +826,14 @@ public:
                 ".tim";
         }
 
-        std::ofstream out(out_path, std::ios::binary);
-        if (!out.is_open()) {
-            throw IoError(fmt::format("psrio: cannot create .tim file '{}'",
-                                      out_path.string()));
-        }
-
-        const auto write_str = [&](std::string_view s) {
-            const auto len    = static_cast<std::uint32_t>(s.size());
-            const auto le_len = detail::to_little_endian(len);
-            out.write(reinterpret_cast<const char*>(&le_len), sizeof(le_len));
-            out.write(s.data(), static_cast<std::streamsize>(s.size()));
-        };
-
-        const auto write_i32 = [&](std::string_view key, std::int32_t val) {
-            write_str(key);
-            const auto le_val = detail::to_little_endian(val);
-            out.write(reinterpret_cast<const char*>(&le_val), sizeof(le_val));
-        };
-
-        const auto write_f64 = [&](std::string_view key, double val) {
-            write_str(key);
-            const auto le_val = detail::to_little_endian(val);
-            out.write(reinterpret_cast<const char*>(&le_val), sizeof(le_val));
-        };
-
-        write_str("HEADER_START");
-        write_i32("data_type", 2); // Dedispersed time series
-        write_i32("nchans", 1);
-        write_i32("nifs", m_header.nifs > 0 ? m_header.nifs : 1);
-        write_i32("nbits", 32);
-        write_f64("tsamp", m_header.tsamp > 0.0 ? m_header.tsamp : 1.0);
-        write_f64("tstart", m_header.tstart);
-        write_f64("fch1", m_header.fch1);
-        write_f64("foff", m_header.foff);
-        write_f64("src_raj", m_header.raj);
-        write_f64("src_dej", m_header.dej);
-        if (m_header.dm > 0.0) {
-            write_f64("refdm", m_header.dm);
-        }
-        if (!m_header.source.empty()) {
-            write_str("source_name");
-            write_str(m_header.source);
-        }
-        write_i32("barycentric", m_header.barycentric);
-        write_str("HEADER_END");
-
-        if constexpr (std::endian::native == std::endian::little) {
-            out.write(
-                reinterpret_cast<const char*>(m_data.data()),
-                static_cast<std::streamsize>(m_data.size() * sizeof(float)));
-        } else {
-            for (const float val : m_data) {
-                const auto le_val = detail::to_little_endian(val);
-                out.write(reinterpret_cast<const char*>(&le_val),
-                          sizeof(le_val));
-            }
-        }
-
+        SigprocTimeSeriesWriter writer(out_path, m_header);
+        writer.write_samples(m_data);
+        writer.close();
         return out_path.string();
     }
 
     /// Write time series in PRESTO .dat format and generate companion .inf
-    /// file.
+    /// file. A `.dat` or `.inf` suffix on @p basename is removed.
     [[nodiscard]] std::string to_dat(const std::optional<std::filesystem::path>&
                                          basename = std::nullopt) const {
         std::filesystem::path base;
@@ -655,29 +845,10 @@ public:
             base = std::filesystem::path(m_header.filename).stem();
         }
 
-        const auto dat_path = base.string() + ".dat";
-        const auto inf_path = base.string() + ".inf";
-
-        std::ofstream dat_out(dat_path, std::ios::binary);
-        if (!dat_out.is_open()) {
-            throw IoError(
-                fmt::format("psrio: cannot create .dat file '{}'", dat_path));
-        }
-
-        if constexpr (std::endian::native == std::endian::little) {
-            dat_out.write(
-                reinterpret_cast<const char*>(m_data.data()),
-                static_cast<std::streamsize>(m_data.size() * sizeof(float)));
-        } else {
-            for (const float val : m_data) {
-                const auto le_val = detail::to_little_endian(val);
-                dat_out.write(reinterpret_cast<const char*>(&le_val),
-                              sizeof(le_val));
-            }
-        }
-
-        m_header.make_inf(inf_path);
-        return dat_path;
+        formats::presto::PrestoTimeSeriesWriter writer(base, m_header);
+        writer.write_samples(m_data);
+        writer.close();
+        return writer.dat_path().string();
     }
 
 private:

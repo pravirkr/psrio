@@ -1,7 +1,12 @@
 #include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/formats/fbh5.hpp"
+#include "psrio/formats/sigproc/header.hpp"
+#include "psrio/formats/sigproc/reader.hpp"
+#include "psrio/formats/sigproc/writer.hpp"
+#include "psrio/open.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
@@ -9,15 +14,18 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <hdf5.h>
+#include <ios>
 #include <limits>
 #include <span>
 #include <string>
-#include <type_traits>
+#include <string_view>
 #include <vector>
 
 using Catch::Matchers::ContainsSubstring;
@@ -32,6 +40,8 @@ public:
     ~Hid() { reset(); }
     Hid(const Hid&)            = delete;
     Hid& operator=(const Hid&) = delete;
+    Hid(Hid&&)                 = delete;
+    Hid& operator=(Hid&&)      = delete;
     [[nodiscard]] hid_t get() const noexcept { return m_id; }
     [[nodiscard]] bool valid() const noexcept { return m_id >= 0; }
 
@@ -70,20 +80,22 @@ private:
 
 class TempFile {
 public:
-    explicit TempFile(std::string suffix) {
+    explicit TempFile(std::string_view suffix) {
         static int sequence = 0;
         m_path =
             std::filesystem::temp_directory_path() /
             ("psrio-fbh5-" + std::to_string(++sequence) + "-" +
              std::to_string(
                  std::chrono::steady_clock::now().time_since_epoch().count()) +
-             suffix);
+             std::string(suffix));
     }
 
     ~TempFile() { std::filesystem::remove(m_path); }
 
     TempFile(const TempFile&)            = delete;
     TempFile& operator=(const TempFile&) = delete;
+    TempFile(TempFile&&)                 = delete;
+    TempFile& operator=(TempFile&&)      = delete;
 
     [[nodiscard]] const std::filesystem::path& path() const { return m_path; }
 
@@ -91,7 +103,7 @@ private:
     std::filesystem::path m_path;
 };
 
-enum class VersionKind { kString, kFloat, kInt };
+enum class VersionKind : std::uint8_t { kString, kFloat, kInt };
 
 struct HeaderSpec {
     std::string source_name  = "B0329+54";
@@ -114,31 +126,32 @@ struct HeaderSpec {
 void write_string_attr(hid_t location,
                        const char* name,
                        const std::string& text) {
-    Hid space{H5Screate(H5S_SCALAR)};
-    Hid type{H5Tcopy(H5T_C_S1)};
+    const Hid space{H5Screate(H5S_SCALAR)};
+    const Hid type{H5Tcopy(H5T_C_S1)};
     REQUIRE(space.valid());
     REQUIRE(type.valid());
     REQUIRE(H5Tset_size(type.get(), H5T_VARIABLE) >= 0);
     REQUIRE(H5Tset_cset(type.get(), H5T_CSET_UTF8) >= 0);
-    Hid attr{H5Acreate2(location, name, type.get(), space.get(), H5P_DEFAULT,
-                        H5P_DEFAULT)};
+    const Hid attr{H5Acreate2(location, name, type.get(), space.get(),
+                              H5P_DEFAULT, H5P_DEFAULT)};
     REQUIRE(attr.valid());
     const char* value = text.c_str();
-    REQUIRE(H5Awrite(attr.get(), type.get(), &value) >= 0);
+    REQUIRE(H5Awrite(attr.get(), type.get(),
+                     static_cast<const void*>(&value)) >= 0);
 }
 
 void write_double_attr(hid_t location, const char* name, double value) {
-    Hid space{H5Screate(H5S_SCALAR)};
-    Hid attr{H5Acreate2(location, name, H5T_NATIVE_DOUBLE, space.get(),
-                        H5P_DEFAULT, H5P_DEFAULT)};
+    const Hid space{H5Screate(H5S_SCALAR)};
+    const Hid attr{H5Acreate2(location, name, H5T_NATIVE_DOUBLE, space.get(),
+                              H5P_DEFAULT, H5P_DEFAULT)};
     REQUIRE(attr.valid());
     REQUIRE(H5Awrite(attr.get(), H5T_NATIVE_DOUBLE, &value) >= 0);
 }
 
 void write_int_attr(hid_t location, const char* name, int value) {
-    Hid space{H5Screate(H5S_SCALAR)};
-    Hid attr{H5Acreate2(location, name, H5T_NATIVE_INT, space.get(),
-                        H5P_DEFAULT, H5P_DEFAULT)};
+    const Hid space{H5Screate(H5S_SCALAR)};
+    const Hid attr{H5Acreate2(location, name, H5T_NATIVE_INT, space.get(),
+                              H5P_DEFAULT, H5P_DEFAULT)};
     REQUIRE(attr.valid());
     REQUIRE(H5Awrite(attr.get(), H5T_NATIVE_INT, &value) >= 0);
 }
@@ -170,7 +183,8 @@ void write_filterbank(const std::filesystem::path& path,
     if (spec.write_data) {
         REQUIRE(cube.size() == ntime * nbeams * nchans);
     }
-    Hid file{H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT)};
+    const Hid file{
+        H5Fcreate(path.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT)};
     REQUIRE(file.valid());
     write_string_attr(file.get(), "CLASS", "FILTERBANK");
     if (spec.version_kind == VersionKind::kFloat) {
@@ -186,9 +200,9 @@ void write_filterbank(const std::filesystem::path& path,
     }
 
     const std::array<hsize_t, 3> dims{ntime, nbeams, nchans};
-    Hid space{H5Screate_simple(3, dims.data(), nullptr)};
+    const Hid space{H5Screate_simple(3, dims.data(), nullptr)};
     REQUIRE(space.valid());
-    Hid props{H5Pcreate(H5P_DATASET_CREATE)};
+    const Hid props{H5Pcreate(H5P_DATASET_CREATE)};
     REQUIRE(props.valid());
     if (spec.gzip) {
         REQUIRE(H5Zfilter_avail(H5Z_FILTER_DEFLATE) > 0);
@@ -197,8 +211,8 @@ void write_filterbank(const std::filesystem::path& path,
         REQUIRE(H5Pset_chunk(props.get(), 3, chunk.data()) >= 0);
         REQUIRE(H5Pset_deflate(props.get(), 4) >= 0);
     }
-    Hid data{H5Dcreate2(file.get(), "data", native_type<T>(), space.get(),
-                        H5P_DEFAULT, props.get(), H5P_DEFAULT)};
+    const Hid data{H5Dcreate2(file.get(), "data", native_type<T>(), space.get(),
+                              H5P_DEFAULT, props.get(), H5P_DEFAULT)};
     REQUIRE(data.valid());
     REQUIRE(H5Dwrite(data.get(), native_type<T>(), H5S_ALL, H5S_ALL,
                      H5P_DEFAULT, cube.data()) >= 0);
@@ -251,6 +265,7 @@ TEST_CASE("HDF5 filterbank header round-trips", "[hdf5]") {
     CHECK(header.nsamples == 2U);
     CHECK(header.telescope_id == 6);
     CHECK(header.has_telescope_id);
+    CHECK(source.telescope() == "GBT");
     CHECK(header.ibeam == 3);
     CHECK(header.has_src_raj);
     CHECK(header.src_raj == 123456.7);
@@ -273,7 +288,7 @@ TEST_CASE("HDF5 numeric VERSION uses an explicit general format", "[hdf5]") {
     constexpr std::size_t kNChans = 1;
     const std::vector<std::uint8_t> cube{0};
 
-    const auto version_of = [&](HeaderSpec spec) {
+    const auto version_of = [&](const HeaderSpec& spec) {
         const TempFile file(".h5");
         write_filterbank(file.path(), kNTime, kNBeams, kNChans, spec, cube);
         return FilterbankFile(file.path()).header().version;
@@ -427,7 +442,7 @@ TEST_CASE("HDF5 filterbank reads the selected beam", "[hdf5]") {
 
     FilterbankFile beam1(file.path(), 1);
     CHECK(beam1.beam() == 2);
-    std::fill(gulp.begin(), gulp.end(), std::byte{0});
+    std::ranges::fill(gulp, std::byte{0});
     CHECK(beam1.read_block(kNTime, gulp) == kNTime);
     CHECK(gulp[0] == std::byte{2});
     CHECK(gulp[(kNChans * 2) - 1] == std::byte{2});
@@ -561,4 +576,79 @@ TEST_CASE("HDF5 foff may live on the file instead of the dataset", "[hdf5]") {
     write_filterbank(file.path(), 1, 1, 4, spec, cube);
     FilterbankFile source(file.path());
     CHECK(source.foff() == 0.25);
+}
+
+TEST_CASE("fbh5::open_block_source opens HDF5 beams and falls back to SIGPROC",
+          "[hdf5]") {
+    const TempFile file(".h5");
+    const std::vector<std::uint8_t> cube{1, 1, 1, 2, 2, 2};
+    write_filterbank(file.path(), 1, 2, 3, HeaderSpec{}, cube);
+
+    auto beam1 = psrio::formats::fbh5::open_block_source(file.path(), 1);
+    CHECK(beam1.nchans() == 3U);
+    std::vector<std::byte> gulp(3);
+    CHECK(beam1.read_block(1, gulp) == 1U);
+    CHECK(gulp[0] == std::byte{2});
+
+    CHECK_THROWS_AS(psrio::open_block_source(file.path()), psrio::FormatError);
+
+    const TempFile sigproc(".fil");
+    psrio::formats::sigproc::FilterbankHeader header;
+    header.nchans = 2;
+    header.nbits  = 8;
+    header.tsamp  = 1e-3;
+    header.fch1   = 1400.0;
+    header.foff   = -1.0;
+    {
+        psrio::formats::sigproc::FilterbankWriter writer(sigproc.path(),
+                                                         header);
+        const std::vector<std::uint8_t> data{9, 8};
+        writer.write_samples(1, std::span<const std::uint8_t>(data));
+    }
+    const auto fallback =
+        psrio::formats::fbh5::open_block_source(sigproc.path());
+    CHECK(fallback.nchans() == 2U);
+    CHECK(fallback.nsamples() == 1U);
+}
+
+TEST_CASE("Parkes filterbank round-trips through HDF5", "[hdf5][fbh5]") {
+    const std::filesystem::path fil =
+        std::filesystem::path(PSRIO_TEST_DATA_DIR) / "parkes_8bit_1.fil";
+    if (!std::filesystem::exists(fil)) {
+        SKIP("parkes_8bit_1.fil is not in the test data");
+    }
+    psrio::formats::sigproc::FilterbankReader reader(fil);
+    REQUIRE(reader.nbits() == 8);
+    REQUIRE(reader.nifs() == 1U);
+    const auto ntime = static_cast<std::size_t>(reader.nsamples());
+    const auto nchan = static_cast<std::size_t>(reader.nchans());
+    std::vector<std::uint8_t> packed(ntime * nchan);
+    REQUIRE(reader.read_samples(reader.nsamples(),
+                                std::span<std::uint8_t>(packed)) ==
+            reader.nsamples());
+
+    HeaderSpec spec;
+    spec.source_name = std::string{reader.source_name()};
+    spec.tstart      = reader.tstart();
+    spec.tsamp       = reader.tsamp();
+    spec.fch1        = reader.fch1();
+    spec.foff        = reader.foff();
+    spec.nbits       = 8;
+    spec.telescope_id =
+        static_cast<int>(reader.header().telescope_id.value_or(4));
+    spec.ibeam = reader.beam();
+
+    const TempFile hdf5(".h5");
+    write_filterbank(hdf5.path(), ntime, 1U, nchan, spec, packed);
+
+    FilterbankFile copy(hdf5.path());
+    CHECK(copy.nchans() == reader.nchans());
+    CHECK(copy.nsamples() == reader.nsamples());
+    CHECK(copy.tsamp() == reader.tsamp());
+    CHECK(copy.fch1() == reader.fch1());
+    CHECK(copy.foff() == reader.foff());
+    CHECK(copy.source_name() == reader.source_name());
+    CHECK(copy.telescope() == "Parkes");
+    const auto back = copy.read_samples<std::uint8_t>(copy.nsamples());
+    CHECK(back == packed);
 }

@@ -5,7 +5,9 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 
+#include <algorithm>
 #include <bit>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <fmt/format.h>
@@ -45,9 +47,6 @@ public:
             m_digi_sigma = 1.5F;
             break;
         case 4:
-            m_itemsize   = sizeof(std::uint8_t);
-            m_digi_sigma = 6.0F;
-            break;
         case 8:
             m_itemsize   = sizeof(std::uint8_t);
             m_digi_sigma = 6.0F;
@@ -111,8 +110,9 @@ public:
     }
 
     [[nodiscard]] constexpr float digi_mean() const noexcept {
-        return static_cast<float>((1ULL << static_cast<unsigned>(m_nbits - 1)) -
-                                  0.5);
+        return static_cast<float>(
+            static_cast<double>(1ULL << static_cast<unsigned>(m_nbits - 1)) -
+            0.5);
     }
     [[nodiscard]] constexpr float get_digi_mean() const noexcept {
         return digi_mean();
@@ -261,6 +261,36 @@ inline void reverse_channels(std::span<std::byte> gulp,
     detail::reverse_channels_impl(gulp, nsamps, nchans, nbits);
 }
 
+/// Reverse channel order inside each unpacked time sample (and IF), in place.
+///
+/// Layout is time-major: `[nsamps][nifs][nchans]`. Each row of @p nchans
+/// values is reversed independently.
+/// @throws ValidationError if @p buffer holds fewer than
+///         `nsamps * nifs * nchans` values.
+template <typename T>
+inline void reverse_unpacked_channels(std::span<T> buffer,
+                                      std::uint64_t nsamps,
+                                      std::uint64_t nchans,
+                                      std::uint64_t nifs = 1) {
+    if (nchans <= 1U || nsamps == 0U || nifs == 0U) {
+        return;
+    }
+    if (nsamps > std::numeric_limits<std::uint64_t>::max() / nifs ||
+        nsamps * nifs > std::numeric_limits<std::uint64_t>::max() / nchans) {
+        throw ValidationError("psrio: channel reversal block is too large");
+    }
+    const auto total_rows = nsamps * nifs;
+    if (buffer.size() < total_rows * nchans) {
+        throw ValidationError(
+            "psrio: buffer too small for reverse_unpacked_channels");
+    }
+    const auto row_len = static_cast<std::size_t>(nchans);
+    for (std::uint64_t row = 0; row < total_rows; ++row) {
+        std::ranges::reverse(
+            buffer.subspan(static_cast<std::size_t>(row) * row_len, row_len));
+    }
+}
+
 // -----------------------------------------------------------------------------
 // On-the-Fly Packing & Extraction Utilities
 // -----------------------------------------------------------------------------
@@ -350,18 +380,18 @@ public:
         }
 
         // Sub-byte integers: 1, 2, or 4 bits.
-        const int nbits             = bits_of(m_type);
+        const auto nbits            = static_cast<unsigned>(bits_of(m_type));
         const auto samples_per_byte = 8U / static_cast<std::uint64_t>(nbits);
         const auto byte_offset      = sample_index / samples_per_byte;
         const auto sub_index        = sample_index % samples_per_byte;
 
-        const auto byte_val =
-            std::to_integer<std::uint8_t>(m_data[byte_offset]);
+        const auto byte_val = static_cast<unsigned>(
+            std::to_integer<std::uint8_t>(m_data[byte_offset]));
         const auto shift =
             (m_bit_order == BitOrder::kLsbFirst)
-                ? (sub_index * static_cast<std::uint64_t>(nbits))
-                : (8U - ((sub_index + 1U) * static_cast<std::uint64_t>(nbits)));
-        const std::uint8_t mask = static_cast<std::uint8_t>((1U << nbits) - 1U);
+                ? static_cast<unsigned>(sub_index * nbits)
+                : static_cast<unsigned>(8U - ((sub_index + 1U) * nbits));
+        const auto mask = (1U << nbits) - 1U;
         return static_cast<float>((byte_val >> shift) & mask);
     }
 

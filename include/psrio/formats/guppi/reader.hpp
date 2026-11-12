@@ -1,6 +1,11 @@
 #pragma once
 
+#include "psrio/baseband.hpp"
+#include "psrio/common/types.hpp"
+#include "psrio/detail/baseband_layout.hpp"
+#include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
+#include "psrio/detail/skip.hpp"
 #include "psrio/formats/guppi/header.hpp"
 
 #include <algorithm>
@@ -975,9 +980,11 @@ inline GuppiSet GuppiSet::open(std::span<const std::filesystem::path> files) {
                 return group.frequency == frequency;
             });
         if (found == groups.end()) {
-            groups.push_back(Group{.frequency    = frequency,
-                                   .paths        = {file},
-                                   .packet_index = {packet}});
+            groups.push_back(Group{
+                .frequency    = frequency,
+                .paths        = {file},
+                .packet_index = {packet},
+            });
         } else {
             found->paths.push_back(file);
             found->packet_index.push_back(packet);

@@ -13,7 +13,6 @@
 #include <span>
 #include <sys/mman.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 
 namespace psrio::detail {
@@ -39,6 +38,7 @@ public:
             error_check::throw_errno_io("fopen", path);
         }
 
+        // NOLINTNEXTLINE(misc-include-cleaner): POSIX fileno is in <cstdio>
         const int fd = ::fileno(file.get());
         if (fd < 0) {
             error_check::throw_errno_io("fileno", path);

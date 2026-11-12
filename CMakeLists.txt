@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.21...3.30)
 
 project(
   psrio
-  VERSION 0.4.0
+  VERSION 0.5.0
   LANGUAGES CXX
   DESCRIPTION "High-Performance Header-Only Pulsar & FRB I/O Library"
 )
@@ -35,6 +35,7 @@ endif()
 
 # Configuration options
 option(PSRIO_BUILD_TESTS "Build test suite" ${PSRIO_IS_TOP_LEVEL})
+option(PSRIO_BUILD_APPLICATIONS "Build psrio CLI applications" ${PSRIO_IS_TOP_LEVEL})
 option(PSRIO_BUILD_DOCS "Build documentation" OFF)
 option(PSRIO_ENABLE_COVERAGE "Enable code coverage for tests" OFF)
 option(PSRIO_WITH_HDF5 "Enable the opt-in FBH5 reader" OFF)
@@ -73,14 +74,21 @@ endif()
 # fmt (header-only) formats diagnostic and metadata strings. libstdc++ before
 # GCC 13 has no std::format. A parent that already defines fmt::fmt-header-only
 # (fmt 12.1 or newer) shares that target; define it before adding psrio.
-# Otherwise fmt 12.1.0 is fetched. psrio does not install fmt.
+# Otherwise fmt 12.1.0 is fetched. psrio does not install fmt, except with the
+# applications: dmt installs spdlog unconditionally, and spdlog's export set
+# needs fmt in one too.
+if(PSRIO_BUILD_APPLICATIONS)
+  set(PSRIO_FMT_INSTALL ON)
+else()
+  set(PSRIO_FMT_INSTALL OFF)
+endif()
 if(NOT TARGET fmt::fmt-header-only)
   CPMAddPackage(
     NAME fmt
     VERSION 12.1.0
     URL https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
     URL_HASH SHA256=ea7de4299689e12b6dddd392f9896f08fb0777ac7168897a244a6d6085043fea
-    OPTIONS "FMT_INSTALL OFF"
+    OPTIONS "FMT_INSTALL ${PSRIO_FMT_INSTALL}"
     EXCLUDE_FROM_ALL YES
     SYSTEM YES
   )
@@ -121,27 +129,45 @@ endif()
 if(PSRIO_WITH_PSRDADA)
   find_path(PSRDADA_INCLUDE_DIR NAMES dada_hdu.h)
   find_library(PSRDADA_LIBRARY NAMES psrdada)
-  if(NOT PSRDADA_INCLUDE_DIR OR NOT PSRDADA_LIBRARY)
-    message(
-      FATAL_ERROR
-        "PSRIO_WITH_PSRDADA=ON but PSRDADA was not found (need dada_hdu.h and libpsrdada)."
-    )
-  endif()
   add_library(psrio_psrdada INTERFACE)
   add_library(psrio::psrdada ALIAS psrio_psrdada)
   set_target_properties(psrio_psrdada PROPERTIES EXPORT_NAME psrdada)
   target_compile_features(psrio_psrdada INTERFACE cxx_std_20)
-  target_include_directories(psrio_psrdada INTERFACE ${PSRDADA_INCLUDE_DIR})
-  target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} ${PSRDADA_LIBRARY})
+  if(PSRDADA_INCLUDE_DIR AND PSRDADA_LIBRARY)
+    target_include_directories(psrio_psrdada INTERFACE ${PSRDADA_INCLUDE_DIR})
+    target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} ${PSRDADA_LIBRARY})
+  else()
+    if(NOT TARGET psrdada)
+      enable_language(C)
+      set(CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit TRUE)
+      set(CMAKE_DISABLE_FIND_PACKAGE_CUDA TRUE)
+      set(BUILD_TESTING OFF)
+      CPMAddPackage(
+        NAME psrdada
+        GIT_REPOSITORY https://git.code.sf.net/p/psrdada/code
+        GIT_TAG 151198ea3ec4a3a237f51e6217a5a2d7ff39194e
+        EXCLUDE_FROM_ALL YES
+        SYSTEM YES
+      )
+      unset(CMAKE_DISABLE_FIND_PACKAGE_CUDAToolkit)
+      unset(CMAKE_DISABLE_FIND_PACKAGE_CUDA)
+      unset(BUILD_TESTING)
+    endif()
+    if(NOT TARGET psrdada)
+      message(
+        FATAL_ERROR
+          "PSRIO_WITH_PSRDADA=ON but PSRDADA was not found (need dada_hdu.h and libpsrdada)."
+      )
+    endif()
+    target_link_libraries(psrio_psrdada INTERFACE ${PROJECT_NAME} $<BUILD_INTERFACE:psrdada>)
+  endif()
 endif()
 
 # ------------------------------------------------------------------------------
-# Testing & Developer Builds
+# Testing, Applications & Developer Builds
 # ------------------------------------------------------------------------------
-if(PSRIO_BUILD_TESTS)
-  enable_testing()
-
-  # Developer warning & optimization flags - isolated to test targets
+if(PSRIO_BUILD_TESTS OR PSRIO_BUILD_APPLICATIONS)
+  # Developer warning & optimization flags - isolated to test and CLI targets
   add_library(psrio_developer_flags INTERFACE)
   target_compile_options(
     psrio_developer_flags
@@ -167,7 +193,15 @@ if(PSRIO_BUILD_TESTS)
     target_compile_options(psrio_developer_flags INTERFACE --coverage -O0 -g)
     target_link_options(psrio_developer_flags INTERFACE --coverage)
   endif()
+endif()
 
+# Applications come first so the tests can link the CLI command library.
+if(PSRIO_BUILD_APPLICATIONS)
+  add_subdirectory(applications)
+endif()
+
+if(PSRIO_BUILD_TESTS)
+  enable_testing()
   add_subdirectory(tests)
 endif()
 
@@ -226,6 +260,7 @@ message(STATUS "psrio ${PROJECT_VERSION} configured successfully")
 message(STATUS "  - Type: Header-only library")
 message(STATUS "  - Standard: C++20")
 message(STATUS "  - Build Tests: ${PSRIO_BUILD_TESTS}")
+message(STATUS "  - Build Applications: ${PSRIO_BUILD_APPLICATIONS}")
 message(STATUS "  - FBH5 (HDF5): ${PSRIO_WITH_HDF5}")
 message(STATUS "  - PSRDADA: ${PSRIO_WITH_PSRDADA}")
 message(STATUS "--------------------------------------------------------")

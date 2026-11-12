@@ -1,20 +1,26 @@
 #pragma once
 
 #include "psrio/astro.hpp"
+#include "psrio/block_source.hpp"
 #include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/formats/sigproc/header.hpp"
+#include "psrio/open.hpp"
 #include "psrio/packed.hpp"
 
 #include <algorithm>
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
-#include <highfive/highfive.hpp>
+#include <highfive/highfive.hpp> // IWYU pragma: keep
 #include <limits>
 #include <memory>
 #include <span>
@@ -291,7 +297,7 @@ is_hdf5_filterbank(const std::filesystem::path& path) {
         return false;
     }
     try {
-        HighFive::SilenceHDF5 silence;
+        const HighFive::SilenceHDF5 silence;
         return H5Fis_hdf5(path.c_str()) > 0;
     } catch (...) {
         return false;
@@ -326,7 +332,7 @@ public:
     }
 
     /// The stream is one selected beam, so the block has a single IF.
-    [[nodiscard]] std::uint64_t nifs() const noexcept { return 1; }
+    [[nodiscard]] static std::uint64_t nifs() noexcept { return 1; }
 
     [[nodiscard]] int nbits() const noexcept { return m_header.nbits; }
 
@@ -342,7 +348,7 @@ public:
         return m_header.nsamples;
     }
 
-    [[nodiscard]] bool has_nsamples() const noexcept { return true; }
+    [[nodiscard]] static bool has_nsamples() noexcept { return true; }
 
     [[nodiscard]] double tsamp() const noexcept { return m_header.tsamp; }
     [[nodiscard]] double tstart() const noexcept { return m_header.tstart; }
@@ -351,6 +357,16 @@ public:
     }
 
     [[nodiscard]] std::string_view telescope() const noexcept {
+        if (!m_telescope_name.empty()) {
+            return m_telescope_name;
+        }
+        if (m_header.has_telescope_id) {
+            const auto name = ::psrio::formats::sigproc::telescope_name(
+                m_header.telescope_id);
+            if (name != "unknown") {
+                return name;
+            }
+        }
         return "Unknown";
     }
 
@@ -453,15 +469,16 @@ private:
     void load_header(const std::vector<size_t>& dims,
                      const std::filesystem::path& path);
     void read_optional();
-    void read_angle(const HighFive::Attribute& attr,
-                    const char* name,
-                    double& numeric,
-                    std::string& text,
-                    bool& has_numeric);
+    static void read_angle(const HighFive::Attribute& attr,
+                           const char* name,
+                           double& numeric,
+                           std::string& text,
+                           bool& has_numeric);
 
     std::unique_ptr<HighFive::File> m_file;
     std::unique_ptr<HighFive::DataSet> m_dataset;
     FilterbankHeader m_header{};
+    std::string m_telescope_name;
     SampleType m_sample_type{SampleType::kUInt8};
     std::uint64_t m_beam_index{0};
     std::uint64_t m_sample{0};
@@ -472,7 +489,7 @@ private:
 inline FilterbankFile::FilterbankFile(const std::filesystem::path& path,
                                       std::uint64_t beam_index)
     : m_beam_index(beam_index) {
-    HighFive::SilenceHDF5 silence;
+    const HighFive::SilenceHDF5 silence;
     const auto native = path.string();
     try {
         m_file =
@@ -619,7 +636,7 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
     if (detail::has_attr(*m_dataset, *m_file, "nsamples")) {
         const int declared = detail::read_int(
             detail::get_attr(*m_dataset, *m_file, "nsamples"), "nsamples");
-        if (declared < 0 || static_cast<std::uint64_t>(declared) != dims[0]) {
+        if (std::cmp_not_equal(declared, dims[0])) {
             throw FormatError(fmt::format(
                 "psrio: HDF5 nsamples ({}) does not match the time axis ({})",
                 declared, dims[0]));
@@ -654,6 +671,12 @@ inline void FilterbankFile::load_header(const std::vector<size_t>& dims,
 }
 
 inline void FilterbankFile::read_optional() {
+    if (detail::has_attr(*m_dataset, *m_file, "telescope")) {
+        const auto attr = detail::get_attr(*m_dataset, *m_file, "telescope");
+        if (attr.getDataType().getClass() == HighFive::DataTypeClass::String) {
+            m_telescope_name = detail::read_text(attr, "telescope");
+        }
+    }
     if (detail::has_attr(*m_dataset, *m_file, "telescope_id")) {
         m_header.telescope_id = detail::read_int(
             detail::get_attr(*m_dataset, *m_file, "telescope_id"),
@@ -745,13 +768,19 @@ inline std::uint64_t FilterbankFile::read_block(std::uint64_t count,
             "psrio: HDF5 destination is not aligned for the sample type");
     }
     try {
-        HighFive::SilenceHDF5 silence;
-        auto selection = m_dataset->select(
+        const HighFive::SilenceHDF5 silence;
+        const auto selection = m_dataset->select(
             HighFive::HyperSlab(HighFive::RegularHyperSlab(
-                {static_cast<size_t>(m_sample),
-                 static_cast<size_t>(m_beam_index), 0},
-                {static_cast<size_t>(to_read), 1,
-                 static_cast<size_t>(m_header.nchans)})),
+                {
+                    static_cast<size_t>(m_sample),
+                    static_cast<size_t>(m_beam_index),
+                    0,
+                },
+                {
+                    static_cast<size_t>(to_read),
+                    1,
+                    static_cast<size_t>(m_header.nchans),
+                })),
             HighFive::DataSpace(
                 {static_cast<size_t>(to_read * m_header.nchans)}));
 
@@ -808,19 +837,30 @@ inline std::uint64_t FilterbankFile::read_samples(std::uint64_t count,
         return 0;
     }
     try {
-        HighFive::SilenceHDF5 silence;
-        auto selection = m_dataset->select(
+        const HighFive::SilenceHDF5 silence;
+        const auto selection = m_dataset->select(
             HighFive::HyperSlab(HighFive::RegularHyperSlab(
-                {static_cast<size_t>(m_sample),
-                 static_cast<size_t>(m_beam_index), 0},
-                {static_cast<size_t>(to_read), 1,
-                 static_cast<size_t>(m_header.nchans)})),
+                {
+                    static_cast<size_t>(m_sample),
+                    static_cast<size_t>(m_beam_index),
+                    0,
+                },
+                {
+                    static_cast<size_t>(to_read),
+                    1,
+                    static_cast<size_t>(m_header.nchans),
+                })),
             HighFive::DataSpace(
                 {static_cast<size_t>(to_read * m_header.nchans)}));
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+    }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
     }
     m_sample += to_read;
     return to_read;
@@ -852,19 +892,30 @@ FilterbankFile::read_samples(std::uint64_t count,
         return 0;
     }
     try {
-        HighFive::SilenceHDF5 silence;
-        auto selection = m_dataset->select(
+        const HighFive::SilenceHDF5 silence;
+        const auto selection = m_dataset->select(
             HighFive::HyperSlab(HighFive::RegularHyperSlab(
-                {static_cast<size_t>(m_sample),
-                 static_cast<size_t>(m_beam_index), 0},
-                {static_cast<size_t>(to_read), 1,
-                 static_cast<size_t>(m_header.nchans)})),
+                {
+                    static_cast<size_t>(m_sample),
+                    static_cast<size_t>(m_beam_index),
+                    0,
+                },
+                {
+                    static_cast<size_t>(to_read),
+                    1,
+                    static_cast<size_t>(m_header.nchans),
+                })),
             HighFive::DataSpace(
                 {static_cast<size_t>(to_read * m_header.nchans)}));
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+    }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
     }
     m_sample += to_read;
     return to_read;
@@ -896,19 +947,30 @@ FilterbankFile::read_samples(std::uint64_t count,
         return 0;
     }
     try {
-        HighFive::SilenceHDF5 silence;
-        auto selection = m_dataset->select(
+        const HighFive::SilenceHDF5 silence;
+        const auto selection = m_dataset->select(
             HighFive::HyperSlab(HighFive::RegularHyperSlab(
-                {static_cast<size_t>(m_sample),
-                 static_cast<size_t>(m_beam_index), 0},
-                {static_cast<size_t>(to_read), 1,
-                 static_cast<size_t>(m_header.nchans)})),
+                {
+                    static_cast<size_t>(m_sample),
+                    static_cast<size_t>(m_beam_index),
+                    0,
+                },
+                {
+                    static_cast<size_t>(to_read),
+                    1,
+                    static_cast<size_t>(m_header.nchans),
+                })),
             HighFive::DataSpace(
                 {static_cast<size_t>(to_read * m_header.nchans)}));
         selection.read_raw(dest.data());
     } catch (const std::exception& e) {
         throw IoError(
             fmt::format("psrio: HDF5 filterbank read failed: {}", e.what()));
+    }
+    if (m_apply_fswap) {
+        reverse_unpacked_channels(
+            dest.first(static_cast<std::size_t>(to_read * m_header.nchans)),
+            to_read, m_header.nchans);
     }
     m_sample += to_read;
     return to_read;
@@ -947,6 +1009,20 @@ inline std::vector<std::byte> FilterbankFile::read_bytes(std::uint64_t nbytes) {
     const auto actual = read_bytes(nbytes, std::span<std::byte>(out));
     out.resize(static_cast<std::size_t>(actual));
     return out;
+}
+
+/// Open an HDF5 or SIGPROC filterbank as a type-erased BlockSource.
+///
+/// An HDF5 file (is_hdf5_filterbank()) opens beam @p beam as FilterbankFile.
+/// Anything else goes to psrio::open_block_source().
+[[nodiscard]] inline BlockSource
+open_block_source(const std::filesystem::path& path,
+                  std::uint64_t beam = 0,
+                  BitOrder bit_order = BitOrder::kLsbFirst) {
+    if (is_hdf5_filterbank(path)) {
+        return BlockSource(FilterbankFile(path, beam));
+    }
+    return ::psrio::open_block_source(path, beam, bit_order);
 }
 
 } // namespace psrio::formats::fbh5

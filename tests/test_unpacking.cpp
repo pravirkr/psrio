@@ -1,3 +1,4 @@
+#include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/packed_bits.hpp"
 

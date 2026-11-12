@@ -2,7 +2,7 @@
 
 A high-performance, header-only C++20 library for reading, parsing, and streaming time-domain radio astronomy data (pulsar baseband, filterbank, and single-channel time series).
 
-`psrio` provides zero-overhead, type-safe ingestion of observational data formats (SIGPROC `.fil` / `.tim`, PRESTO `.dat` / `.inf`, GUPPI RAW, and DADA files). Intensity formats share one block-streaming front. Baseband formats share another.
+`psrio` provides zero-overhead, type-safe ingestion and writing of observational data formats (SIGPROC `.fil` / `.tim`, search-mode PSRFITS `.sf` / `.fits`, PRESTO `.dat` / `.inf`, GUPPI RAW, and DADA files), plus an optional `psrio` CLI (`inspect`, `slice`, `splice`, `decimate`, `convert`, `digifil`, `dedisperse`). Intensity formats share one block-streaming front. Baseband formats share another.
 
 ## Key Features
 
@@ -35,7 +35,7 @@ Add `psrio` directly from GitHub using [CPM.cmake](https://github.com/cpm-cmake/
 CPMAddPackage(
   NAME psrio
   GITHUB_REPOSITORY pravirkr/psrio
-  GIT_TAG v0.4.0  # Or a specific branch/commit
+  GIT_TAG v0.5.0  # Or a specific branch/commit
 )
 
 target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
@@ -53,7 +53,7 @@ include(FetchContent)
 FetchContent_Declare(
   psrio
   GIT_REPOSITORY https://github.com/pravirkr/psrio.git
-  GIT_TAG v0.4.0  # Or a specific branch/commit
+  GIT_TAG v0.5.0  # Or a specific branch/commit
 )
 
 FetchContent_MakeAvailable(psrio)
@@ -66,7 +66,7 @@ target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
 Install fmt 12.1 or newer first, then install `psrio` into the same prefix or any prefix CMake already searches. psrio does not install fmt.
 
 ```bash
-cmake -B build -DPSRIO_BUILD_TESTS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local
+cmake -B build -DPSRIO_BUILD_TESTS=OFF -DPSRIO_BUILD_APPLICATIONS=OFF -DCMAKE_INSTALL_PREFIX=/usr/local
 sudo cmake --install build
 ```
 
@@ -80,7 +80,7 @@ target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
 
 
 > [!NOTE]
-> `PSRIO_BUILD_TESTS` defaults to `OFF` automatically whenever `psrio` is consumed as a dependency via `CPM`, `FetchContent`, or `add_subdirectory`.
+> `PSRIO_BUILD_TESTS` and `PSRIO_BUILD_APPLICATIONS` both default to `OFF` automatically whenever `psrio` is consumed as a dependency via `CPM`, `FetchContent`, or `add_subdirectory`.
 
 ---
 

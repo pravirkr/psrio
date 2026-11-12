@@ -1,21 +1,25 @@
 #pragma once
 
 /// Umbrella header for the psrio public API.
-/// FBH5, PSRFITS, and the PSRDADA ring stay out of this header.
-/// DADA files are included.
+/// FBH5 and the PSRDADA ring stay out of this header.
+/// Search-mode PSRFITS and DADA files are included.
 #include "psrio/astro.hpp"             // IWYU pragma: export
 #include "psrio/baseband.hpp"          // IWYU pragma: export
 #include "psrio/block_source.hpp"      // IWYU pragma: export
 #include "psrio/common/concepts.hpp"   // IWYU pragma: export
 #include "psrio/common/types.hpp"      // IWYU pragma: export
 #include "psrio/detail/exceptions.hpp" // IWYU pragma: export
+#include "psrio/digifil.hpp"           // IWYU pragma: export
 #include "psrio/formats/dada.hpp"      // IWYU pragma: export
 #include "psrio/formats/guppi.hpp"     // IWYU pragma: export
 #include "psrio/formats/memory.hpp"    // IWYU pragma: export
 #include "psrio/formats/presto.hpp"    // IWYU pragma: export
+#include "psrio/formats/psrfits.hpp"   // IWYU pragma: export
 #include "psrio/formats/sigproc.hpp"   // IWYU pragma: export
 #include "psrio/header.hpp"            // IWYU pragma: export
+#include "psrio/open.hpp"              // IWYU pragma: export
 #include "psrio/packed.hpp"            // IWYU pragma: export
+#include "psrio/scrunch.hpp"           // IWYU pragma: export
 #include "psrio/timeseries.hpp"        // IWYU pragma: export
 
 #include <string_view>
@@ -23,12 +27,17 @@
 namespace psrio {
 
 /// @return Semantic version string matching the CMake project version.
-constexpr std::string_view version() noexcept { return "0.4.0"; }
+constexpr std::string_view version() noexcept { return "0.5.0"; }
 
 // Main convenient public types
 using formats::dada::DadaReader;
 using formats::guppi::GuppiReader;
 using formats::guppi::GuppiSet;
+using formats::presto::PrestoTimeSeriesWriter;
+using formats::psrfits::SearchFile;
+using formats::psrfits::SearchStream;
 using formats::sigproc::FilterbankReader;
+using formats::sigproc::FilterbankStream;
+using formats::sigproc::FilterbankWriter;
 
 } // namespace psrio

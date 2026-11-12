@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psrio/astro.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
 #include "psrio/detail/packed_bits.hpp"
@@ -9,15 +10,20 @@
 #include "psrio/packed.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <concepts>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace psrio::formats::sigproc {
 
@@ -158,7 +164,8 @@ public:
         return astro::mjd_to_time(tstart());
     }
 
-    /// Enable or disable automatic channel reversal (fswap) on read_block.
+    /// Enable or disable channel reversal (fswap) on read_block and
+    /// read_samples. Raw byte reads and views stay in file order.
     void set_fswap(bool enable) noexcept { m_apply_fswap = enable; }
     [[nodiscard]] bool fswap_enabled() const noexcept { return m_apply_fswap; }
 
@@ -354,7 +361,7 @@ inline std::uint64_t FilterbankReader::read_block(std::uint64_t count,
     std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(nbytes));
     if (m_apply_fswap && to_read > 0U) {
         ::psrio::reverse_channels(dest.first(static_cast<std::size_t>(nbytes)),
-                                  to_read, nchans(), nbits());
+                                  to_read * nifs(), nchans(), nbits());
     }
     m_sample += to_read;
     return to_read;
@@ -493,6 +500,9 @@ inline std::uint64_t FilterbankReader::read_samples(std::uint64_t count,
         throw ValidationError("psrio: 32-bit samples unpack to float");
     }
 
+    if (m_apply_fswap) {
+        ::psrio::reverse_unpacked_channels(output, to_read, nchans(), nifs());
+    }
     m_sample += to_read;
     return to_read;
 }

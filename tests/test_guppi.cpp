@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <type_traits>
 #include <vector>
 
@@ -298,7 +299,7 @@ TEST_CASE("RawReader walks headers and payload bytes", "[guppi]") {
     const auto second = reader.read_header();
     CHECK(second.get<std::string>("SRC_NAME") == "NEXT");
     const auto second_payload = reader.tell();
-    auto again                = reader.read_bytes(16);
+    const auto again          = reader.read_bytes(16);
     REQUIRE(again.size() == 16U);
 
     reader.seek(second_payload);

@@ -1,8 +1,10 @@
 #pragma once
 
+#include "psrio/astro.hpp"
 #include "psrio/baseband.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/header.hpp"
 
 #include <algorithm>
 #include <cctype>

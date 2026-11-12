@@ -1,9 +1,13 @@
+#include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/packed.hpp"
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <array>
+#include <cstddef>
 #include <cstdint>
+#include <span>
 #include <vector>
 
 TEST_CASE("sample_type predicates and helpers", "[sample_type]") {
@@ -161,7 +165,7 @@ TEST_CASE("DataExtractor extracts samples and spectra across bit depths",
     // sample 1: channels 5, 6, 7, 8 -> byte 2: 0x65, byte 3: 0x87
     const std::vector<std::byte> bytes4{std::byte{0x21}, std::byte{0x43},
                                         std::byte{0x65}, std::byte{0x87}};
-    psrio::DataExtractor ext4(bytes4, 2, 4, psrio::SampleType::kUInt4);
+    const psrio::DataExtractor ext4(bytes4, 2, 4, psrio::SampleType::kUInt4);
     REQUIRE(ext4.extract_sample(0, 0) == 1.0F);
     REQUIRE(ext4.extract_sample(0, 1) == 2.0F);
     REQUIRE(ext4.extract_sample(0, 2) == 3.0F);
@@ -175,16 +179,17 @@ TEST_CASE("DataExtractor extracts samples and spectra across bit depths",
 
     // 8-bit signed
     const std::vector<std::byte> bytes_s8{std::byte{0xFE}, std::byte{0x05}};
-    psrio::DataExtractor ext_s8(bytes_s8, 1, 2, psrio::SampleType::kInt8);
+    const psrio::DataExtractor ext_s8(bytes_s8, 1, 2, psrio::SampleType::kInt8);
     REQUIRE(ext_s8.extract_sample(0, 0) == -2.0F);
     REQUIRE(ext_s8.extract_sample(0, 1) == 5.0F);
 
     // Float32
     std::array<float, 2> floats = {12.5F, -3.25F};
-    std::span<const std::byte> float_bytes(
+    const std::span<const std::byte> float_bytes(
         reinterpret_cast<const std::byte*>(floats.data()),
         floats.size() * sizeof(float));
-    psrio::DataExtractor ext_f(float_bytes, 1, 2, psrio::SampleType::kFloat32);
+    const psrio::DataExtractor ext_f(float_bytes, 1, 2,
+                                     psrio::SampleType::kFloat32);
     REQUIRE(ext_f.extract_sample(0, 0) == 12.5F);
     REQUIRE(ext_f.extract_sample(0, 1) == -3.25F);
 
@@ -207,7 +212,7 @@ TEST_CASE("write_sample modifies packed and unpacked samples in place",
     REQUIRE(buffer[2] == std::byte{42});
 
     // Verify round-trip with DataExtractor
-    psrio::DataExtractor ext(buffer, 1, 4, psrio::SampleType::kUInt4);
+    const psrio::DataExtractor ext(buffer, 1, 4, psrio::SampleType::kUInt4);
     REQUIRE(ext.extract_sample(0, 0) == 5.0F);
     REQUIRE(ext.extract_sample(0, 1) == 9.0F);
 }
