@@ -469,7 +469,7 @@ TEST_CASE("read_samples fswap agrees with read_block fswap",
 
 TEST_CASE("forward reads stream ahead and match direct reads",
           "[sigproc][reader][readahead]") {
-    std::vector<std::uint8_t> samples(64U * 997U);
+    std::vector<std::uint8_t> samples(std::size_t{64} * 997U);
     for (std::size_t i = 0; i < samples.size(); ++i) {
         samples[i] = static_cast<std::uint8_t>((i * 37U) % 251U);
     }
@@ -485,7 +485,7 @@ TEST_CASE("forward reads stream ahead and match direct reads",
     while (true) {
         const auto piece = streamed.read_samples<std::uint8_t>(31);
         got.insert(got.end(), piece.begin(), piece.end());
-        if (piece.size() < 31U * 64U) {
+        if (piece.size() < std::size_t{31} * 64U) {
             break;
         }
     }
@@ -494,10 +494,10 @@ TEST_CASE("forward reads stream ahead and match direct reads",
     // Backward and forward jumps after streaming.
     streamed.seek(5);
     auto part = streamed.read_samples<std::uint8_t>(10);
-    CHECK(std::equal(part.begin(), part.end(), expected.begin() + (5 * 64)));
+    CHECK(std::equal(part.begin(), part.end(), expected.begin() + 320));
     streamed.seek(900);
     part = streamed.read_samples<std::uint8_t>(97);
-    CHECK(std::equal(part.begin(), part.end(), expected.begin() + (900 * 64)));
+    CHECK(std::equal(part.begin(), part.end(), expected.begin() + 57600));
     streamed.release_buffers();
     streamed.seek(0);
     CHECK(streamed.read_samples<std::uint8_t>(997) == expected);

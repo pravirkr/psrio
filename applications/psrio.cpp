@@ -9,6 +9,7 @@
 #include <vector>
 
 #if defined(__linux__) && defined(_OPENMP)
+#include <stdlib.h> // NOLINT(modernize-deprecated-headers): POSIX setenv
 #include <unistd.h>
 #endif
 
@@ -19,7 +20,7 @@ namespace {
 /// the CPU time a batch job is charged for no gain. The runtime reads
 /// OMP_WAIT_POLICY before main(), so when the user has not chosen a policy,
 /// run again with a passive one. A failed exec leaves the defaults in place.
-void prefer_passive_openmp_threads([[maybe_unused]] char** argv) {
+void prefer_passive_openmp_threads([[maybe_unused]] char* const* argv) {
 #if defined(__linux__) && defined(_OPENMP)
     // NOLINTBEGIN(concurrency-mt-unsafe): single-threaded at this point
     if (std::getenv("OMP_WAIT_POLICY") != nullptr ||
@@ -30,6 +31,8 @@ void prefer_passive_openmp_threads([[maybe_unused]] char** argv) {
         return;
     }
     // NOLINTEND(concurrency-mt-unsafe)
+    // Re-runs this same program with its own, unchanged arguments.
+    // NOLINTNEXTLINE(clang-analyzer-optin.taint.GenericTaint)
     (void)::execv("/proc/self/exe", argv);
 #endif
 }

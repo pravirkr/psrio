@@ -6,12 +6,14 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
-#include <cstdint>
 #include <cstring>
+#include <optional>
 #include <random>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -145,7 +147,12 @@ TEST_CASE("ChannelStats matches two-pass moments across blocks", "[stats]") {
         std::memcpy(bytes.data(), data.data(), bytes.size());
         psrio::BlockSource source(psrio::MemoryBlock(info, std::move(bytes)));
         const auto stats = psrio::stats::compute(
-            source, psrio::stats::ComputeOptions{.gulp = 777});
+            source, psrio::stats::ComputeOptions{
+                        .start  = 0,
+                        .nsamps = std::nullopt,
+                        .gulp   = 777,
+                        .order  = psrio::stats::Moments::kFull,
+                    });
         check_against(stats, ref);
 
         const auto window = psrio::stats::compute(

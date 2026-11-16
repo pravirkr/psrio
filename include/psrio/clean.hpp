@@ -1,10 +1,10 @@
 #pragma once
 
-#include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
 #include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/parallel.hpp"
+#include "psrio/formats/sigproc/header.hpp"
 #include "psrio/packed.hpp"
 #include "psrio/stats.hpp"
 
@@ -84,9 +84,9 @@ inline void flag_outliers(std::span<const float> data,
                           std::vector<std::uint8_t>& mask) {
     for (std::size_t index = 0; index < data.size(); ++index) {
         const double scale = near_zero(scales[index]) ? 1.0 : scales[index];
-        const auto z       = static_cast<float>(
+        const float z =
             static_cast<float>(static_cast<double>(data[index]) - loc) /
-            static_cast<float>(scale));
+            static_cast<float>(scale);
         if (std::abs(z) > threshold) {
             mask[index] = 1;
         }
@@ -209,8 +209,9 @@ mask_iqrm(std::span<const double> values, double threshold, int radius = 5) {
     const auto skew = test(stats.skew());
     const auto kurt = test(stats.kurtosis());
     for (std::size_t index = 0; index < mask.size(); ++index) {
-        mask[index] =
-            static_cast<std::uint8_t>(mask[index] | skew[index] | kurt[index]);
+        const bool flagged =
+            mask[index] != 0U || skew[index] != 0U || kurt[index] != 0U;
+        mask[index] = flagged ? 1U : 0U;
     }
     return mask;
 }
@@ -249,7 +250,8 @@ inline void apply_mask(std::span<float> block,
     const auto ncols = mask.size();
     [[maybe_unused]] const bool wide =
         ::psrio::detail::parallel_worthwhile(nrows * masked.size());
-    PSRIO_OMP(omp parallel for schedule(static) if (wide))
+    PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                  shared(block, masked, ncols, nrows, value))
     for (std::uint64_t row = 0; row < nrows; ++row) {
         float* values = block.data() + (static_cast<std::size_t>(row) * ncols);
         for (const auto col : masked) {
@@ -291,7 +293,8 @@ public:
         const double* bandpass = m_bandpass.data();
         [[maybe_unused]] const bool wide =
             ::psrio::detail::parallel_worthwhile(nrows * ncols);
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(block, weights, bandpass, ncols, nrows))
         for (std::uint64_t row = 0; row < nrows; ++row) {
             float* values =
                 block.data() + (static_cast<std::size_t>(row) * ncols);
@@ -380,7 +383,7 @@ inline void zap_rows(std::span<float> block,
     }
     std::normal_distribution<double> gauss(0.0, 1.0);
     for (auto row = lo; row < hi; ++row) {
-        auto values = row_at(row);
+        const auto values = row_at(row);
         for (std::size_t col = 0; col < values.size(); ++col) {
             double sd = std::sqrt(var[col] / static_cast<double>(kept));
             if (sd == 0.0) {
@@ -500,12 +503,12 @@ public:
         return got;
     }
 
-    std::uint64_t read_samples(std::uint64_t /*count*/,
-                               std::span<std::uint8_t> /*dest*/) {
+    static std::uint64_t read_samples(std::uint64_t /*count*/,
+                                      std::span<std::uint8_t> /*dest*/) {
         throw ValidationError("psrio: cleaned samples unpack to float");
     }
-    std::uint64_t read_samples(std::uint64_t /*count*/,
-                               std::span<std::uint16_t> /*dest*/) {
+    static std::uint64_t read_samples(std::uint64_t /*count*/,
+                                      std::span<std::uint16_t> /*dest*/) {
         throw ValidationError("psrio: cleaned samples unpack to float");
     }
 

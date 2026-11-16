@@ -306,7 +306,9 @@ private:
             std::uint64_t* kept = m_count.data();
             const double* lower = m_lower.data();
             const double* upper = m_upper.data();
-            PSRIO_OMP(omp parallel for schedule(static) if (wide))
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(ntiles, ncols, nrows, data, sums, sumsq, clip, kept,
+                             lower, upper))
             for (std::size_t tile = 0; tile < ntiles; ++tile) {
                 const auto first = tile * kTile;
                 const auto last  = std::min(first + kTile, ncols);
@@ -326,7 +328,8 @@ private:
             }
             return;
         }
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(ntiles, ncols, nrows, data, sums, sumsq))
         for (std::size_t tile = 0; tile < ntiles; ++tile) {
             const auto first = tile * kTile;
             const auto last  = std::min(first + kTile, ncols);
@@ -387,7 +390,8 @@ private:
         float* data         = rows.data();
         const float* offset = m_offset.data();
         const float* scale  = m_scale.data();
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, ncols, data, offset, scale))
         for (std::size_t row = 0; row < nrows; ++row) {
             float* values = data + (row * ncols);
             PSRIO_OMP(omp simd)
@@ -605,7 +609,10 @@ public:
 
         const auto row_out = static_cast<std::size_t>(m_nifs_out * m_nchans);
         const auto work    = m_tscrunch.push(data, nsamp);
-        const auto nout    = work.size() / row_out;
+        if (row_out == 0U) {
+            return {};
+        }
+        const auto nout = work.size() / row_out;
         if (nout == 0U) {
             return {};
         }
@@ -629,7 +636,8 @@ private:
         [[maybe_unused]] const bool wide =
             ::psrio::detail::parallel_worthwhile(nrows * nchans);
         if (m_is_float) {
-            PSRIO_OMP(omp parallel for schedule(static) if (wide))
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, data, channel))
             for (std::size_t row = 0; row < nrows; ++row) {
                 for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
                     const float value = ::psrio::detail::to_little_endian(
@@ -648,7 +656,8 @@ private:
         if (m_nbits == 16) {
             // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
             auto* out = reinterpret_cast<std::uint16_t*>(m_bytes.data());
-            PSRIO_OMP(omp parallel for schedule(static) if (wide))
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, in, npol, digi_max, out))
             for (std::size_t row = 0; row < nrows; ++row) {
                 quantise_row(in + (row * nchans), nchans, m_flip,
                              m_pol_mean[row % npol], m_digi_scale, digi_max,
@@ -669,7 +678,8 @@ private:
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
         auto* out = packed ? m_levels.data()
                            : reinterpret_cast<std::uint8_t*>(m_bytes.data());
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, in, npol, digi_max, out))
         for (std::size_t row = 0; row < nrows; ++row) {
             quantise_row(in + (row * nchans), nchans, m_flip,
                          m_pol_mean[row % npol], m_digi_scale, digi_max,

@@ -3,11 +3,11 @@
 #include <algorithm>
 #include <charconv>
 #include <cmath>
-#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
+#include <ios>
 #include <optional>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/detail/rfile.hpp>
@@ -75,7 +75,7 @@ void set_existing(std::optional<T>& field,
             key));
     }
     change.before = show(field);
-    field         = value;
+    field         = std::move(value);
     change.after  = show(field);
 }
 
@@ -125,14 +125,20 @@ void apply(sigproc::FilterbankHeader& header,
     if (key == "telescope_id" || key == "machine_id" || key == "ibeam" ||
         key == "nbeams" || key == "nbins" || key == "npuls" ||
         key == "data_type") {
-        auto& field = key == "telescope_id" ? header.telescope_id
-                      : key == "machine_id" ? header.machine_id
-                      : key == "ibeam"      ? header.ibeam
-                      : key == "nbeams"     ? header.nbeams
-                      : key == "nbins"      ? header.nbins
-                      : key == "npuls"      ? header.npuls
-                                            : header.data_type;
-        set_existing(field, key, int32(false, true), change);
+        std::optional<std::int32_t>* field = &header.data_type;
+        for (const auto& [name, target] : {
+                 std::pair{"telescope_id", &header.telescope_id},
+                 std::pair{"machine_id", &header.machine_id},
+                 std::pair{"ibeam", &header.ibeam},
+                 std::pair{"nbeams", &header.nbeams},
+                 std::pair{"nbins", &header.nbins},
+                 std::pair{"npuls", &header.npuls},
+             }) {
+            if (key == name) {
+                field = target;
+            }
+        }
+        set_existing(*field, key, int32(false, true), change);
         return;
     }
     if (key == "barycentric" || key == "pulsarcentric") {
@@ -148,7 +154,7 @@ void apply(sigproc::FilterbankHeader& header,
     }
     if (key == "nsamples") {
         const auto number = parse_int(key, value);
-        if (number <= 0 || number > UINT32_MAX) {
+        if (number <= 0 || std::cmp_greater(number, UINT32_MAX)) {
             bad_value(key, value, "must be a positive 32-bit count");
         }
         set_existing(header.declared_nsamples, key,
@@ -156,10 +162,8 @@ void apply(sigproc::FilterbankHeader& header,
         return;
     }
     const auto number = parse_double(key, value);
-    if (key == "tsamp" || key == "tstart" || key == "fch1") {
-        if (number <= 0.0) {
-            bad_value(key, value, "must be positive");
-        }
+    if ((key == "tsamp" || key == "tstart" || key == "fch1") && number <= 0.0) {
+        bad_value(key, value, "must be positive");
     }
     if (key == "refdm" || key == "period") {
         non_negative(number);
@@ -171,16 +175,18 @@ void apply(sigproc::FilterbankHeader& header,
         bad_value(key, value, "must be within [0, 180]");
     }
     std::optional<double>* field = nullptr;
-    for (const auto& [name, target] :
-         {std::pair{"tsamp", &header.tsamp},
-          std::pair{"tstart", &header.tstart}, std::pair{"fch1", &header.fch1},
-          std::pair{"foff", &header.foff},
-          std::pair{"src_raj", &header.src_raj},
-          std::pair{"src_dej", &header.src_dej},
-          std::pair{"az_start", &header.az_start},
-          std::pair{"za_start", &header.za_start},
-          std::pair{"refdm", &header.refdm},
-          std::pair{"period", &header.period}}) {
+    for (const auto& [name, target] : {
+             std::pair{"tsamp", &header.tsamp},
+             std::pair{"tstart", &header.tstart},
+             std::pair{"fch1", &header.fch1},
+             std::pair{"foff", &header.foff},
+             std::pair{"src_raj", &header.src_raj},
+             std::pair{"src_dej", &header.src_dej},
+             std::pair{"az_start", &header.az_start},
+             std::pair{"za_start", &header.za_start},
+             std::pair{"refdm", &header.refdm},
+             std::pair{"period", &header.period},
+         }) {
         if (key == name) {
             field = target;
         }
@@ -222,7 +228,7 @@ edit_sigproc_header(const std::filesystem::path& path,
                 fmt::format("psrio: '{}' is given more than once", key));
         }
         seen.push_back(key);
-        HeaderChange change{.key = key};
+        HeaderChange change{.key = key, .before = {}, .after = {}};
         apply(header, key, value, change);
         changes.push_back(std::move(change));
     }

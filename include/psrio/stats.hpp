@@ -72,9 +72,11 @@ public:
         const auto ntiles = (m_ncols + kTile - 1U) / kTile;
         [[maybe_unused]] const bool wide =
             ::psrio::detail::parallel_worthwhile(nrows * m_ncols);
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        const bool full = m_order == Moments::kFull;
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(ntiles, full, data, nrows))
         for (std::uint64_t tile = 0; tile < ntiles; ++tile) {
-            if (m_order == Moments::kFull) {
+            if (full) {
                 push_tile<true>(data, nrows, tile * kTile);
             } else {
                 push_tile<false>(data, nrows, tile * kTile);
@@ -199,9 +201,9 @@ private:
         const auto ncols = static_cast<std::size_t>(m_ncols);
         std::array<double, kTile> shift{};
         std::array<double, kTile> s1{};
-        std::array<double, kTile> s2{};
-        std::array<double, kTile> s3{};
-        std::array<double, kTile> s4{};
+        std::array<double, kTile> s2{}; // NOLINT(misc-const-correctness)
+        std::array<double, kTile> s3{}; // NOLINT(misc-const-correctness)
+        std::array<double, kTile> s4{}; // NOLINT(misc-const-correctness)
         std::array<float, kTile> lo{};
         std::array<float, kTile> hi{};
         for (std::size_t j = 0; j < width; ++j) {
@@ -232,6 +234,7 @@ private:
         const auto n = static_cast<double>(nrows);
         for (std::size_t j = 0; j < width; ++j) {
             const double m = s1[j] / n;
+            // NOLINTNEXTLINE(misc-const-correctness): set when Full
             Block block{.mean = shift[j] + m};
             if constexpr (Full) {
                 const double m_sq = m * m;

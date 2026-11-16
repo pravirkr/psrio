@@ -20,11 +20,12 @@ All notable changes to this project will be documented in this file.
   - New `--scloffs`, `-U,--max-ram` (`Config::max_ram_mb`), `-B` (ignored)
     and `-d 1`.
   - `-o` is optional and defaults to the input stem with `.fil`.
-- On a Parkes UWL file psrio matches `spp_digifil` to within 1e-5 of output
-  bytes, all at ±1 level, for the default, `--scloffs`, `-P`, `-U` and
-  `-I 0` cases. On SIGPROC input 1-, 2- and float32-bit output is identical;
-  4-, 8- and 16-bit output differs only at .5 rounding boundaries, because
-  sigpyproc's `fastmath` kernel fuses the multiply-add.
+- A CLI built for the host CPU (`PSRIO_CLI_CPU_ARCH=native`, with FMA)
+  matches `spp_digifil` byte for byte on a Parkes UWL file (default,
+  `--scloffs`, `-P 0`) and on SIGPROC input at every bit depth. A build
+  without FMA rounds `x*scale+mean` twice, as dspsr does, and differs from
+  sigpyproc's fused kernel by one level at .5 boundaries (≤ 1e-5 of
+  bytes).
 
 ### Channel statistics
 
@@ -52,8 +53,9 @@ All notable changes to this project will be documented in this file.
     zero|gaussian|samples [--in-place]`, and `zerodm`.
   - On a 1.7 GB 8-bit UWL filterbank the `rfi` masks equal `spp_clean`'s
     (1480 channels for mad, 2242 for iqrm), and the `rfi` and `zap-channels`
-    outputs are byte-identical. psrio takes 2.8–3.2 s per command against
-    spp's 31–32 s (output to `/dev/null`).
+    outputs are byte-identical. With one thread psrio takes 6.5–9 s per
+    command (about 5 s CPU; reads bound the rest) against spp's 32–38 s
+    (output to `/dev/null`).
   - `zerodm` rounds to the nearest level where sigpyproc truncates, so about
     half the output bytes are one level higher. sigpyproc's output is biased
     by -0.5 level.
@@ -84,13 +86,17 @@ All notable changes to this project will be documented in this file.
   `-march`; CI pins `x86-64-v3`. With FMA available, `a*b+c` may fuse, so
   output can differ from earlier builds at rounding level: floats ≤ 5e-7
   relative, and quantised samples by one level in ≤ 2e-4 of samples.
+  These builds match sigpyproc's fused kernels byte for byte. A build
+  without `-march` reproduces 0.5.0's bytes.
 - On a 1.7 GB 8-bit filterbank in RAM, single-threaded: `digifil` 4.1 s →
   1.9 s, `clean rfi` 11.4 s → 2.5 s, `stats` 2.1 s → 1.3 s. The full 3-file
   UWL `digifil` reads at the BeeGFS limit (27–29 s; 27.6 s with `-j 1`).
 - `psrio dedisperse --device cpu|cuda[:N]|hip[:N]` runs dmt on a GPU
   through its API; psrio has no GPU code. `PSRIO_DMT_GPU`
-  (`AUTO`/`CUDA`/`HIP`/`OFF`) picks dmt's backend, and a GPU need not be
-  present at build time.
+  (`AUTO`/`CUDA`/`HIP`/`OFF`) picks dmt's backend. Without a visible GPU
+  at build time, set `DMT_CUDA_ARCHITECTURES` (dmt's `native` falls back to
+  sm_52). Verified to build and to reach the CUDA runtime; not yet run on a
+  GPU.
 
 ### Earlier unreleased work
 
@@ -124,7 +130,7 @@ Fixes and performance work from validation on Parkes UWL search-mode data
   count. Measured on BeeGFS with 8 cores (cold cache; run-to-run spread is
   large): full 3-file `psrio digifil -b 8` 258 s → 27–39 s; reading a 9.3 GB
   8-bit `.fil` 55 s → 9 s. Outputs are byte-identical to 0.5.0 at 1, 3 and 8
-  threads.
+  threads (in a build without `-march`; see above).
 - **`digifil::Source`**: digifil as an in-memory `BlockReader` over any
   `BlockSource` (including a multi-file PSRFITS stream), so a pipeline can
   read 8-bit redigitised data without writing a `.fil`. It reads the next

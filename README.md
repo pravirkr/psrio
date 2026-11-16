@@ -345,7 +345,7 @@ Built with `-DPSRIO_BUILD_APPLICATIONS=ON`. Every command takes one or more `.fi
 | `clean rfi/zap-channels/zap-times/zerodm` | `spp_clean` |
 | `dedisperse` (`--device cpu\|cuda[:N]`, needs dmt) | `spp_dedisperse` |
 
-CLI build options: `PSRIO_CLI_CPU_ARCH` (`-march`, default `native`; use e.g. `x86-64-v3` for binaries that move between machines), `PSRIO_CLI_WITH_DMT` (dedisperse), and `PSRIO_DMT_GPU` (`AUTO`, `CUDA`, `HIP`, `OFF`: dmt's GPU backend for `dedisperse --device`).
+CLI build options: `PSRIO_CLI_CPU_ARCH` (`-march`, default `native`; use e.g. `x86-64-v3` for binaries that move between machines), `PSRIO_CLI_WITH_DMT` (dedisperse), and `PSRIO_DMT_GPU` (`AUTO`, `CUDA`, `HIP`, `OFF`: dmt's GPU backend for `dedisperse --device`). When building without a visible GPU, also pass `-DDMT_CUDA_ARCHITECTURES=<compute capability>` (e.g. `89` for an L40); dmt's default `native` falls back to sm_52.
 
 ---
 

@@ -22,7 +22,10 @@ endif()
 # builds without dmt and has no dedisperse command.
 # PSRIO_DMT_GPU picks dmt's GPU backend for `psrio dedisperse --device`:
 # AUTO (CUDA when nvcc is found, else HIP when ROCm is found), CUDA, HIP, or
-# OFF. A GPU need not be present at build time.
+# OFF. dmt's check for a visible GPU is skipped, but its CUDA architectures
+# default to "native", which falls back to sm_52 when no GPU is visible (for
+# example inside a CPU-only batch job): pass -DDMT_CUDA_ARCHITECTURES=89 (L40)
+# or the target GPU's compute capability when building without one.
 set(PSRIO_DMT_GPU
     "AUTO"
     CACHE STRING "dmt GPU backend for psrio dedisperse: AUTO, CUDA, HIP, or OFF"

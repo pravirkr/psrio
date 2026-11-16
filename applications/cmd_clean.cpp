@@ -1,8 +1,10 @@
 #include "common.hpp"
 
 #include <CLI/CLI.hpp>
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <filesystem>
 #include <fmt/format.h>
 #include <fstream>
@@ -13,12 +15,14 @@
 #include <psrio/clean.hpp>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/detail/float_blocks.hpp>
+#include <psrio/formats/sigproc/header.hpp>
 #include <psrio/stats.hpp>
 #include <random>
 #include <span>
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 namespace psrio::cli {
@@ -53,8 +57,7 @@ std::filesystem::path output_path(const CleanOptions& opts,
     if (!opts.output.empty()) {
         return opts.output;
     }
-    return std::filesystem::path(opts.inputs.front().stem().string() +
-                                 std::string(suffix) + ".fil");
+    return {opts.inputs.front().stem().string() + std::string(suffix) + ".fil"};
 }
 
 Input open_filterbank(const CleanOptions& opts) {
@@ -167,13 +170,15 @@ std::size_t count_masked(std::span<const std::uint8_t> mask) {
 void run_rfi(const CleanOptions& opts, const Context& ctx) {
     const auto output = output_path(opts, "_masked");
     require_distinct(opts.inputs, output);
-    auto input        = open_filterbank(opts);
-    auto& block       = input.block();
-    const auto result = stats::compute(
-        block, stats::ComputeOptions{.start  = 0,
-                                     .nsamps = opts.stats_samples,
-                                     .gulp   = opts.gulp,
-                                     .order  = stats::Moments::kFull});
+    auto input  = open_filterbank(opts);
+    auto& block = input.block();
+    const auto result =
+        stats::compute(block, stats::ComputeOptions{
+                                  .start  = 0,
+                                  .nsamps = opts.stats_samples,
+                                  .gulp   = opts.gulp,
+                                  .order  = stats::Moments::kFull,
+                              });
     const auto method =
         opts.method == "iqrm" ? clean::Method::kIqrm : clean::Method::kMad;
     auto mask         = clean::channel_mask(result, method, opts.threshold);
@@ -187,8 +192,11 @@ void run_rfi(const CleanOptions& opts, const Context& ctx) {
                         channel_frequencies(input.header()));
     }
     BlockSource cleaned(
-        clean::Source(block, clean::Steps{.mask = std::move(mask),
-                                          .fill = static_cast<float>(fill)}));
+        clean::Source(block, clean::Steps{
+                                 .mask            = std::move(mask),
+                                 .fill            = static_cast<float>(fill),
+                                 .zerodm_bandpass = std::nullopt,
+                             }));
     const auto written =
         write_stream(cleaned, input.header(), output, opts.gulp);
     ctx.info("psrio clean rfi: masked {} of {} channels ({:.1f}%) from {} "
@@ -223,9 +231,12 @@ void run_zap_channels(const CleanOptions& opts, const Context& ctx) {
         mask[static_cast<std::size_t>(chan)] = 1;
     }
     const auto masked = count_masked(mask);
-    BlockSource cleaned(clean::Source(
-        block, clean::Steps{.mask = std::move(mask),
-                            .fill = static_cast<float>(opts.fill)}));
+    BlockSource cleaned(
+        clean::Source(block, clean::Steps{
+                                 .mask = std::move(mask),
+                                 .fill = static_cast<float>(opts.fill),
+                                 .zerodm_bandpass = std::nullopt,
+                             }));
     const auto written =
         write_stream(cleaned, input.header(), output, opts.gulp);
     ctx.info("psrio clean zap-channels: zeroed {} channels; wrote {} samples "
@@ -237,19 +248,23 @@ void run_zap_channels(const CleanOptions& opts, const Context& ctx) {
 void run_zerodm(const CleanOptions& opts, const Context& ctx) {
     const auto output = output_path(opts, "_noZeroDM");
     require_distinct(opts.inputs, output);
-    auto input        = open_filterbank(opts);
-    auto& block       = input.block();
-    const auto result = stats::compute(
-        block, stats::ComputeOptions{.start  = 0,
-                                     .nsamps = std::nullopt,
-                                     .gulp   = opts.gulp,
-                                     .order  = stats::Moments::kMean});
+    auto input  = open_filterbank(opts);
+    auto& block = input.block();
+    const auto result =
+        stats::compute(block, stats::ComputeOptions{
+                                  .start  = 0,
+                                  .nsamps = std::nullopt,
+                                  .gulp   = opts.gulp,
+                                  .order  = stats::Moments::kMean,
+                              });
     const auto mean = result.mean();
     BlockSource cleaned(clean::Source(
-        block, clean::Steps{.mask            = {},
-                            .fill            = 0.0F,
-                            .zerodm_bandpass = std::vector<double>(
-                                mean.begin(), mean.end())}));
+        block,
+        clean::Steps{
+            .mask            = {},
+            .fill            = 0.0F,
+            .zerodm_bandpass = std::vector<double>(mean.begin(), mean.end()),
+        }));
     const auto written =
         write_stream(cleaned, input.header(), output, opts.gulp);
     ctx.info("psrio clean zerodm: wrote {} samples to {}", written,
@@ -309,7 +324,7 @@ void run_zap_times(const CleanOptions& opts, const Context& ctx) {
     }
     if (opts.in_place) {
         std::filesystem::rename(output, final_path);
-        output = final_path;
+        output = std::move(final_path);
     }
     ctx.info("psrio clean zap-times: replaced samples [{}, {}) with {}; "
              "wrote {} samples to {}",

@@ -333,7 +333,8 @@ private:
             if constexpr (concepts::HasRefdm<R>) {
                 return m_reader.refdm();
             } else if constexpr (concepts::HasSigprocHeader<R>) {
-                return sigproc_header()->refdm;
+                const auto header = sigproc_header();
+                return header.has_value() ? header->refdm : std::nullopt;
             } else {
                 return std::nullopt;
             }

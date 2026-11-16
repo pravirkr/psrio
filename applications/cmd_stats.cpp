@@ -32,11 +32,12 @@ read_stats(Input& input, const StatsOptions& opts, stats::Moments order) {
         throw ValidationError(
             "psrio: channel statistics need a filterbank, not a time series");
     }
-    return stats::compute(input.block(),
-                          stats::ComputeOptions{.start  = opts.start,
-                                                .nsamps = opts.nsamps,
-                                                .gulp   = opts.gulp,
-                                                .order  = order});
+    return stats::compute(input.block(), stats::ComputeOptions{
+                                             .start  = opts.start,
+                                             .nsamps = opts.nsamps,
+                                             .gulp   = opts.gulp,
+                                             .order  = order,
+                                         });
 }
 
 /// Frequency of column @p col (IF-major, channels in file order).

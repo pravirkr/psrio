@@ -797,14 +797,14 @@ FilterbankHeader::read(const ::psrio::detail::ReadFile& file) {
 }
 
 inline FilterbankHeader
-FilterbankHeader::parse_prefix(std::span<const std::byte> file,
+FilterbankHeader::parse_prefix(std::span<const std::byte> prefix,
                                std::uint64_t file_bytes,
                                std::string_view path) {
-    if (file.empty()) {
-        throw FormatError(detail::error_at(path, 0, "file is empty"));
+    if (prefix.empty()) {
+        throw FormatError(detail::error_at(path, 0, "prefix is empty"));
     }
 
-    detail::ByteCursor cursor(file, path);
+    detail::ByteCursor cursor(prefix, path);
     const std::string magic = cursor.read_string();
     if (magic != "HEADER_START") {
         throw FormatError(detail::error_at(path, 0, "missing HEADER_START"));
@@ -830,10 +830,10 @@ FilterbankHeader::parse_prefix(std::span<const std::byte> file,
     }
 
     header.header_bytes = cursor.position();
-    header.file_bytes   = std::max<std::uint64_t>(file_bytes, file.size());
+    header.file_bytes   = std::max<std::uint64_t>(file_bytes, prefix.size());
     if (header.header_bytes > header.file_bytes) {
-        throw FormatError(detail::error_at(path, header.header_bytes,
-                                           "header extends past end of file"));
+        throw FormatError(detail::error_at(
+            path, header.header_bytes, "header extends past end of prefix"));
     }
     header.data_bytes = header.file_bytes - header.header_bytes;
     header.note_sample_count();

@@ -58,7 +58,7 @@ public:
 
     ~ReadAhead() {
         {
-            const std::lock_guard lock(m_mutex);
+            const std::scoped_lock lock(m_mutex);
             m_stop = true;
         }
         m_wake.notify_all();
@@ -140,13 +140,13 @@ private:
                 m_file.read_at(at, buffer);
                 m_file.release(at, stop - at);
             } catch (...) {
-                const std::lock_guard lock(m_mutex);
+                const std::scoped_lock lock(m_mutex);
                 m_error = std::current_exception();
                 m_ready_cv.notify_all();
                 return;
             }
             {
-                const std::lock_guard lock(m_mutex);
+                const std::scoped_lock lock(m_mutex);
                 m_ready.push_back(
                     Block{.offset = at, .bytes = std::move(buffer)});
                 m_next = stop;

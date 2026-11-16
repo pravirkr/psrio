@@ -594,6 +594,7 @@ TEST_CASE("SearchFile reads the same samples with and without read-ahead",
     geo.nsblk = 64;
     geo.nsub  = 6;
     std::vector<double> freqs;
+    freqs.reserve(static_cast<std::size_t>(geo.nchan));
     for (int chan = 0; chan < geo.nchan; ++chan) {
         freqs.push_back(100.0 + (0.5 * chan));
     }
@@ -601,7 +602,8 @@ TEST_CASE("SearchFile reads the same samples with and without read-ahead",
     const std::vector<float> offsets(32, 0.5F);
     std::vector<std::byte> table;
     for (int row = 0; row < geo.nsub; ++row) {
-        const std::vector<float> scales(32, 1.0F + (0.25F * row));
+        const std::vector<float> scales(
+            32, 1.0F + (0.25F * static_cast<float>(row)));
         push_row_prefix(table, geo, freqs, weights, offsets, scales,
                         geo.nsblk * geo.tbin,
                         (row + 0.5) * geo.nsblk * geo.tbin);
@@ -707,7 +709,8 @@ TEST_CASE("SearchFile decode options select products and calibration",
     file.write(path.path());
 
     const auto calibrated = [&](int row, int samp, int pol, int chan) {
-        const auto index = static_cast<std::size_t>((pol * 4) + chan);
+        const auto index = (static_cast<std::size_t>(pol) * 4U) +
+                           static_cast<std::size_t>(chan);
         return ((static_cast<float>(raw(row, samp, pol, chan)) - 10.0F) *
                 scales[index]) +
                offsets[index];

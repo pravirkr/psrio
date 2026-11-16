@@ -179,7 +179,8 @@ inline void quantise_unsigned(std::span<const float> values,
     const float* in  = values.data();
     [[maybe_unused]] const bool wide =
         ::psrio::detail::parallel_worthwhile(count);
-    PSRIO_OMP(omp parallel for simd schedule(static) if (wide))
+    PSRIO_OMP(omp parallel for simd default(none) schedule(static)
+                      if (wide) shared(count, in, out, lo, hi, wide))
     for (std::size_t index = 0; index < count; ++index) {
         // Comparisons, not std::fmin/fmax (library calls that block
         // vectorisation); NaN fails >= and maps to lo.

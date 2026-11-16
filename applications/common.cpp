@@ -28,7 +28,9 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#ifndef _OPENMP
 #include <thread>
+#endif
 #include <utility>
 #include <variant>
 #include <vector>

@@ -688,8 +688,14 @@ inline void SearchFile::load_geometry() {
     {
         std::uint64_t first = std::numeric_limits<std::uint64_t>::max();
         std::uint64_t last  = 0;
-        for (const auto* name : {"TSUBINT", "OFFS_SUB", "DAT_FREQ", "DAT_WTS",
-                                 "DAT_OFFS", "DAT_SCL"}) {
+        for (const auto* name : {
+                 "TSUBINT",
+                 "OFFS_SUB",
+                 "DAT_FREQ",
+                 "DAT_WTS",
+                 "DAT_OFFS",
+                 "DAT_SCL",
+             }) {
             const auto* column = detail::find_column(m_table, name);
             if (column == nullptr || column->heap) {
                 continue;
@@ -1045,6 +1051,7 @@ inline void SearchFile::decode_u8(const std::byte* cell,
     };
     PSRIO_OMP(omp simd)
     for (std::size_t chan = 0; chan < nchan; ++chan) {
+        // NOLINTNEXTLINE(misc-const-correctness): summed when Sum
         float value = ((as_float(raw0[chan]) - zero) * scl0[chan]) + off0[chan];
         if constexpr (Sum) {
             value += ((as_float(raw1[chan]) - zero) * scl1[chan]) + off1[chan];
@@ -1070,6 +1077,7 @@ inline void SearchFile::decode_i16(const std::byte* cell,
     for (std::size_t chan = 0; chan < nchan; ++chan) {
         const auto first = static_cast<float>(
             detail::load_be<std::int16_t>(base0 + (chan * 2U)));
+        // NOLINTNEXTLINE(misc-const-correctness): summed when Sum
         float value = (first * scl0[chan]) + off0[chan];
         if constexpr (Sum) {
             const auto second = static_cast<float>(
@@ -1165,9 +1173,11 @@ inline detail::CellRange SearchFile::data_range(std::uint64_t isub) {
 inline SearchFile::Staged SearchFile::stage(std::uint64_t isub,
                                             std::uint64_t isamp) {
     if (m_stage_row == isub && isamp >= m_stage_first && isamp < m_stage_last) {
-        return Staged{.cell  = m_stage.data(),
-                      .first = m_stage_first,
-                      .last  = m_stage_last};
+        return Staged{
+            .cell  = m_stage.data(),
+            .first = m_stage_first,
+            .last  = m_stage_last,
+        };
     }
     // A read that starts where the staged run ends is part of a forward
     // stream; only then does the rest of the file stream ahead.
@@ -1213,7 +1223,10 @@ inline SearchFile::Staged SearchFile::stage(std::uint64_t isub,
     m_stage_last  = last;
     m_stage_range = range;
     return Staged{
-        .cell = m_stage.data(), .first = m_stage_first, .last = m_stage_last};
+        .cell  = m_stage.data(),
+        .first = m_stage_first,
+        .last  = m_stage_last,
+    };
 }
 
 inline void SearchFile::start_read_ahead(std::uint64_t offset) {
@@ -1251,12 +1264,14 @@ inline void SearchFile::decode_run(const std::byte* cell,
     // Samples decode independently into disjoint rows of dest.
     [[maybe_unused]] const bool wide =
         ::psrio::detail::parallel_worthwhile(count * m_nchan);
-    const auto run = [&](auto&& decode) {
-        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+    const auto nchan = static_cast<std::size_t>(m_nchan);
+    const auto run   = [&](auto&& decode) {
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(count, decode, cell, isamp, dest, nchan))
         for (std::uint64_t index = 0; index < count; ++index) {
-            decode(cell, isamp + index,
-                   dest.subspan(static_cast<std::size_t>(index * m_nchan),
-                                static_cast<std::size_t>(m_nchan)));
+            decode(
+                cell, isamp + index,
+                dest.subspan(static_cast<std::size_t>(index) * nchan, nchan));
         }
     };
     if (m_input_nbits == 8 && m_layout.fast) {

@@ -366,14 +366,41 @@ TEST_CASE("psrio digifil matches the library pipeline", "[cli][digifil]") {
     CHECK(FilterbankReader(dir / "d.fil").nchans() == 16U);
 }
 
+TEST_CASE("psrio clean zap-times replaces a sample range", "[cli][clean]") {
+    const TempDir dir;
+    require_ok(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "10",
+                          "-e", "20", "-o", dir / "z.fil"}));
+    const auto row      = FilterbankReader(kTutorial).nchans();
+    const auto original = FilterbankReader(kTutorial).read_samples<float>(30);
+    const auto zapped = FilterbankReader(dir / "z.fil").read_samples<float>(30);
+    for (std::size_t index = 0; index < original.size(); ++index) {
+        const auto sample = index / row;
+        if (sample >= 10U && sample < 20U) {
+            CHECK(zapped[index] == 0.0F);
+        } else {
+            CHECK(zapped[index] == original[index]);
+        }
+    }
+
+    const auto copy = dir.path() / "copy.fil";
+    fs::copy_file(kTutorial, copy);
+    require_ok(psrio_run({"clean", "zap-times", copy.string(), "-s", "10", "-e",
+                          "20", "--in-place"}));
+    CHECK(read_payload(copy) == read_payload(dir / "z.fil"));
+    CHECK(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "20", "-e",
+                     "10", "-o", dir / "bad.fil"})
+              .code != 0);
+}
+
 TEST_CASE("psrio header --set edits SIGPROC keys in place", "[cli][header]") {
     const TempDir dir;
     const auto copy = dir.path() / "edit.fil";
     fs::copy_file(kTutorial, copy);
     const auto before = read_payload(copy);
 
-    auto result = psrio_run({"header", copy.string(), "--set", "tstart=55000.5",
-                             "--set", "source_name=J1234", "--dry-run"});
+    const auto result =
+        psrio_run({"header", copy.string(), "--set", "tstart=55000.5", "--set",
+                   "source_name=J1234", "--dry-run"});
     require_ok(result);
     CHECK(result.out.find("tstart: 50000 -> 55000.5") != std::string::npos);
     CHECK(FilterbankReader(copy).header().tstart == 50000.0);

@@ -10,8 +10,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <optional>
 #include <random>
 #include <span>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -106,7 +108,7 @@ TEST_CASE("ZeroDm removes the bandpass-weighted channel sum", "[clean]") {
 
 TEST_CASE("zap_rows replaces a sample range", "[clean]") {
     std::mt19937_64 rng(11);
-    std::vector<float> block(10 * 3);
+    std::vector<float> block(30);
     for (std::size_t index = 0; index < block.size(); ++index) {
         block[index] = static_cast<float>(index);
     }
@@ -147,8 +149,11 @@ TEST_CASE("clean::Source masks, removes zero-DM, and reverses channels",
         data[index] = static_cast<float>(index % 13);
     }
     auto input = memory_source(data, kCols);
-    psrio::clean::Source cleaned(
-        input, psrio::clean::Steps{.mask = {0, 1, 0, 0}, .fill = 7.5F});
+    psrio::clean::Source cleaned(input, psrio::clean::Steps{
+                                            .mask            = {0, 1, 0, 0},
+                                            .fill            = 7.5F,
+                                            .zerodm_bandpass = std::nullopt,
+                                        });
     CHECK(cleaned.nbits() == 32);
     CHECK(cleaned.sigproc_header().nbits == 32);
     auto got = std::vector<float>(kRows * kCols);
@@ -165,7 +170,11 @@ TEST_CASE("clean::Source masks, removes zero-DM, and reverses channels",
     CHECK(reversed[2] == 7.5F);
     CHECK(reversed[3] == data[0]);
 
-    CHECK_THROWS_AS(
-        psrio::clean::Source(input, psrio::clean::Steps{.mask = {1, 0}}),
-        psrio::ValidationError);
+    CHECK_THROWS_AS(psrio::clean::Source(input,
+                                         psrio::clean::Steps{
+                                             .mask            = {1, 0},
+                                             .fill            = 0.0F,
+                                             .zerodm_bandpass = std::nullopt,
+                                         }),
+                    psrio::ValidationError);
 }
