@@ -50,6 +50,7 @@ int run(std::span<const std::string> args,
     add_convert(app, ctx);
     add_digifil(app, ctx);
     add_stats(app, ctx);
+    add_clean(app, ctx);
 #ifdef PSRIO_CLI_HAS_DMT
     add_dedisperse(app, ctx);
 #endif

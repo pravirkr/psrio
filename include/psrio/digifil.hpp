@@ -721,28 +721,7 @@ default_gulp(const BlockSource& source,
 /// it has one, else from its metadata getters.
 [[nodiscard]] inline formats::sigproc::FilterbankHeader
 header_of(const BlockSource& source) {
-    if (auto header = source.sigproc_header()) {
-        return *std::move(header);
-    }
-    formats::sigproc::FilterbankHeader header;
-    header.nchans    = static_cast<std::int32_t>(source.nchans());
-    header.nifs      = static_cast<std::int32_t>(source.nifs());
-    header.nbits     = source.nbits();
-    header.tsamp     = source.tsamp();
-    header.tstart    = source.tstart();
-    header.fch1      = source.fch1();
-    header.foff      = source.foff();
-    header.data_type = 1;
-    header.src_raj   = source.raj();
-    header.src_dej   = source.dej();
-    header.ibeam     = source.beam();
-    header.refdm     = source.refdm();
-    if (const auto name = source.source_name(); !name.empty()) {
-        header.source_name = std::string(name);
-    }
-    header.telescope_id =
-        formats::sigproc::telescope_id_from_name(source.telescope());
-    return header;
+    return sigproc_header_of(source);
 }
 
 /**

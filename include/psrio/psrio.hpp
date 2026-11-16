@@ -6,6 +6,7 @@
 #include "psrio/astro.hpp"             // IWYU pragma: export
 #include "psrio/baseband.hpp"          // IWYU pragma: export
 #include "psrio/block_source.hpp"      // IWYU pragma: export
+#include "psrio/clean.hpp"             // IWYU pragma: export
 #include "psrio/common/concepts.hpp"   // IWYU pragma: export
 #include "psrio/common/types.hpp"      // IWYU pragma: export
 #include "psrio/detail/exceptions.hpp" // IWYU pragma: export

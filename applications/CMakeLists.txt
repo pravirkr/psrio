@@ -53,6 +53,8 @@ add_library(
   cmd_convert.cpp
   cmd_digifil.cpp
   cmd_stats.cpp
+  cmd_clean.cpp
+  header_edit.cpp
 )
 target_include_directories(psrio_cli_commands PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(

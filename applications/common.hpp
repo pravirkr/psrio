@@ -231,6 +231,24 @@ void add_threads_option(CLI::App& sub);
 /// HTCondor), else the hardware thread count.
 [[nodiscard]] int default_threads();
 
+/// One key changed by edit_sigproc_header().
+struct HeaderChange {
+    std::string key;
+    std::string before;
+    std::string after;
+};
+
+/// Set SIGPROC header keys of @p path in place from `key=value`
+/// @p assignments, as `spp_header update`: all or nothing, the header size
+/// never changes (a shorter string is padded with spaces, a longer one is
+/// refused), keys absent from the file cannot be added, and nbits, nchans,
+/// and nifs cannot change. With @p dry_run the file is left alone.
+/// @throws ValidationError if any assignment cannot be made.
+std::vector<HeaderChange>
+edit_sigproc_header(const std::filesystem::path& path,
+                    std::span<const std::string> assignments,
+                    bool dry_run);
+
 /// Register each subcommand on @p app.
 void add_inspect(CLI::App& app, Context& ctx);
 void add_slice(CLI::App& app, Context& ctx);
@@ -239,6 +257,7 @@ void add_decimate(CLI::App& app, Context& ctx);
 void add_convert(CLI::App& app, Context& ctx);
 void add_digifil(CLI::App& app, Context& ctx);
 void add_stats(CLI::App& app, Context& ctx);
+void add_clean(CLI::App& app, Context& ctx);
 void add_dedisperse(CLI::App& app, Context& ctx);
 
 } // namespace psrio::cli

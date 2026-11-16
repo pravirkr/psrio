@@ -40,6 +40,37 @@ All notable changes to this project will be documented in this file.
   to 2e-7 (kurtosis 4e-5). `bandpass` matches the float64 channel means;
   `spp_bandpass` sums in float32 and is off by up to 0.49 (0.4%).
 
+### RFI cleaning and header edits
+
+- `psrio clean` (`spp_clean` parity):
+  - `rfi -m mad|iqrm -t 3`: masks channels whose variance, skewness, or
+    kurtosis is an outlier across channels, and fills them with the median
+    channel mean. `--mask-out` writes the masked channel list,
+    `--stats-out` writes the statistics, and `--stats-samples N` estimates
+    them from the first N samples.
+  - `zap-channels -c 1,2 | --mask-file`, `zap-times -s -e -m
+    zero|gaussian|samples [--in-place]`, and `zerodm`.
+  - On a 1.7 GB 8-bit UWL filterbank the `rfi` masks equal `spp_clean`'s
+    (1480 channels for mad, 2242 for iqrm), and the `rfi` and `zap-channels`
+    outputs are byte-identical. psrio takes 2.8–3.2 s per command against
+    spp's 31–32 s (output to `/dev/null`).
+  - `zerodm` rounds to the nearest level where sigpyproc truncates, so about
+    half the output bytes are one level higher. sigpyproc's output is biased
+    by -0.5 level.
+- Library `psrio/clean.hpp`:
+  - `mask_doublemad`, `mask_iqrm`, `channel_mask`, `fill_value`,
+    `apply_mask`, `ZeroDm`, and `zap_rows`.
+  - `clean::Source`, a float32 `BlockReader` that masks and removes zero-DM
+    while reading, so it can feed `digifil::Source` with no intermediate
+    file.
+- `psrio header FILE --set key=value ... [--dry-run]` edits SIGPROC keys in
+  place, as `spp_header update`:
+  - It is all or nothing, and the header size never changes. A shorter
+    string is padded with spaces.
+  - Absent keys and `nbits`/`nchans`/`nifs` are refused.
+  - `-k` still prints one key.
+- `psrio::sigproc_header_of(BlockSource)` (shared by digifil and clean).
+
 ### Earlier unreleased work
 
 Fixes and performance work from validation on Parkes UWL search-mode data

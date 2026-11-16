@@ -366,6 +366,42 @@ TEST_CASE("psrio digifil matches the library pipeline", "[cli][digifil]") {
     CHECK(FilterbankReader(dir / "d.fil").nchans() == 16U);
 }
 
+TEST_CASE("psrio header --set edits SIGPROC keys in place", "[cli][header]") {
+    const TempDir dir;
+    const auto copy = dir.path() / "edit.fil";
+    fs::copy_file(kTutorial, copy);
+    const auto before = read_payload(copy);
+
+    auto result = psrio_run({"header", copy.string(), "--set", "tstart=55000.5",
+                             "--set", "source_name=J1234", "--dry-run"});
+    require_ok(result);
+    CHECK(result.out.find("tstart: 50000 -> 55000.5") != std::string::npos);
+    CHECK(FilterbankReader(copy).header().tstart == 50000.0);
+
+    require_ok(
+        psrio_run({"header", copy.string(), "--set", "tstart=55000.5", "--set",
+                   "source_name=J1234", "--set", "machine_id=5"}));
+    const auto header = FilterbankReader(copy).header();
+    CHECK(header.tstart == 55000.5);
+    REQUIRE(header.source_name.has_value());
+    CHECK(header.source_name->starts_with("J1234 "));
+    CHECK(header.source_name->size() ==
+          FilterbankReader(kTutorial).header().source_name->size());
+    CHECK(fs::file_size(copy) == fs::file_size(kTutorial));
+    CHECK(read_payload(copy) == before);
+
+    // Refused edits leave the file as it was.
+    const std::vector<std::string> refused{
+        "nbits=8", "tsamp=-1", "unknown=1", "refdm=4",
+        "source_name=" + std::string(80, 'x')};
+    for (const auto& bad : refused) {
+        INFO(bad);
+        const auto refusal = psrio_run({"header", copy.string(), "--set", bad});
+        CHECK(refusal.code != 0);
+    }
+    CHECK(FilterbankReader(copy).header().tstart == 55000.5);
+}
+
 TEST_CASE("psrio digifil takes dspsr's block and output options",
           "[cli][digifil]") {
     const TempDir dir;

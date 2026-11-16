@@ -18,6 +18,7 @@
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/formats/dada.hpp>
 #include <psrio/formats/guppi.hpp>
+#include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/header.hpp>
 #include <string>
@@ -33,6 +34,8 @@ struct InspectOptions {
     std::vector<std::filesystem::path> inputs;
     std::string key;
     bool stats{false};
+    std::vector<std::string> set;
+    bool dry_run{false};
     std::uint64_t stats_samples{4096};
     bool json{false};
 };
@@ -438,7 +441,28 @@ void print_json(const Context& ctx, const Fields& fields) {
     ctx.out << "}\n";
 }
 
+void run_edit(const InspectOptions& opts, const Context& ctx) {
+    if (opts.inputs.size() != 1U || is_series_path(opts.inputs.front()) ||
+        formats::psrfits::is_search_path(opts.inputs.front())) {
+        throw ValidationError(
+            "psrio: --set edits the header of one SIGPROC .fil file");
+    }
+    const auto changes =
+        edit_sigproc_header(opts.inputs.front(), opts.set, opts.dry_run);
+    for (const auto& change : changes) {
+        ctx.out << fmt::format("{}: {} -> {}\n", change.key, change.before,
+                               change.after);
+    }
+    ctx.info("psrio header: {} {} key(s) of {}",
+             opts.dry_run ? "would update" : "updated", changes.size(),
+             opts.inputs.front().string());
+}
+
 void run_inspect(const InspectOptions& opts, const Context& ctx) {
+    if (!opts.set.empty()) {
+        run_edit(opts, ctx);
+        return;
+    }
     const auto fields = collect(opts);
     if (opts.key.empty()) {
         if (opts.json) {
@@ -492,8 +516,17 @@ void add_inspect(CLI::App& app, Context& ctx) {
                     "Time samples used by --stats")
         ->capture_default_str()
         ->check(CLI::PositiveNumber);
-    sub->add_flag("--json", opts->json, "Print the header as JSON")
-        ->excludes("--key");
+    auto* json = sub->add_flag("--json", opts->json, "Print the header as JSON")
+                     ->excludes("--key");
+    auto* set =
+        sub->add_option("--set", opts->set,
+                        "Change a SIGPROC header key in place, as KEY=VALUE "
+                        "(repeatable; the header size cannot change)")
+            ->excludes("--key")
+            ->excludes(json);
+    sub->add_flag("--dry-run", opts->dry_run,
+                  "With --set, show the changes without writing")
+        ->needs(set);
     sub->callback([opts, &ctx] { run_inspect(*opts, ctx); });
 }
 
