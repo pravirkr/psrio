@@ -7,9 +7,9 @@ A high-performance, header-only C++20 library for reading, parsing, and streamin
 ## Key Features
 
 - **Pure Header-Only C++20**: Zero compiled library binaries. Simply link `psrio::psrio` and `#include <psrio/psrio.hpp>`.
-- **Zero-Copy & Zero-Allocation**: Direct memory-mapped access (`mmap`) to file payloads. Readers unpack directly into caller-managed buffers (`std::span<float>`, pinned CUDA host memory, etc.) without intermediate heap allocations.
+- **Fast streaming on parallel file systems**: SIGPROC and search-mode PSRFITS readers read with `pread` and, once reads run forward, stream the rest of the file on a background thread in large aligned blocks (BeeGFS: ~1.1–1.4 GB/s, against ~0.17 GB/s through a memory mapping). Memory stays flat whatever the file size. Readers unpack directly into caller-managed buffers (`std::span<float>`, pinned CUDA host memory, etc.); `view_bytes()` still offers a zero-copy mapped view. Hot loops use OpenMP when the consumer builds with it (`-fopenmp`), and give the same results on any thread count.
 - **Unified Metadata Representation**: A single flat, idiomatic [`psrio::Header`](include/psrio/header.hpp) struct.
-- **One Header-Only Dependency**: Base formats require the ISO C++ standard library, POSIX system APIs (`<sys/mman.h>`), and [fmt](https://github.com/fmtlib/fmt) 12.1 or newer. A build fetches fmt 12.1.0 with CPM unless `fmt::fmt-header-only` already exists. An installed psrio does not ship fmt. FBH5 and PSRDADA are optional and stay out of `psrio.hpp` unless `PSRIO_WITH_HDF5` or `PSRIO_WITH_PSRDADA` is turned on.
+- **One Header-Only Dependency**: Base formats require the ISO C++ standard library, POSIX system APIs (`pread`, `<sys/mman.h>`), threads, and [fmt](https://github.com/fmtlib/fmt) 12.1 or newer. A build fetches fmt 12.1.0 with CPM unless `fmt::fmt-header-only` already exists. An installed psrio does not ship fmt. FBH5 and PSRDADA are optional and stay out of `psrio.hpp` unless `PSRIO_WITH_HDF5` or `PSRIO_WITH_PSRDADA` is turned on.
 - **Block streaming**: `psrio::concepts::BlockReader` and the move-only `psrio::BlockSource` read packed bytes (`read_block`) or unpacked floats (`read_samples`), and move the sample cursor with `seek`, `rewind`, and `skip`.
 
 ---
@@ -214,7 +214,31 @@ int main() {
 }
 ```
 
-### 5. GUPPI RAW bytes
+### 5. Redigitise in memory (`digifil::Source`)
+
+`digifil::Source` runs dspsr's `digifil` (rescale and 8-bit digitisation, optional `tscrunch`/`fscrunch`) as samples are read, over any `BlockSource`, including several contiguous PSRFITS files. It is itself a `BlockReader`, so no intermediate `.fil` is written. `header()` is the SIGPROC header `digifil` would write, and `refdm()` keeps the coherent DM (`CHAN_DM`).
+
+```cpp
+#include <psrio/psrio.hpp>
+
+#include <filesystem>
+#include <vector>
+
+int main() {
+    const std::vector<std::filesystem::path> files{"obs_0001.sf", "obs_0002.sf"};
+    psrio::digifil::Config config; // 8 bits, 10 s rescale interval
+    config.rescale_clip = 3.5;     // optional: robust to bursts of RFI
+    psrio::digifil::Source stream(psrio::open_block_source(files), config);
+
+    std::vector<std::uint8_t> block(4096 * stream.nchans());
+    while (stream.read_samples(4096, std::span<std::uint8_t>(block)) > 0) {
+        // channels descend in frequency; stream.refdm() is CHAN_DM
+    }
+    return 0;
+}
+```
+
+### 6. GUPPI RAW bytes
 
 `RawReader` walks one header and the payload that follows it. It does not model the block fronts.
 
@@ -234,7 +258,7 @@ int main() {
 }
 ```
 
-### 6. Baseband block front
+### 7. Baseband block front
 
 GUPPI RAW and DADA files model `concepts::BasebandReader`. `BasebandSource` erases either one. `read_block` copies canonical time-major voltages (`[time][antenna][channel][polarization][component]`). `read_samples` unpacks them into a caller buffer.
 

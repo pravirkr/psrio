@@ -2,12 +2,14 @@
 
 #include "psrio/common/types.hpp"
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/formats/sigproc/header.hpp"
 
 #include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <ctime>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string_view>
 #include <type_traits>
@@ -66,6 +68,29 @@ concept BlockReader = requires(R& reader,
 
 } // namespace psrio::concepts
 
+namespace psrio::concepts {
+
+/// A reader that describes itself as a SIGPROC header, through
+/// `sigproc_header()` (PSRFITS) or `header()` (SIGPROC, FBH5).
+template <typename R>
+concept HasSigprocHeader = requires(const R& reader) {
+    {
+        reader.sigproc_header()
+    } -> std::convertible_to<formats::sigproc::FilterbankHeader>;
+} || requires(const R& reader) {
+    {
+        reader.header()
+    } -> std::convertible_to<const formats::sigproc::FilterbankHeader&>;
+};
+
+/// A reader that reports the reference DM of its data.
+template <typename R>
+concept HasRefdm = requires(const R& reader) {
+    { reader.refdm() } -> std::convertible_to<std::optional<double>>;
+};
+
+} // namespace psrio::concepts
+
 namespace psrio {
 
 /// Move-only type-erased intensity block reader.
@@ -117,6 +142,18 @@ public:
     [[nodiscard]] double spectra_rate() const { return impl().spectra_rate(); }
     [[nodiscard]] std::time_t utc_start() const { return impl().utc_start(); }
     [[nodiscard]] std::uint64_t tell() const { return impl().tell(); }
+
+    /// The SIGPROC header describing this stream, when the reader has one
+    /// (SIGPROC, PSRFITS, and FBH5 readers do). For PSRFITS it describes
+    /// the calibrated float stream.
+    [[nodiscard]] std::optional<formats::sigproc::FilterbankHeader>
+    sigproc_header() const {
+        return impl().sigproc_header();
+    }
+
+    /// Dispersion measure the data were coherently dedispersed to (SIGPROC
+    /// `refdm`, PSRFITS `CHAN_DM`), in pc/cm^3, when the file records one.
+    [[nodiscard]] std::optional<double> refdm() const { return impl().refdm(); }
 
     void set_fswap(bool enable) { impl().set_fswap(enable); }
     [[nodiscard]] bool fswap_enabled() const { return impl().fswap_enabled(); }
@@ -205,11 +242,14 @@ private:
         [[nodiscard]] virtual double spectra_rate() const            = 0;
         [[nodiscard]] virtual std::time_t utc_start() const          = 0;
         [[nodiscard]] virtual std::uint64_t tell() const             = 0;
-        virtual void set_fswap(bool enable)                          = 0;
-        [[nodiscard]] virtual bool fswap_enabled() const             = 0;
-        virtual void seek(std::uint64_t sample)                      = 0;
-        virtual void rewind()                                        = 0;
-        virtual void skip(std::int64_t delta)                        = 0;
+        [[nodiscard]] virtual std::optional<formats::sigproc::FilterbankHeader>
+        sigproc_header() const                                    = 0;
+        [[nodiscard]] virtual std::optional<double> refdm() const = 0;
+        virtual void set_fswap(bool enable)                       = 0;
+        [[nodiscard]] virtual bool fswap_enabled() const          = 0;
+        virtual void seek(std::uint64_t sample)                   = 0;
+        virtual void rewind()                                     = 0;
+        virtual void skip(std::int64_t delta)                     = 0;
         [[nodiscard]] virtual std::uint64_t
         read_block(std::uint64_t count, std::span<std::byte> dest) = 0;
         [[nodiscard]] virtual std::uint64_t
@@ -276,6 +316,26 @@ private:
         }
         [[nodiscard]] std::uint64_t tell() const override {
             return m_reader.tell();
+        }
+        [[nodiscard]] std::optional<formats::sigproc::FilterbankHeader>
+        sigproc_header() const override {
+            if constexpr (requires { m_reader.sigproc_header(); }) {
+                return formats::sigproc::FilterbankHeader(
+                    m_reader.sigproc_header());
+            } else if constexpr (concepts::HasSigprocHeader<R>) {
+                return m_reader.header();
+            } else {
+                return std::nullopt;
+            }
+        }
+        [[nodiscard]] std::optional<double> refdm() const override {
+            if constexpr (concepts::HasRefdm<R>) {
+                return m_reader.refdm();
+            } else if constexpr (concepts::HasSigprocHeader<R>) {
+                return sigproc_header()->refdm;
+            } else {
+                return std::nullopt;
+            }
         }
         void set_fswap(bool enable) override { m_reader.set_fswap(enable); }
         [[nodiscard]] bool fswap_enabled() const override {

@@ -2,6 +2,8 @@
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/readahead.hpp"
+#include "psrio/detail/rfile.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/formats/sigproc/reader.hpp"
 #include "sigproc_bytes.hpp"
@@ -463,4 +465,92 @@ TEST_CASE("read_samples fswap agrees with read_block fswap",
         }
         REQUIRE(unpacked == expected);
     }
+}
+
+TEST_CASE("forward reads stream ahead and match direct reads",
+          "[sigproc][reader][readahead]") {
+    std::vector<std::uint8_t> samples(64U * 997U);
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        samples[i] = static_cast<std::uint8_t>((i * 37U) % 251U);
+    }
+    const auto bytes = file_8bit(samples, 64);
+    const TempFile file(bytes.out);
+
+    FilterbankReader direct(file.path());
+    direct.set_prefetch(false);
+    const auto expected = direct.read_samples<std::uint8_t>(997);
+
+    FilterbankReader streamed(file.path());
+    std::vector<std::uint8_t> got;
+    while (true) {
+        const auto piece = streamed.read_samples<std::uint8_t>(31);
+        got.insert(got.end(), piece.begin(), piece.end());
+        if (piece.size() < 31U * 64U) {
+            break;
+        }
+    }
+    CHECK(got == expected);
+
+    // Backward and forward jumps after streaming.
+    streamed.seek(5);
+    auto part = streamed.read_samples<std::uint8_t>(10);
+    CHECK(std::equal(part.begin(), part.end(), expected.begin() + (5 * 64)));
+    streamed.seek(900);
+    part = streamed.read_samples<std::uint8_t>(97);
+    CHECK(std::equal(part.begin(), part.end(), expected.begin() + (900 * 64)));
+    streamed.release_buffers();
+    streamed.seek(0);
+    CHECK(streamed.read_samples<std::uint8_t>(997) == expected);
+    CHECK_FALSE(streamed.refdm().has_value());
+}
+
+TEST_CASE("ReadAhead serves forward ranges across aligned blocks",
+          "[readahead]") {
+    std::vector<std::byte> content(100000);
+    for (std::size_t i = 0; i < content.size(); ++i) {
+        content[i] = static_cast<std::byte>((i * 13U) % 256U);
+    }
+    const TempFile file(content);
+    const psrio::detail::ReadFile source(file.path());
+    const auto view = [&](std::uint64_t at, std::uint64_t n) {
+        return std::vector<std::byte>(
+            content.begin() + static_cast<std::ptrdiff_t>(at),
+            content.begin() + static_cast<std::ptrdiff_t>(at + n));
+    };
+
+    psrio::detail::ReadAhead ahead(source.duplicate(), 1000, 90000, 3, 4096);
+    std::vector<std::byte> out(5000);
+    ahead.read(1000, out);
+    CHECK(out == view(1000, 5000));
+    // Skipping forward drops whole blocks.
+    out.resize(7000);
+    ahead.read(30001, out);
+    CHECK(out == view(30001, 7000));
+    out.resize(1);
+    ahead.read(37001, out);
+    CHECK(out == view(37001, 1));
+    CHECK_FALSE(ahead.covers(100, 10));
+    CHECK_FALSE(ahead.covers(89995, 10));
+    CHECK_THROWS_AS(ahead.read(100, out), psrio::ValidationError);
+    out.resize(52998);
+    ahead.read(37002, out);
+    CHECK(out == view(37002, 52998));
+    CHECK_FALSE(ahead.covers(37002, 1));
+}
+
+TEST_CASE("a header is read from a prefix of the file", "[sigproc][reader]") {
+    std::vector<std::uint8_t> samples(3000, 7);
+    const auto bytes = file_8bit(samples, 3);
+    const TempFile file(bytes.out);
+    const psrio::detail::ReadFile source(file.path());
+    const auto header = psrio::formats::sigproc::FilterbankHeader::read(source);
+    CHECK(header.nchans == 3);
+    CHECK(header.file_bytes == bytes.out.size());
+    CHECK(header.nsamples() == 1000U);
+    const auto truncated =
+        std::span<const std::byte>(bytes.out).first(header.header_bytes - 3U);
+    const TempFile short_file(truncated);
+    const psrio::detail::ReadFile cut(short_file.path());
+    CHECK_THROWS_AS(psrio::formats::sigproc::FilterbankHeader::read(cut),
+                    psrio::FormatError);
 }

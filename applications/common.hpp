@@ -113,6 +113,22 @@ public:
         return m_sum_feeds;
     }
 
+    /// Search-mode PSRFITS metadata, for inspect.
+    struct PsrfitsInfo {
+        std::string frontend;
+        std::string backend;
+        std::string obs_mode;
+        std::string pol_type;
+        /// SUBINT rows of each file, in time order.
+        std::vector<std::uint64_t> rows;
+        /// NSUBOFFS of each file, when present.
+        std::vector<std::optional<std::int64_t>> nsuboffs;
+    };
+    /// PSRFITS metadata; empty for other inputs.
+    [[nodiscard]] const PsrfitsInfo& psrfits_info() const noexcept {
+        return m_info;
+    }
+
     /// Values in one time sample: nifs * nchans.
     [[nodiscard]] std::uint64_t row() const { return nifs() * nchans(); }
 
@@ -136,6 +152,7 @@ private:
     int m_stored_nbits{0};
     std::uint64_t m_stored_npol{0};
     std::uint64_t m_subint_samples{0};
+    PsrfitsInfo m_info;
 };
 
 /// A SIGPROC filterbank or a `.tim`/`.dat` time series being written.
@@ -198,6 +215,16 @@ channel_frequencies(const sigproc::FilterbankHeader& header);
 /// as a frequency table otherwise.
 void set_channel_frequencies(sigproc::FilterbankHeader& header,
                              std::span<const double> freqs);
+
+/// Add `-j,--threads` to @p sub. The count applies to the OpenMP loops in
+/// the readers and digifil; without it OpenMP picks its default
+/// (`OMP_NUM_THREADS`, else every core this process may run on).
+void add_threads_option(CLI::App& sub);
+
+/// Threads a parallel step uses by default: OpenMP's count, which follows
+/// `OMP_NUM_THREADS` and `OMP_THREAD_LIMIT` (set by batch systems such as
+/// HTCondor), else the hardware thread count.
+[[nodiscard]] int default_threads();
 
 /// Register each subcommand on @p app.
 void add_inspect(CLI::App& app, Context& ctx);

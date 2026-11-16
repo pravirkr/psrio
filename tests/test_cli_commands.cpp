@@ -1,6 +1,11 @@
 #include "cli.hpp"
 #include "psrfits_bytes.hpp"
 
+#ifdef PSRIO_CLI_HAS_DMT
+#include <dmt/algorithms/ddmt.hpp>
+#include <dmt/algorithms/fdmt.hpp>
+#endif
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -9,8 +14,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <dmt/algorithms/ddmt.hpp>
-#include <dmt/algorithms/fdmt.hpp>
 #include <filesystem>
 #include <fmt/format.h>
 #include <initializer_list>
@@ -117,7 +120,9 @@ TEST_CASE("psrio without a command prints usage and fails", "[cli]") {
     CHECK(result.code != 0);
     const auto help = psrio_run({"--help"});
     CHECK(help.code == 0);
+#ifdef PSRIO_CLI_HAS_DMT
     CHECK(help.out.find("dedisperse") != std::string::npos);
+#endif
 }
 
 TEST_CASE("psrio inspect prints keys, JSON, and statistics", "[cli][inspect]") {
@@ -361,6 +366,7 @@ TEST_CASE("psrio digifil matches the library pipeline", "[cli][digifil]") {
     CHECK(FilterbankReader(dir / "d.fil").nchans() == 16U);
 }
 
+#ifdef PSRIO_CLI_HAS_DMT
 TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
     const TempDir dir;
     FilterbankReader in(kTutorial);
@@ -508,6 +514,21 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
         }
     }
 
+    SECTION("--dm before the input does not take the input") {
+        const auto prefix = dir / "order";
+        require_ok(psrio_run(
+            {"dedisperse", "--dm", "0,10", kTutorial.string(), "-o", prefix}));
+        // Every trial is cut to the DM 10 sweep.
+        const auto dm0 = read_series(dir / "order_DM0.00.tim");
+        REQUIRE(dm0.size() == nout10);
+        CHECK(std::equal(dm0.begin(), dm0.end(), channel_sum.begin()));
+        CHECK(fs::exists(dir / "order_DM10.00.tim"));
+        require_ok(psrio_run({"dedisperse", "-d", "0", "-d", "10",
+                              kTutorial.string(), "-o", dir / "rep"}));
+        CHECK(fs::exists(dir / "rep_DM0.00.tim"));
+        CHECK(fs::exists(dir / "rep_DM10.00.tim"));
+    }
+
     SECTION("masked channels are left out of the sum") {
         require_ok(
             psrio_run({"dedisperse", kTutorial.string(), "-o", dir / "m.tim",
@@ -530,6 +551,7 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
                   .code == 1);
     }
 }
+#endif
 
 TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
           "[cli][psrfits]") {

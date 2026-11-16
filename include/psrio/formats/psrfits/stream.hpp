@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -112,6 +113,16 @@ public:
     [[nodiscard]] bool sums_polarisations() const noexcept { return m_sum; }
     [[nodiscard]] std::string_view pol_type() const noexcept {
         return m_pol_type;
+    }
+    /// Files in the stream, in time order.
+    [[nodiscard]] std::size_t nfiles() const noexcept { return m_files.size(); }
+    /// File @p index of the stream, for its own metadata (rows, NSUBOFFS).
+    [[nodiscard]] const SearchFile& file(std::size_t index) const {
+        return m_files.at(index).reader;
+    }
+    /// `CHAN_DM` of the first file, which every file must match.
+    [[nodiscard]] std::optional<double> refdm() const noexcept {
+        return m_header.refdm;
     }
 
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchan; }
@@ -355,6 +366,10 @@ inline std::uint64_t SearchStream::read_across(std::uint64_t count,
         const auto got = read(file.reader, take, piece);
         if (got == 0U) {
             break;
+        }
+        if (local + got == file.count) {
+            // The stream has moved past this file: free its staging.
+            file.reader.release_buffers();
         }
         done += got;
     }

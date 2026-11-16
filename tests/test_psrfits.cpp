@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -583,4 +584,81 @@ TEST_CASE("Parkes UWL search file matches sigpyproc Stokes I",
     CHECK(same_bits(edge[0], 0x46abbd9e));
     CHECK(same_bits(edge[6656], 0x46aa5978));
     CHECK(same_bits(edge[6657], 0x46a6b188));
+}
+
+TEST_CASE("SearchFile reads the same samples with and without read-ahead",
+          "[psrfits][readahead]") {
+    Geometry geo;
+    geo.nchan = 8;
+    geo.npol  = 4;
+    geo.nsblk = 64;
+    geo.nsub  = 6;
+    std::vector<double> freqs;
+    for (int chan = 0; chan < geo.nchan; ++chan) {
+        freqs.push_back(100.0 + (0.5 * chan));
+    }
+    const std::vector<float> weights(8, 1.0F);
+    const std::vector<float> offsets(32, 0.5F);
+    std::vector<std::byte> table;
+    for (int row = 0; row < geo.nsub; ++row) {
+        const std::vector<float> scales(32, 1.0F + (0.25F * row));
+        push_row_prefix(table, geo, freqs, weights, offsets, scales,
+                        geo.nsblk * geo.tbin,
+                        (row + 0.5) * geo.nsblk * geo.tbin);
+        for (int samp = 0; samp < geo.nsblk; ++samp) {
+            for (int pol = 0; pol < geo.npol; ++pol) {
+                for (int chan = 0; chan < geo.nchan; ++chan) {
+                    append_be(table, static_cast<std::uint8_t>(
+                                         ((row * 131) + (samp * 7) + (pol * 3) +
+                                          chan) %
+                                         251));
+                }
+            }
+        }
+    }
+    FitsFileBytes file;
+    primary_cards(file);
+    subint_header(file, geo, table.size() / static_cast<std::size_t>(geo.nsub));
+    file.raw(table);
+    file.pad_data();
+    const TempPath path("psrio-psrfits-readahead.sf");
+    file.write(path.path());
+
+    SearchFile direct(path.path());
+    direct.set_prefetch(false);
+    const auto total = direct.nsamples();
+    REQUIRE(total == 384U);
+    const auto expected = direct.read_samples<float>(total);
+    const auto slice    = [&](std::uint64_t first, std::uint64_t count) {
+        return std::vector<float>(
+            expected.begin() + static_cast<std::ptrdiff_t>(first * 8U),
+            expected.begin() +
+                static_cast<std::ptrdiff_t>((first + count) * 8U));
+    };
+
+    SearchFile streamed(path.path());
+    std::vector<float> got;
+    while (got.size() < expected.size()) {
+        const auto piece = streamed.read_samples<float>(13);
+        REQUIRE_FALSE(piece.empty());
+        got.insert(got.end(), piece.begin(), piece.end());
+    }
+    CHECK(got == expected);
+
+    // A jump back stops the read-ahead; reads still land on the right bytes.
+    streamed.seek(100);
+    CHECK(streamed.read_samples<float>(50) == slice(100, 50));
+    streamed.seek(10);
+    CHECK(streamed.read_samples<float>(300) == slice(10, 300));
+    streamed.release_buffers();
+    streamed.seek(0);
+    CHECK(streamed.read_samples<float>(total) == expected);
+
+    CHECK(streamed.refdm() == std::optional<double>(12.5));
+    const psrio::BlockSource source(SearchFile(path.path()));
+    CHECK(source.refdm() == std::optional<double>(12.5));
+    const auto header = source.sigproc_header();
+    REQUIRE(header.has_value());
+    CHECK(header->nchans == 8);
+    CHECK(header->refdm == std::optional<double>(12.5));
 }

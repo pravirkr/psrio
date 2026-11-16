@@ -2,6 +2,73 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+Fixes and performance work from validation on Parkes UWL search-mode data
+(3 × 12 GB `.sf`, 6656 channels, `AABBCRCI`, on BeeGFS).
+
+- **I/O: positioned reads instead of whole-file mappings**:
+  - `SearchFile` and `FilterbankReader` read with `pread` (`detail::ReadFile`).
+    On a parallel file system page faults on a mapping ran at 150–180 MB/s;
+    large aligned reads run at 1.1–1.4 GB/s. The resident set no longer grows
+    with the file: a full 3-file `digifil` peaked at 15.5 GB and now stays
+    near 0.6 GB.
+  - Once reads run forward, `detail::ReadAhead` streams the rest of the file
+    on a background thread in 16 MiB blocks on 16 MiB file boundaries
+    (alignment alone is worth ~25% on BeeGFS), four blocks ahead of the
+    caller. Seeks fall back to direct reads. `set_prefetch(false)` turns it
+    off; `release_buffers()` frees it, and the streams call it when they move
+    past a file.
+  - PSRFITS metadata (`TSUBINT`, `OFFS_SUB`, `DAT_FREQ`, `DAT_WTS`,
+    `DAT_OFFS`, `DAT_SCL`) is read once per row in one request. Headers are
+    parsed from file prefixes (`FilterbankHeader::read`,
+    `parse_prefix`; `psrfits::detail::Source`, `locate_cell`, `read_cell`).
+  - `FilterbankReader::view_bytes()`/`view_block()` keep their zero-copy
+    contract by mapping the file on first use.
+  - Opt-in page-cache eviction: `set_drop_cache(true)` or `PSRIO_DROP_CACHE=1`.
+  - `psrio::psrio` now links `Threads::Threads`.
+- **CPU**: hot loops (PSRFITS decode, digifil rescale/apply/encode) use
+  `PSRIO_OMP(...)` pragmas, active only when the consumer compiles with
+  OpenMP; psrio gains no OpenMP dependency. Every parallel loop keeps each
+  output's arithmetic in serial order, so results do not depend on the thread
+  count. Measured on BeeGFS with 8 cores (cold cache; run-to-run spread is
+  large): full 3-file `psrio digifil -b 8` 258 s → 27–39 s; reading a 9.3 GB
+  8-bit `.fil` 55 s → 9 s. Outputs are byte-identical to 0.5.0 at 1, 3 and 8
+  threads.
+- **`digifil::Source`**: digifil as an in-memory `BlockReader` over any
+  `BlockSource` (including a multi-file PSRFITS stream), so a pipeline can
+  read 8-bit redigitised data without writing a `.fil`. It reads the next
+  input block on another thread while the pipeline runs. `digifil::run` now
+  drives it. Also `digifil::header_of(BlockSource)` and `default_gulp`.
+- **Robust rescaling (opt-in)**: `Config::rescale_clip` / `psrio digifil
+  --rescale-clip k` leaves values beyond k σ of a channel's statistics out of
+  its next statistics. The default stays dspsr's plain mean and variance.
+- **`BlockSource::refdm()` and `BlockSource::sigproc_header()`**, detected
+  from the wrapped reader (the `BlockReader` concept is unchanged).
+  `refdm()` on `FilterbankReader`, `SearchFile`, and `SearchStream`.
+  `SearchFile::frontend()`, `backend()`, `obs_mode()`; `SearchStream::nfiles()`
+  and `file(i)`.
+- **Fixes**:
+  - `ftop()`/`fbottom()` (SIGPROC and `psrio::Header`) returned swapped band
+    edges when `foff > 0`; a frequency table now gives edges too.
+  - `psrio dedisperse --dm 0,411 in.fil` no longer takes `in.fil` as a DM;
+    `--dm` may be repeated.
+  - An installed package built with `PSRIO_WITH_HDF5=ON` and a fetched
+    HighFive failed `find_package(psrio)` on `HighFive::HighFive`; the
+    HighFive headers are now installed and `psrio::fbh5` links `HDF5::HDF5`.
+- **CLI**:
+  - `inspect` prints the ISO 8601 UTC start, and for PSRFITS the frontend,
+    backend, observing mode, polarisation type and count, `NSBLK`, subints
+    per file, and `NSUBOFFS`.
+  - `-j,--threads` on `slice`, `splice`, `decimate`, `convert`, `digifil`. The
+    defaults follow `OMP_NUM_THREADS`/`OMP_THREAD_LIMIT` (HTCondor sets them);
+    `dedisperse` no longer defaults to every core of the host.
+  - With OpenMP and no wait policy chosen, `psrio` re-executes itself with
+    `OMP_WAIT_POLICY=passive`, so idle threads do not spin through file
+    waits (this cut charged CPU time about threefold).
+  - `PSRIO_CLI_WITH_DMT=OFF` builds the CLI without dmt/FFTW (no
+    `dedisperse`). `psrio` is installed with `INSTALL_RPATH_USE_LINK_PATH`.
+
 ## [0.5.0] - 2026-11-11
 
 - **Search-mode PSRFITS reader (`psrio::formats::psrfits`)**:

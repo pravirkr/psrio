@@ -167,6 +167,45 @@ TEST_CASE("frequency table supplies channel centres", "[sigproc][header]") {
     REQUIRE_THROWS_AS(header.bandwidth(), psrio::ValidationError);
 }
 
+TEST_CASE("band edges do not depend on the sign of foff", "[sigproc][header]") {
+    FilterbankHeader descending;
+    descending.nchans = 6656;
+    descending.fch1   = 4031.75;
+    descending.foff   = -0.5;
+    REQUIRE(descending.ftop() == 4032.0);
+    REQUIRE(descending.fbottom() == 704.0);
+    REQUIRE(descending.fcenter() == 2368.0);
+
+    FilterbankHeader ascending;
+    ascending.nchans = 6656;
+    ascending.fch1   = 704.25;
+    ascending.foff   = 0.5;
+    REQUIRE(ascending.ftop() == 4032.0);
+    REQUIRE(ascending.fbottom() == 704.0);
+    REQUIRE(ascending.fcenter() == 2368.0);
+
+    FilterbankHeader table;
+    table.nchans          = 3;
+    table.frequency_table = {1400.0, 1401.0, 1402.0};
+    REQUIRE(table.ftop() == 1402.5);
+    REQUIRE(table.fbottom() == 1399.5);
+
+    const FilterbankHeader empty;
+    REQUIRE_THROWS_AS(empty.ftop(), psrio::ValidationError);
+
+    psrio::Header generic;
+    generic.nchans = 4;
+    generic.fch1   = 100.0;
+    generic.foff   = 1.0;
+    REQUIRE(generic.ftop() == 103.5);
+    REQUIRE(generic.fbottom() == 99.5);
+    REQUIRE(generic.fcenter() == 101.5);
+    generic.fch1 = 103.0;
+    generic.foff = -1.0;
+    REQUIRE(generic.ftop() == 103.5);
+    REQUIRE(generic.fbottom() == 99.5);
+}
+
 TEST_CASE("frequency table wins over fch1 and foff", "[sigproc][header]") {
     SigprocBytes bytes;
     bytes.string("HEADER_START");

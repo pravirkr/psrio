@@ -145,6 +145,7 @@ void add_decimate(CLI::App& app, Context& ctx) {
     sub->add_option("--gulp", opts->gulp, "Time samples per block")
         ->capture_default_str()
         ->check(CLI::PositiveNumber);
+    add_threads_option(*sub);
     sub->callback([opts, &ctx] { run_decimate(*opts, ctx); });
 }
 

@@ -110,6 +110,14 @@ TEST_CASE("MJD to Gregorian calendar date", "[astro]") {
     REQUIRE(psrio::astro::mjd_to_gregorian(50000) == "1995-10-10");
     REQUIRE(psrio::astro::mjd_to_gregorian(59000) == "2020-05-31");
     REQUIRE(psrio::astro::mjd_to_gregorian(59000.75) == "2020-05-31");
+
+    REQUIRE(psrio::astro::mjd_to_iso8601(59000.75) ==
+            "2020-05-31T18:00:00.000000Z");
+    REQUIRE(psrio::astro::mjd_to_iso8601(59630.0 + (34870.00366 / 86400.0)) ==
+            "2022-02-20T09:41:10.003660Z");
+    // Rounding up to the next day carries into the date.
+    REQUIRE(psrio::astro::mjd_to_iso8601(59000.0 - 1.0e-12) ==
+            "2020-05-31T00:00:00.000000Z");
 }
 
 TEST_CASE("duration formatting", "[astro]") {

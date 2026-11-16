@@ -3,6 +3,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstdint>
 #include <ctime>
 #include <fmt/format.h>
 #include <numbers>
@@ -277,6 +278,24 @@ dms_to_rad(int deg, int minutes, double sec) noexcept {
 /// Convert double MJD (fractional day) to Gregorian calendar date "YYYY-MM-DD".
 [[nodiscard]] inline std::string mjd_to_gregorian(double mjd) {
     return mjd_to_gregorian(static_cast<int>(std::floor(mjd)));
+}
+
+/// Convert a Modified Julian Date to an ISO 8601 UTC time,
+/// "YYYY-MM-DDTHH:MM:SS.ffffffZ", rounded to the microsecond. Leap seconds
+/// are not inserted.
+[[nodiscard]] inline std::string mjd_to_iso8601(double mjd) {
+    constexpr std::int64_t kMicrosPerDay = 86400LL * 1000000LL;
+    auto day    = static_cast<std::int64_t>(std::floor(mjd));
+    auto micros = static_cast<std::int64_t>(std::llround(
+        (mjd - static_cast<double>(day)) * static_cast<double>(kMicrosPerDay)));
+    if (micros >= kMicrosPerDay) {
+        day += 1;
+        micros -= kMicrosPerDay;
+    }
+    const auto seconds = micros / 1000000LL;
+    return fmt::format("{}T{:02d}:{:02d}:{:02d}.{:06d}Z",
+                       mjd_to_gregorian(static_cast<int>(day)), seconds / 3600,
+                       (seconds / 60) % 60, seconds % 60, micros % 1000000LL);
 }
 
 /// Convert a Modified Julian Date to POSIX UTC seconds.

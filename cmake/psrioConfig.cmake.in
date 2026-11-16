@@ -1,12 +1,21 @@
 @PACKAGE_INIT@
 
 include(CMakeFindDependencyMacro)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_dependency(Threads)
 find_dependency(fmt 12.1 CONFIG)
 if(@PSRIO_WITH_HDF5@)
   find_dependency(HDF5 REQUIRED COMPONENTS C)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/psrioTargets.cmake")
+
+# psrio::fbh5 links HDF5. HighFive headers are installed with psrio when psrio
+# fetched them; otherwise the HighFive psrio was built against is found here.
+if(@PSRIO_WITH_HDF5@ AND NOT "@PSRIO_BUNDLE_HIGHFIVE@" AND TARGET psrio::fbh5)
+  find_dependency(HighFive CONFIG)
+  set_property(TARGET psrio::fbh5 APPEND PROPERTY INTERFACE_LINK_LIBRARIES HighFive::HighFive)
+endif()
 
 # The export names fmt here instead of linking the in-tree target. install(EXPORT)
 # rejects a dependency that is not itself exported, and psrio does not install fmt.

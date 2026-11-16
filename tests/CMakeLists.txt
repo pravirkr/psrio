@@ -128,9 +128,12 @@ endif()
 if(TARGET psrio_cli_commands)
   add_executable(psrio_cli_tests ${CMAKE_CURRENT_SOURCE_DIR}/test_cli_commands.cpp)
   target_link_libraries(
-    psrio_cli_tests PRIVATE psrio_cli_commands dmt::dmt Catch2::Catch2WithMain
+    psrio_cli_tests PRIVATE psrio_cli_commands Catch2::Catch2WithMain
                             psrio_developer_flags
   )
+  if(TARGET dmt::dmt)
+    target_link_libraries(psrio_cli_tests PRIVATE dmt::dmt)
+  endif()
   target_compile_definitions(
     psrio_cli_tests PRIVATE "PSRIO_TEST_DATA_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}/data\""
   )

@@ -4,7 +4,9 @@
 #include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
-#include "psrio/detail/mmap.hpp"
+#include "psrio/detail/parallel.hpp"
+#include "psrio/detail/readahead.hpp"
+#include "psrio/detail/rfile.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/formats/psrfits/table.hpp"
 #include "psrio/formats/sigproc/header.hpp"
@@ -23,6 +25,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -218,6 +221,11 @@ namespace psrio::formats::psrfits {
 /**
  * @brief Search-mode PSRFITS file, streamed as calibrated Stokes I.
  *
+ * The file is read with `pread`, not mapped: headers and the per-row
+ * frequency, scale, offset, and weight cells are read as needed, and DATA is
+ * staged a few MiB of time samples at a time. A reader holds one open file
+ * descriptor and buffers of about kStageBytes.
+ *
  * One uncompressed SUBINT binary table. Samples are float32 in `DAT_FREQ`
  * order, one IF. Coherence and two-product feeds (`AABBCRCI`, `AABB`, and the
  * XX/LL equivalents) sum the first two products. Intensity and Stokes labels
@@ -226,7 +234,13 @@ namespace psrio::formats::psrfits {
  */
 class SearchFile {
 public:
-    /// @throws IoError if @p path cannot be mapped.
+    /// Bytes of DATA staged per read from a time-major SUBINT row.
+    static constexpr std::uint64_t kStageBytes = std::uint64_t{16} << 20U;
+
+    /// Blocks of ReadAhead::kBlockBytes read ahead of the caller.
+    static constexpr std::size_t kReadAheadBlocks = 4;
+
+    /// @throws IoError if @p path cannot be opened.
     /// @throws FormatError if @p path is not an uncompressed search-mode file.
     explicit SearchFile(const std::filesystem::path& path);
 
@@ -268,6 +282,25 @@ public:
         return m_pol_type;
     }
 
+    /// Primary header `FRONTEND` (receiver), or empty.
+    [[nodiscard]] std::string_view frontend() const noexcept {
+        return m_frontend;
+    }
+    /// Primary header `BACKEND`, or empty.
+    [[nodiscard]] std::string_view backend() const noexcept {
+        return m_backend;
+    }
+    /// Primary header `OBS_MODE` (always SEARCH for a readable file).
+    [[nodiscard]] std::string_view obs_mode() const noexcept {
+        return m_obs_mode;
+    }
+
+    /// `CHAN_DM`: the DM the data were coherently dedispersed to, when the
+    /// primary header records one.
+    [[nodiscard]] std::optional<double> refdm() const noexcept {
+        return m_has_dm ? std::optional<double>(m_dm) : std::nullopt;
+    }
+
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchan; }
     [[nodiscard]] static std::uint64_t nifs() noexcept { return 1; }
     [[nodiscard]] static int nbits() noexcept { return 32; }
@@ -304,6 +337,18 @@ public:
 
     void set_fswap(bool enable) noexcept { m_fswap = enable; }
     [[nodiscard]] bool fswap_enabled() const noexcept { return m_fswap; }
+
+    /// Drop cached file pages once their samples are read. Off by default,
+    /// or on when `PSRIO_DROP_CACHE=1` is set at open.
+    void set_drop_cache(bool enable) noexcept { m_file.set_drop_cache(enable); }
+
+    /// Once reads run forward, stream the rest of the DATA on a background
+    /// thread, kReadAheadBlocks blocks ahead of the caller. On by default.
+    void set_prefetch(bool enable);
+
+    /// Free the staging buffers, for example once a stream has moved past
+    /// this file. A later read allocates them again.
+    void release_buffers();
 
     void seek(std::uint64_t sample);
     void rewind() { seek(0); }
@@ -344,7 +389,35 @@ private:
     void load_frequencies();
     void load_timing();
     void load_calibration(std::uint64_t row);
-    void decode_sample(std::uint64_t global, std::span<float> dest);
+
+    /// DATA bytes holding samples [first, last) of one row. @p cell points at
+    /// sample @p first for a time-major layout, or at the start of the row.
+    struct Staged {
+        const std::byte* cell{nullptr};
+        std::uint64_t first{0};
+        std::uint64_t last{0};
+    };
+
+    /// Make sample @p isamp of row @p isub, and those after it, available.
+    Staged stage(std::uint64_t isub, std::uint64_t isamp);
+
+    /// DATA range of row @p isub, checked against the expected cell size.
+    [[nodiscard]] detail::CellRange data_range(std::uint64_t isub);
+
+    /// Stream the file from @p offset to the end of the last DATA cell on a
+    /// background thread.
+    void start_read_ahead(std::uint64_t offset);
+
+    /// Decode @p count samples from @p cell, starting at sample @p isamp
+    /// relative to the cell, into @p dest.
+    void decode_run(const std::byte* cell,
+                    std::uint64_t isamp,
+                    std::uint64_t count,
+                    std::span<float> dest) const;
+
+    [[nodiscard]] detail::Source source() const noexcept {
+        return detail::Source(m_file);
+    }
     void check_sample_request(std::uint64_t count,
                               std::size_t dest_values) const;
 
@@ -379,8 +452,12 @@ private:
     [[nodiscard]] double scalar_at(std::uint64_t row,
                                    const detail::Column& column);
 
-    ::psrio::detail::MappedFile m_file;
-    std::span<const std::byte> m_bytes;
+    /// Bytes of a fixed-width metadata cell. The metadata columns of a row
+    /// are read in one request and kept until another row is asked for.
+    [[nodiscard]] std::span<const std::byte>
+    meta_cell(std::uint64_t row, const detail::Column& column);
+
+    ::psrio::detail::ReadFile m_file;
     detail::ParsedTable m_table{};
     detail::Column m_data{};
     detail::Column m_scales_col{};
@@ -417,6 +494,9 @@ private:
     std::string m_source;
     std::string m_telescope;
     std::string m_pol_type;
+    std::string m_frontend;
+    std::string m_backend;
+    std::string m_obs_mode;
     std::vector<double> m_freqs;
     std::vector<double> m_scale_raw;
     std::vector<double> m_offset_raw;
@@ -424,20 +504,40 @@ private:
     std::vector<float> m_scales;
     std::vector<float> m_offsets;
     std::vector<float> m_weights;
-    std::vector<float> m_row;
+    std::vector<float> m_floats;
+    std::vector<std::byte> m_cell;
+    std::vector<std::byte> m_meta;
+    std::uint64_t m_meta_row{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t m_meta_first{0};
+    std::uint64_t m_meta_bytes{0};
+    std::vector<double> m_row_tsub;
+    std::vector<double> m_row_offs;
+    std::vector<std::byte> m_stage;
+    detail::CellRange m_data_range{};
+    std::uint64_t m_data_row{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t m_stage_row{std::numeric_limits<std::uint64_t>::max()};
+    std::uint64_t m_stage_first{0};
+    std::uint64_t m_stage_last{0};
+    detail::CellRange m_stage_range{};
+
+    /// DATA streamed ahead on another thread while the caller decodes.
+    /// Destroyed before m_file.
+    std::unique_ptr<::psrio::detail::ReadAhead> m_ahead;
+    bool m_prefetch{true};
 };
 
 inline SearchFile::SearchFile(const std::filesystem::path& path) { load(path); }
 
 inline void SearchFile::load(const std::filesystem::path& path) {
     try {
-        m_file = ::psrio::detail::MappedFile(path);
-        m_file.advise_sequential();
+        // Opening reads a little metadata from every row, so no sequential
+        // read-ahead; DATA is read in large requests regardless.
+        m_file =
+            ::psrio::detail::ReadFile(path, ::psrio::detail::Access::kNormal);
     } catch (const std::exception& ex) {
         throw IoError(ex.what());
     }
-    m_bytes             = m_file.bytes();
-    m_table             = detail::parse_search(m_bytes, path.string());
+    m_table             = detail::parse_search(source(), path.string());
     const auto& primary = m_table.primary;
     if (!detail::equals_ignore_case(primary.value("FITSTYPE"), "PSRFITS")) {
         throw FormatError(
@@ -451,6 +551,9 @@ inline void SearchFile::load(const std::filesystem::path& path) {
     }
     m_source    = primary.value("SRC_NAME");
     m_telescope = primary.value("TELESCOP");
+    m_frontend  = primary.find("FRONTEND").value_or("");
+    m_backend   = primary.find("BACKEND").value_or("");
+    m_obs_mode  = mode;
     if (const auto ra = primary.find("RA")) {
         try {
             m_raj     = astro::string_to_packed(*ra, "right ascension");
@@ -535,6 +638,28 @@ inline void SearchFile::load_geometry() {
     if (!m_weights_col.heap && m_weights_col.repeat < m_nchan) {
         throw FormatError("psrio: DAT_WTS must cover every channel");
     }
+    // The span of a row holding its fixed-width metadata columns. It is read
+    // in one request when it is small, which is the usual layout with DATA
+    // last.
+    {
+        std::uint64_t first = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t last  = 0;
+        for (const auto* name : {"TSUBINT", "OFFS_SUB", "DAT_FREQ", "DAT_WTS",
+                                 "DAT_OFFS", "DAT_SCL"}) {
+            const auto* column = detail::find_column(m_table, name);
+            if (column == nullptr || column->heap) {
+                continue;
+            }
+            first = std::min(first, column->offset);
+            last  = std::max(last, column->offset + column->nbytes);
+        }
+        constexpr std::uint64_t kMetaMaxBytes = std::uint64_t{8} << 20U;
+        if (last > first && last - first <= kMetaMaxBytes &&
+            last <= m_table.row_bytes) {
+            m_meta_first = first;
+            m_meta_bytes = last - first;
+        }
+    }
     int field = 0;
     for (std::size_t index = 0; index < m_table.columns.size(); ++index) {
         if (m_table.columns[index].name == "DATA") {
@@ -551,7 +676,6 @@ inline void SearchFile::load_geometry() {
     m_scales.resize(static_cast<std::size_t>(count));
     m_offsets.resize(static_cast<std::size_t>(count));
     m_weights.resize(static_cast<std::size_t>(m_nchan));
-    m_row.resize(static_cast<std::size_t>(m_nchan));
 }
 
 inline void SearchFile::load_frequencies() {
@@ -561,10 +685,24 @@ inline void SearchFile::load_frequencies() {
     }
     m_freqs.resize(static_cast<std::size_t>(m_nchan));
     std::vector<double> row(static_cast<std::size_t>(m_nchan));
+    // One pass over the rows also collects TSUBINT and OFFS_SUB for
+    // load_timing(), so each row's metadata is read once.
+    const auto* durations = detail::find_column(m_table, "TSUBINT");
+    const auto* centres   = detail::find_column(m_table, "OFFS_SUB");
+    m_row_tsub.assign(durations != nullptr ? m_table.nrows : 0U, 0.0);
+    // OFFS_SUB is only checked between rows.
+    m_row_offs.assign(
+        centres != nullptr && m_table.nrows >= 2U ? m_table.nrows : 0U, 0.0);
     for (std::uint64_t isub = 0; isub < m_table.nrows; ++isub) {
-        detail::load_reals(
-            detail::column_cell(m_bytes, m_table, isub, freq_col), freq_col,
-            row);
+        if (durations != nullptr) {
+            m_row_tsub[static_cast<std::size_t>(isub)] =
+                scalar_at(isub, *durations);
+        }
+        if (!m_row_offs.empty()) {
+            m_row_offs[static_cast<std::size_t>(isub)] =
+                scalar_at(isub, *centres);
+        }
+        detail::load_reals(meta_cell(isub, freq_col), freq_col, row);
         if (isub == 0U) {
             m_freqs = row;
             continue;
@@ -607,9 +745,32 @@ inline void SearchFile::load_frequencies() {
 inline double SearchFile::scalar_at(std::uint64_t row,
                                     const detail::Column& column) {
     double value = 0.0;
-    detail::load_reals(detail::column_cell(m_bytes, m_table, row, column),
-                       column, std::span<double>(&value, 1));
+    detail::load_reals(meta_cell(row, column), column,
+                       std::span<double>(&value, 1));
     return value;
+}
+
+inline std::span<const std::byte>
+SearchFile::meta_cell(std::uint64_t row, const detail::Column& column) {
+    const bool together =
+        !column.heap && m_meta_bytes > 0U && column.offset >= m_meta_first &&
+        column.offset + column.nbytes <= m_meta_first + m_meta_bytes &&
+        row < m_table.nrows;
+    if (!together) {
+        return detail::read_cell(source(), m_table, row, column, m_cell);
+    }
+    if (m_meta_row != row) {
+        const auto start =
+            m_table.data_offset +
+            detail::checked_mul(row, m_table.row_bytes, "SUBINT row") +
+            m_meta_first;
+        m_meta.resize(static_cast<std::size_t>(m_meta_bytes));
+        m_file.read_at(start, m_meta);
+        m_meta_row = row;
+    }
+    return std::span<const std::byte>(m_meta).subspan(
+        static_cast<std::size_t>(column.offset - m_meta_first),
+        static_cast<std::size_t>(column.nbytes));
 }
 
 inline void SearchFile::load_timing() {
@@ -619,7 +780,8 @@ inline void SearchFile::load_timing() {
     std::vector<double> tsub(static_cast<std::size_t>(m_table.nrows), full);
     if (durations != nullptr) {
         for (std::uint64_t row = 0; row < m_table.nrows; ++row) {
-            tsub[static_cast<std::size_t>(row)] = scalar_at(row, *durations);
+            tsub[static_cast<std::size_t>(row)] =
+                m_row_tsub[static_cast<std::size_t>(row)];
             if (!(tsub[static_cast<std::size_t>(row)] > 0.0)) {
                 throw FormatError(
                     "psrio: TSUBINT must be positive for every row");
@@ -658,7 +820,8 @@ inline void SearchFile::load_timing() {
         }
         std::vector<double> offs(static_cast<std::size_t>(m_table.nrows));
         for (std::uint64_t row = 0; row < m_table.nrows; ++row) {
-            offs[static_cast<std::size_t>(row)] = scalar_at(row, *centres);
+            offs[static_cast<std::size_t>(row)] =
+                m_row_offs[static_cast<std::size_t>(row)];
         }
         for (std::uint64_t row = 0; row + 1U < m_table.nrows; ++row) {
             const double expected =
@@ -759,14 +922,11 @@ inline void SearchFile::load_calibration(std::uint64_t row) {
     if (m_cal_row == row) {
         return;
     }
-    detail::load_reals(detail::column_cell(m_bytes, m_table, row, m_scales_col),
-                       m_scales_col, m_scale_raw);
-    detail::load_reals(
-        detail::column_cell(m_bytes, m_table, row, m_offsets_col),
-        m_offsets_col, m_offset_raw);
-    detail::load_reals(
-        detail::column_cell(m_bytes, m_table, row, m_weights_col),
-        m_weights_col, m_weight_raw);
+    detail::load_reals(meta_cell(row, m_scales_col), m_scales_col, m_scale_raw);
+    detail::load_reals(meta_cell(row, m_offsets_col), m_offsets_col,
+                       m_offset_raw);
+    detail::load_reals(meta_cell(row, m_weights_col), m_weights_col,
+                       m_weight_raw);
     for (std::size_t index = 0; index < m_scales.size(); ++index) {
         m_scales[index]  = static_cast<float>(m_scale_raw[index]);
         m_offsets[index] = static_cast<float>(m_offset_raw[index]);
@@ -924,63 +1084,196 @@ inline void SearchFile::decode_indexed(const std::byte* cell,
     }
 }
 
-inline void SearchFile::decode_sample(std::uint64_t global,
-                                      std::span<float> dest) {
-    const auto isub  = global / m_nsblk;
-    const auto isamp = global % m_nsblk;
-    load_calibration(isub);
-    const auto cell = detail::column_cell(m_bytes, m_table, isub, m_data);
-    if (cell.size() != static_cast<std::size_t>(m_data_bytes)) {
+inline detail::CellRange SearchFile::data_range(std::uint64_t isub) {
+    const auto range = detail::locate_cell(source(), m_table, isub, m_data);
+    if (range.nbytes != m_data_bytes) {
         throw FormatError(
             fmt::format("psrio: SUBINT row {} DATA has {} bytes, expected {}",
-                        isub, cell.size(), m_data_bytes));
+                        isub, range.nbytes, m_data_bytes));
     }
-    const auto* bytes = cell.data();
+    return range;
+}
+
+inline SearchFile::Staged SearchFile::stage(std::uint64_t isub,
+                                            std::uint64_t isamp) {
+    if (m_stage_row == isub && isamp >= m_stage_first && isamp < m_stage_last) {
+        return Staged{.cell  = m_stage.data(),
+                      .first = m_stage_first,
+                      .last  = m_stage_last};
+    }
+    // A read that starts where the staged run ends is part of a forward
+    // stream; only then does the rest of the file stream ahead.
+    const bool forward =
+        (m_stage_row == isub && isamp == m_stage_last) ||
+        (m_stage_last == m_nsblk && m_stage_row + 1U == isub && isamp == 0U) ||
+        (m_stage_row == std::numeric_limits<std::uint64_t>::max() &&
+         isub == 0U && isamp == 0U);
+    m_file.release(m_stage_range.offset, m_stage_range.nbytes);
+    if (m_data_row != isub) {
+        m_data_range = data_range(isub);
+        m_data_row   = isub;
+    }
+    std::uint64_t first = 0;
+    std::uint64_t last  = m_nsblk;
+    detail::CellRange range{m_data_range};
+    if (m_layout.fast) {
+        // Time-major rows: read a run of whole samples.
+        const auto stride = m_data_bytes / m_nsblk;
+        const auto run    = std::max<std::uint64_t>(kStageBytes / stride, 1U);
+        first             = isamp;
+        last              = std::min(m_nsblk, isamp + run);
+        range.offset      = m_data_range.offset + (first * stride);
+        range.nbytes      = (last - first) * stride;
+    }
+    // Other layouts interleave time with the other axes: read the row.
+    m_stage.resize(static_cast<std::size_t>(range.nbytes));
+    if (m_ahead != nullptr && !m_ahead->covers(range.offset, range.nbytes)) {
+        m_ahead.reset();
+    }
+    // Time-major rows stored in the table stream through m_ahead.
+    if (m_ahead == nullptr && forward && m_prefetch && m_layout.fast &&
+        !m_data.heap) {
+        start_read_ahead(range.offset);
+    }
+    if (m_ahead != nullptr) {
+        m_ahead->read(range.offset, m_stage);
+    } else {
+        m_file.read_at(range.offset, m_stage);
+    }
+    m_stage_row   = isub;
+    m_stage_first = first;
+    m_stage_last  = last;
+    m_stage_range = range;
+    return Staged{
+        .cell = m_stage.data(), .first = m_stage_first, .last = m_stage_last};
+}
+
+inline void SearchFile::start_read_ahead(std::uint64_t offset) {
+    const auto last = data_range(m_table.nrows - 1U);
+    m_ahead         = std::make_unique<::psrio::detail::ReadAhead>(
+        m_file.duplicate(), offset, last.offset + last.nbytes,
+        kReadAheadBlocks);
+}
+
+inline void SearchFile::set_prefetch(bool enable) {
+    m_prefetch = enable;
+    if (!enable) {
+        m_ahead.reset();
+    }
+}
+
+inline void SearchFile::release_buffers() {
+    m_ahead.reset();
+    m_file.release(m_stage_range.offset, m_stage_range.nbytes);
+    m_stage       = {};
+    m_floats      = {};
+    m_cell        = {};
+    m_meta        = {};
+    m_meta_row    = std::numeric_limits<std::uint64_t>::max();
+    m_stage_row   = std::numeric_limits<std::uint64_t>::max();
+    m_stage_first = 0;
+    m_stage_last  = 0;
+    m_stage_range = {};
+}
+
+inline void SearchFile::decode_run(const std::byte* cell,
+                                   std::uint64_t isamp,
+                                   std::uint64_t count,
+                                   std::span<float> dest) const {
+    // Samples decode independently into disjoint rows of dest.
+    [[maybe_unused]] const bool wide =
+        ::psrio::detail::parallel_worthwhile(count * m_nchan);
+    const auto run = [&](auto&& decode) {
+        PSRIO_OMP(omp parallel for schedule(static) if (wide))
+        for (std::uint64_t index = 0; index < count; ++index) {
+            decode(cell, isamp + index,
+                   dest.subspan(static_cast<std::size_t>(index * m_nchan),
+                                static_cast<std::size_t>(m_nchan)));
+        }
+    };
     if (m_input_nbits == 8 && m_layout.fast) {
         if (m_sum) {
             if (m_signint) {
-                decode_u8<true, true>(bytes, isamp, dest);
+                run([this](const std::byte* bytes, std::uint64_t sample,
+                           std::span<float> out) {
+                    decode_u8<true, true>(bytes, sample, out);
+                });
             } else {
-                decode_u8<false, true>(bytes, isamp, dest);
+                run([this](const std::byte* bytes, std::uint64_t sample,
+                           std::span<float> out) {
+                    decode_u8<false, true>(bytes, sample, out);
+                });
             }
         } else if (m_signint) {
-            decode_u8<true, false>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_u8<true, false>(bytes, sample, out);
+            });
         } else {
-            decode_u8<false, false>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_u8<false, false>(bytes, sample, out);
+            });
         }
         return;
     }
     if (m_input_nbits == 16 && m_layout.fast) {
         if (m_sum) {
-            decode_i16<true>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_i16<true>(bytes, sample, out);
+            });
         } else {
-            decode_i16<false>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_i16<false>(bytes, sample, out);
+            });
         }
         return;
     }
     if (m_input_nbits < 8) {
         if (m_sum) {
-            decode_packed<true>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_packed<true>(bytes, sample, out);
+            });
         } else {
-            decode_packed<false>(bytes, isamp, dest);
+            run([this](const std::byte* bytes, std::uint64_t sample,
+                       std::span<float> out) {
+                decode_packed<false>(bytes, sample, out);
+            });
         }
         return;
     }
     if (m_sum) {
-        decode_indexed<true>(bytes, isamp, dest);
+        run([this](const std::byte* bytes, std::uint64_t sample,
+                   std::span<float> out) {
+            decode_indexed<true>(bytes, sample, out);
+        });
     } else {
-        decode_indexed<false>(bytes, isamp, dest);
+        run([this](const std::byte* bytes, std::uint64_t sample,
+                   std::span<float> out) {
+            decode_indexed<false>(bytes, sample, out);
+        });
     }
 }
 
 inline std::uint64_t SearchFile::read_samples(std::uint64_t count,
                                               std::span<float> dest) {
     check_sample_request(count, dest.size());
-    const auto to_read = std::min(count, m_nsamples - m_sample);
-    for (std::uint64_t index = 0; index < to_read; ++index) {
-        decode_sample(m_sample + index,
-                      dest.subspan(static_cast<std::size_t>(index * m_nchan),
-                                   static_cast<std::size_t>(m_nchan)));
+    const auto to_read  = std::min(count, m_nsamples - m_sample);
+    std::uint64_t index = 0;
+    while (index < to_read) {
+        const auto global = m_sample + index;
+        const auto isub   = global / m_nsblk;
+        const auto isamp  = global % m_nsblk;
+        load_calibration(isub);
+        const auto staged = stage(isub, isamp);
+        const auto run    = std::min(to_read - index, staged.last - isamp);
+        decode_run(staged.cell, isamp - staged.first, run,
+                   dest.subspan(static_cast<std::size_t>(index * m_nchan),
+                                static_cast<std::size_t>(run * m_nchan)));
+        index += run;
     }
     if (m_fswap && to_read > 0U) {
         reverse_unpacked_channels(
@@ -1020,23 +1313,19 @@ inline std::uint64_t SearchFile::read_block(std::uint64_t count,
             "psrio: reader cursor is past the readable samples");
     }
     const auto to_read = std::min(count, m_nsamples - m_sample);
-    for (std::uint64_t index = 0; index < to_read; ++index) {
-        decode_sample(m_sample + index, m_row);
-        if (m_fswap) {
-            reverse_unpacked_channels(std::span<float>(m_row), 1U, m_nchan, 1U);
-        }
-        auto* out =
-            dest.data() + static_cast<std::size_t>(index * m_bytes_per_sample);
-        for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-            auto bits = std::bit_cast<std::uint32_t>(
-                m_row[static_cast<std::size_t>(chan)]);
-            bits = ::psrio::detail::to_little_endian(bits);
-            std::memcpy(out + (static_cast<std::size_t>(chan) * 4U), &bits,
-                        sizeof(bits));
+    m_floats.resize(static_cast<std::size_t>(to_read * m_nchan));
+    const auto got = read_samples(to_read, std::span<float>(m_floats));
+    auto* out      = dest.data();
+    if constexpr (std::endian::native == std::endian::little) {
+        std::memcpy(out, m_floats.data(), m_floats.size() * sizeof(float));
+    } else {
+        for (std::size_t index = 0; index < m_floats.size(); ++index) {
+            auto bits = std::bit_cast<std::uint32_t>(m_floats[index]);
+            bits      = ::psrio::detail::to_little_endian(bits);
+            std::memcpy(out + (index * 4U), &bits, sizeof(bits));
         }
     }
-    m_sample += to_read;
-    return to_read;
+    return got;
 }
 
 inline std::uint64_t SearchFile::read_bytes(std::uint64_t nbytes,

@@ -24,7 +24,6 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
 #include <vector>
 
 namespace psrio::cli {
@@ -414,10 +413,7 @@ void run_dedisperse(const DedisperseOptions& opts, const Context& ctx) {
         f_ref = 0.5F * (f_min + f_max);
     }
 
-    const int threads = opts.threads > 0
-                            ? opts.threads
-                            : static_cast<int>(std::max(
-                                  1U, std::thread::hardware_concurrency()));
+    const int threads = opts.threads > 0 ? opts.threads : default_threads();
     const auto exec   = dmt::Exec::cpu(threads);
     auto algo         = opts.algo;
     if (algo == "auto") {
@@ -493,7 +489,13 @@ void add_dedisperse(CLI::App& app, Context& ctx) {
         ->required();
     auto* dm = sub->add_option("-d,--dm", opts->dms,
                                "DM trials in pc/cm^3, comma separated")
-                   ->delimiter(',');
+                   ->delimiter(',')
+                   // One token per use, so `--dm 0,10 in.fil` leaves the
+                   // input to the positional argument. Repeating --dm adds
+                   // more trials.
+                   ->expected(1)
+                   ->allow_extra_args(false)
+                   ->multi_option_policy(CLI::MultiOptionPolicy::TakeAll);
     auto* start =
         sub->add_option("--dm-start", opts->dm_start, "First DM of a grid");
     auto* end = sub->add_option("--dm-end", opts->dm_end, "Last DM of a grid");
@@ -518,7 +520,8 @@ void add_dedisperse(CLI::App& app, Context& ctx) {
         ->capture_default_str()
         ->check(CLI::PositiveNumber);
     sub->add_option("-j,--threads", opts->threads,
-                    "Threads (default: all cores)")
+                    "Threads (default: OMP_NUM_THREADS, else all available "
+                    "cores)")
         ->check(CLI::NonNegativeNumber);
     sub->add_option("--format", opts->format,
                     "Output format: tim, dat, or auto (from -o, else tim)")

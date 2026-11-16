@@ -36,6 +36,7 @@ endif()
 # Configuration options
 option(PSRIO_BUILD_TESTS "Build test suite" ${PSRIO_IS_TOP_LEVEL})
 option(PSRIO_BUILD_APPLICATIONS "Build psrio CLI applications" ${PSRIO_IS_TOP_LEVEL})
+option(PSRIO_CLI_WITH_DMT "Build the psrio dedisperse command (fetches dmt and FFTW)" ON)
 option(PSRIO_BUILD_DOCS "Build documentation" OFF)
 option(PSRIO_ENABLE_COVERAGE "Enable code coverage for tests" OFF)
 option(PSRIO_WITH_HDF5 "Enable the opt-in FBH5 reader" OFF)
@@ -57,6 +58,10 @@ add_library(${PROJECT_NAME} INTERFACE)
 add_library(${PROJECT_NAME}::${PROJECT_NAME} ALIAS ${PROJECT_NAME})
 
 target_compile_features(${PROJECT_NAME} INTERFACE cxx_std_20)
+# The PSRFITS reader reads ahead on a background thread (std::async).
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
+target_link_libraries(${PROJECT_NAME} INTERFACE Threads::Threads)
 
 target_include_directories(
   ${PROJECT_NAME} INTERFACE $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -123,7 +128,18 @@ if(PSRIO_WITH_HDF5)
   add_library(psrio::fbh5 ALIAS psrio_fbh5)
   set_target_properties(psrio_fbh5 PROPERTIES EXPORT_NAME fbh5)
   target_compile_features(psrio_fbh5 INTERFACE cxx_std_20)
-  target_link_libraries(psrio_fbh5 INTERFACE ${PROJECT_NAME} HighFive::HighFive)
+  # HighFive is header-only. When psrio fetched it, the install carries its
+  # headers and the installed target links HDF5 directly; a HighFive found on
+  # the system is looked up again by the installed config.
+  if(HighFive_ADDED)
+    set(PSRIO_BUNDLE_HIGHFIVE ON)
+  else()
+    set(PSRIO_BUNDLE_HIGHFIVE OFF)
+  endif()
+  target_link_libraries(
+    psrio_fbh5 INTERFACE ${PROJECT_NAME} $<BUILD_INTERFACE:HighFive::HighFive>
+                         $<INSTALL_INTERFACE:HDF5::HDF5>
+  )
 endif()
 
 if(PSRIO_WITH_PSRDADA)
@@ -227,6 +243,13 @@ if(PSRIO_INSTALL)
   )
 
   install(DIRECTORY ${PROJECT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+  if(PSRIO_WITH_HDF5 AND PSRIO_BUNDLE_HIGHFIVE)
+    install(
+      DIRECTORY ${HighFive_SOURCE_DIR}/include/highfive
+      DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+      PATTERN "*.in" EXCLUDE
+    )
+  endif()
 
   install(
     EXPORT psrioTargets

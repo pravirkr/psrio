@@ -68,6 +68,12 @@ void add_digifil(CLI::App& app, Context& ctx) {
         ->capture_default_str();
     sub->add_flag("-c,--rescale-constant", config.rescale_constant,
                   "Keep the offset and scale from the first interval");
+    sub->add_option("--rescale-clip", config.rescale_clip,
+                    "Robust rescaling: leave values more than this many "
+                    "sigma from a channel's mean out of its next statistics "
+                    "(0: dspsr's plain mean and variance)")
+        ->capture_default_str()
+        ->check(CLI::NonNegativeNumber);
     sub->add_option("-s,--scale", config.scale_fac,
                     "Extra scale applied before digitising")
         ->capture_default_str();
@@ -78,6 +84,7 @@ void add_digifil(CLI::App& app, Context& ctx) {
                     "Input samples per block (default: dspsr's block for "
                     "256 MB)")
         ->check(CLI::PositiveNumber);
+    add_threads_option(*sub);
     sub->callback([opts, &ctx] { run_digifil(*opts, ctx); });
 }
 

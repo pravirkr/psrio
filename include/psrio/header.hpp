@@ -5,6 +5,7 @@
 #include "psrio/detail/mmap.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -102,14 +103,18 @@ struct Header {
         return std::abs(foff) * static_cast<double>(nchans);
     }
 
-    [[nodiscard]] double ftop() const noexcept { return fch1 - (0.5 * foff); }
+    /// Upper edge of the band, in MHz, whichever way foff points.
+    [[nodiscard]] double ftop() const noexcept {
+        return std::max(first_edge(), last_edge());
+    }
 
+    /// Lower edge of the band, in MHz, whichever way foff points.
     [[nodiscard]] double fbottom() const noexcept {
-        return ftop() + (foff * static_cast<double>(nchans));
+        return std::min(first_edge(), last_edge());
     }
 
     [[nodiscard]] double fcenter() const noexcept {
-        return 0.5 * (ftop() + fbottom());
+        return 0.5 * (first_edge() + last_edge());
     }
 
     [[nodiscard]] double center_frequency() const noexcept { return fcenter(); }
@@ -146,6 +151,16 @@ struct Header {
     /// number of channels summed into the series.
     /// @throws IoError if the file cannot be written.
     void make_inf(const std::filesystem::path& path) const;
+
+    /// Band edge before the first channel in file order, fch1 - 0.5 * foff.
+    [[nodiscard]] double first_edge() const noexcept {
+        return fch1 - (0.5 * foff);
+    }
+
+    /// Band edge after the last channel in file order.
+    [[nodiscard]] double last_edge() const noexcept {
+        return first_edge() + (foff * static_cast<double>(nchans));
+    }
 };
 
 inline Header Header::from_sigproc(const std::filesystem::path& path) {
