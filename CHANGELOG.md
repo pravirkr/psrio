@@ -26,6 +26,20 @@ All notable changes to this project will be documented in this file.
   4-, 8- and 16-bit output differs only at .5 rounding boundaries, because
   sigpyproc's `fastmath` kernel fuses the multiply-add.
 
+### Channel statistics
+
+- `psrio::stats::ChannelStats`: per-channel mean, variance, skewness,
+  (excess) kurtosis, min and max in one pass. Each block uses double power
+  sums about the running mean, merged with Pébay's update; the threads split
+  the channels, so results do not depend on the thread count.
+  `stats::compute(BlockSource&, options)` reads the next block while the
+  current one is accumulated.
+- `psrio stats` and `psrio bandpass` (`spp_stats`/`spp_bandpass` output,
+  table or CSV), over `.fil`, `.sf` and multi-file input. On a 1.7 GB 8-bit
+  UWL filterbank, `stats` takes 1.6 s against `spp_stats`' 10.8 s and agrees
+  to 2e-7 (kurtosis 4e-5). `bandpass` matches the float64 channel means;
+  `spp_bandpass` sums in float32 and is off by up to 0.49 (0.4%).
+
 ### Earlier unreleased work
 
 Fixes and performance work from validation on Parkes UWL search-mode data

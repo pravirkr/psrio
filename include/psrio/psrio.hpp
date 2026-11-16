@@ -20,6 +20,7 @@
 #include "psrio/open.hpp"              // IWYU pragma: export
 #include "psrio/packed.hpp"            // IWYU pragma: export
 #include "psrio/scrunch.hpp"           // IWYU pragma: export
+#include "psrio/stats.hpp"             // IWYU pragma: export
 #include "psrio/timeseries.hpp"        // IWYU pragma: export
 
 #include <string_view>

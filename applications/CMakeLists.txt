@@ -52,6 +52,7 @@ add_library(
   cmd_decimate.cpp
   cmd_convert.cpp
   cmd_digifil.cpp
+  cmd_stats.cpp
 )
 target_include_directories(psrio_cli_commands PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(

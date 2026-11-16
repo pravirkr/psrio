@@ -238,6 +238,7 @@ void add_splice(CLI::App& app, Context& ctx);
 void add_decimate(CLI::App& app, Context& ctx);
 void add_convert(CLI::App& app, Context& ctx);
 void add_digifil(CLI::App& app, Context& ctx);
+void add_stats(CLI::App& app, Context& ctx);
 void add_dedisperse(CLI::App& app, Context& ctx);
 
 } // namespace psrio::cli
