@@ -662,3 +662,113 @@ TEST_CASE("SearchFile reads the same samples with and without read-ahead",
     CHECK(header->nchans == 8);
     CHECK(header->refdm == std::optional<double>(12.5));
 }
+
+TEST_CASE("SearchFile decode options select products and calibration",
+          "[psrfits][decode]") {
+    using psrio::formats::psrfits::DecodeOptions;
+    using psrio::formats::psrfits::SearchStream;
+    Geometry geo;
+    geo.nchan = 4;
+    geo.npol  = 4;
+    geo.nsblk = 3;
+    geo.nsub  = 2;
+    geo.zero  = 10.0;
+    const std::vector<double> freqs{100.0, 100.5, 101.0, 101.5};
+    const std::vector<float> weights{1.0F, 0.5F, 2.0F, 0.25F};
+    std::vector<float> scales;
+    std::vector<float> offsets;
+    for (int index = 0; index < 16; ++index) {
+        scales.push_back(1.0F + (0.125F * static_cast<float>(index)));
+        offsets.push_back(static_cast<float>(index) - 4.0F);
+    }
+    const auto raw = [](int row, int samp, int pol, int chan) {
+        return (row * 50) + (samp * 13) + (pol * 5) + chan;
+    };
+    std::vector<std::byte> table;
+    for (int row = 0; row < geo.nsub; ++row) {
+        push_row_prefix(table, geo, freqs, weights, offsets, scales,
+                        geo.nsblk * geo.tbin,
+                        (row + 0.5) * geo.nsblk * geo.tbin);
+        for (int samp = 0; samp < geo.nsblk; ++samp) {
+            for (int pol = 0; pol < geo.npol; ++pol) {
+                for (int chan = 0; chan < geo.nchan; ++chan) {
+                    append_be(table, static_cast<std::uint8_t>(
+                                         raw(row, samp, pol, chan)));
+                }
+            }
+        }
+    }
+    FitsFileBytes file;
+    primary_cards(file);
+    subint_header(file, geo, table.size() / static_cast<std::size_t>(geo.nsub));
+    file.raw(table);
+    file.pad_data();
+    const TempPath path("psrio-psrfits-decode.sf");
+    file.write(path.path());
+
+    const auto calibrated = [&](int row, int samp, int pol, int chan) {
+        const auto index = static_cast<std::size_t>((pol * 4) + chan);
+        return ((static_cast<float>(raw(row, samp, pol, chan)) - 10.0F) *
+                scales[index]) +
+               offsets[index];
+    };
+    const auto check = [&](const DecodeOptions& options, auto&& expected) {
+        SearchFile reader(path.path(), options);
+        REQUIRE(reader.nsamples() == 6U);
+        const auto got = reader.read_samples<float>(6);
+        for (int sample = 0; sample < 6; ++sample) {
+            for (int chan = 0; chan < 4; ++chan) {
+                INFO("sample " << sample << " chan " << chan);
+                CHECK(got[static_cast<std::size_t>((sample * 4) + chan)] ==
+                      Catch::Approx(expected(sample / 3, sample % 3, chan)));
+            }
+        }
+    };
+
+    SECTION("default: calibrated, weighted AA+BB") {
+        check(DecodeOptions{}, [&](int row, int samp, int chan) {
+            return (calibrated(row, samp, 0, chan) +
+                    calibrated(row, samp, 1, chan)) *
+                   weights[static_cast<std::size_t>(chan)];
+        });
+    }
+    SECTION("raw stored products, as dspsr without --scloffs") {
+        for (int pol = 0; pol < 4; ++pol) {
+            INFO("product " << pol);
+            check(DecodeOptions{.scloffs = false,
+                                .weights = false,
+                                .product = pol},
+                  [&](int row, int samp, int chan) {
+                      return static_cast<float>(raw(row, samp, pol, chan));
+                  });
+        }
+    }
+    SECTION("one calibrated product") {
+        check(DecodeOptions{.scloffs = true, .weights = false, .product = 2},
+              [&](int row, int samp, int chan) {
+                  return calibrated(row, samp, 2, chan);
+              });
+    }
+    SECTION("raw Stokes I with weights") {
+        check(DecodeOptions{.scloffs = false, .weights = true, .product = -1},
+              [&](int row, int samp, int chan) {
+                  return static_cast<float>(raw(row, samp, 0, chan) +
+                                            raw(row, samp, 1, chan)) *
+                         weights[static_cast<std::size_t>(chan)];
+              });
+    }
+    SECTION("a stream passes the options to every file") {
+        const std::vector<std::filesystem::path> paths{path.path()};
+        SearchStream stream(
+            paths,
+            DecodeOptions{.scloffs = false, .weights = false, .product = 1});
+        const auto got = stream.read_samples<float>(1);
+        CHECK(got[3] == static_cast<float>(raw(0, 0, 1, 3)));
+    }
+    SECTION("products past NPOL are rejected") {
+        CHECK_THROWS_AS(SearchFile(path.path(), DecodeOptions{.product = 4}),
+                        psrio::ValidationError);
+        CHECK_THROWS_AS(SearchFile(path.path(), DecodeOptions{.product = -2}),
+                        psrio::ValidationError);
+    }
+}

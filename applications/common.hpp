@@ -8,6 +8,7 @@
 #include <optional>
 #include <ostream>
 #include <psrio/block_source.hpp>
+#include <psrio/formats/psrfits/reader.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
 #include <psrio/timeseries.hpp>
@@ -73,14 +74,18 @@ inline constexpr std::uint64_t kDefaultGulp = 65536;
 /// describes either one in SIGPROC form.
 class Input {
 public:
+    /// @p decode sets how search-mode PSRFITS DATA becomes samples; other
+    /// formats ignore it.
     /// @throws psrio::Error if the file cannot be opened.
-    explicit Input(const std::filesystem::path& path);
+    explicit Input(const std::filesystem::path& path,
+                   const formats::psrfits::DecodeOptions& decode = {});
 
     /// Open one file, or several filterbank or search-mode PSRFITS files in
     /// the order given. The files must be one contiguous observation.
     /// @throws psrio::Error if a file cannot be opened or the files do not
     ///         join.
-    explicit Input(std::span<const std::filesystem::path> paths);
+    explicit Input(std::span<const std::filesystem::path> paths,
+                   const formats::psrfits::DecodeOptions& decode = {});
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;

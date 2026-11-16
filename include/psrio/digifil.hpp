@@ -8,6 +8,7 @@
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/parallel.hpp"
 #include "psrio/detail/skip.hpp"
+#include "psrio/formats/psrfits/reader.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/formats/sigproc/writer.hpp"
 #include "psrio/packed.hpp"
@@ -91,9 +92,19 @@ struct Config {
     /// Keep only this input IF, or all IFs when negative (-P).
     int poln_select{-1};
     /// Input samples per block. Rescaling statistics depend on the block
-    /// boundaries during the first interval. Defaults to dspsr's block for a
-    /// 256 MB RAM limit (default_gulp()).
+    /// boundaries during the first interval. Defaults to dspsr's block for
+    /// max_ram_mb (default_gulp()).
     std::optional<std::uint64_t> gulp;
+    /// RAM limit in MiB that sets the default block, as dspsr `-U`.
+    double max_ram_mb{256.0};
+    /// Search-mode PSRFITS: apply `DAT_SCL`, `DAT_OFFS`, and `ZERO_OFF`
+    /// (dspsr `--scloffs`). Used by decode_options() when the caller opens
+    /// the file; the pipeline itself does not read it.
+    bool scloffs{false};
+
+    [[nodiscard]] double max_ram_bytes() const noexcept {
+        return max_ram_mb * 1024.0 * 1024.0;
+    }
 
     /// @throws ValidationError if a setting is out of range.
     void validate() const {
@@ -120,8 +131,27 @@ struct Config {
         if (gulp.has_value() && *gulp == 0U) {
             throw ValidationError("psrio: digifil gulp must be positive");
         }
+        if (!std::isfinite(max_ram_mb) || max_ram_mb <= 0.0) {
+            throw ValidationError(fmt::format(
+                "psrio: digifil RAM limit must be positive, got {} MB",
+                max_ram_mb));
+        }
     }
 };
+
+/// How dspsr's digifil decodes search-mode PSRFITS for @p config: DAT_SCL
+/// and DAT_OFFS only with Config::scloffs, no DAT_WTS, and `-P` picking a
+/// stored product (AA, BB, ...) instead of an IF of the decoded stream.
+/// Open the file with these options and run the pipeline with
+/// poln_select -1.
+[[nodiscard]] inline formats::psrfits::DecodeOptions
+decode_options(const Config& config) noexcept {
+    return formats::psrfits::DecodeOptions{
+        .scloffs = config.scloffs,
+        .weights = false,
+        .product = config.poln_select >= 0 ? config.poln_select : -1,
+    };
+}
 
 /// Input samples per block that dspsr reads under a RAM limit.
 ///
@@ -162,13 +192,14 @@ psrfits_block_samples(int stored_nbits,
                       std::uint64_t subint_samples,
                       bool sum_feeds,
                       std::uint64_t tscrunch,
-                      std::uint64_t fscrunch) {
+                      std::uint64_t fscrunch,
+                      double max_ram_bytes = kDefaultMaxRamBytes) {
     const auto time_factor = std::max<std::uint64_t>(tscrunch, 1U);
     const auto chan_factor = std::max<std::uint64_t>(fscrunch, 1U);
     const int copies       = 1 + (chan_factor > 1U ? 1 : 0) +
                              (time_factor > 1U ? 1 : 0) + (sum_feeds ? 1 : 0);
     return block_samples(stored_nbits, npol, nchans, copies, subint_samples,
-                         kDefaultMaxRamBytes);
+                         max_ram_bytes);
 }
 
 /// Per-column rescaling to zero mean and unit variance, as dspsr `Rescale`.
@@ -675,12 +706,15 @@ output_header(const formats::sigproc::FilterbankHeader& input,
     return out;
 }
 
-/// Default input block for @p source: dspsr's block for a 256 MB RAM limit.
-[[nodiscard]] inline std::uint64_t default_gulp(const BlockSource& source,
-                                                const Pipeline& pipeline) {
+/// Default input block for @p source: dspsr's block for a RAM limit
+/// (256 MB unless given).
+[[nodiscard]] inline std::uint64_t
+default_gulp(const BlockSource& source,
+             const Pipeline& pipeline,
+             double max_ram_bytes = kDefaultMaxRamBytes) {
     return block_samples(source.nbits(), source.nifs(), source.nchans(),
                          pipeline.float_copies(), kSigprocResolution,
-                         kDefaultMaxRamBytes);
+                         max_ram_bytes);
 }
 
 /// SIGPROC header that describes @p source, from the reader's own header when
@@ -1010,8 +1044,9 @@ private:
         m_start    = start;
         m_count    = count;
         m_pipeline = std::make_unique<Pipeline>(m_config, layout());
-        m_gulp   = m_config.gulp.value_or(default_gulp(*m_input, *m_pipeline));
-        m_header = output_header(header, *m_pipeline, start);
+        m_gulp     = m_config.gulp.value_or(
+            default_gulp(*m_input, *m_pipeline, m_config.max_ram_bytes()));
+        m_header   = output_header(header, *m_pipeline, start);
         m_nsamples = count / m_pipeline->tscrunch();
         m_input->set_fswap(false);
         restart(start, count);

@@ -218,6 +218,19 @@ struct PolPlan {
 
 namespace psrio::formats::psrfits {
 
+/// How SearchFile turns stored DATA into float samples.
+struct DecodeOptions {
+    /// Apply `DAT_SCL`, `DAT_OFFS`, and `ZERO_OFF` (dspsr `--scloffs`).
+    /// Without them samples are the stored digits (2-bit data keeps the dspsr
+    /// levels).
+    bool scloffs{true};
+    /// Multiply by `DAT_WTS`.
+    bool weights{true};
+    /// Stored polarisation product to read (0 .. NPOL-1, for example 0 for
+    /// AA and 1 for BB), or -1 for Stokes I (the POL_TYPE rule below).
+    int product{-1};
+};
+
 /**
  * @brief Search-mode PSRFITS file, streamed as calibrated Stokes I.
  *
@@ -242,7 +255,12 @@ public:
 
     /// @throws IoError if @p path cannot be opened.
     /// @throws FormatError if @p path is not an uncompressed search-mode file.
-    explicit SearchFile(const std::filesystem::path& path);
+    explicit SearchFile(const std::filesystem::path& path)
+        : SearchFile(path, DecodeOptions{}) {}
+
+    /// @throws ValidationError if @p options.product is not -1 or a stored
+    ///         product.
+    SearchFile(const std::filesystem::path& path, DecodeOptions options);
 
     SearchFile(const SearchFile&)                = delete;
     SearchFile& operator=(const SearchFile&)     = delete;
@@ -264,8 +282,12 @@ public:
         return m_nsblk;
     }
 
-    /// True when Stokes I is the sum of the first two stored products.
+    /// True when samples are the sum of the first two stored products.
     [[nodiscard]] bool sums_polarisations() const noexcept { return m_sum; }
+
+    [[nodiscard]] const DecodeOptions& decode_options() const noexcept {
+        return m_options;
+    }
 
     /// SUBINT rows in this file.
     [[nodiscard]] std::uint64_t nrows() const noexcept { return m_table.nrows; }
@@ -482,6 +504,9 @@ private:
     bool m_has_dej{false};
     bool m_has_dm{false};
     float m_zero{0.0F};
+    /// First stored product read by the decoders.
+    std::uint64_t m_pol0{0};
+    DecodeOptions m_options{};
     double m_tsamp{0.0};
     double m_tstart{0.0};
     double m_fch1{0.0};
@@ -526,7 +551,11 @@ private:
     bool m_prefetch{true};
 };
 
-inline SearchFile::SearchFile(const std::filesystem::path& path) { load(path); }
+inline SearchFile::SearchFile(const std::filesystem::path& path,
+                              DecodeOptions options)
+    : m_options(options) {
+    load(path);
+}
 
 inline void SearchFile::load(const std::filesystem::path& path) {
     try {
@@ -623,9 +652,24 @@ inline void SearchFile::load_geometry() {
         throw FormatError("psrio: DATA does not fill a whole number of bytes");
     }
     m_data_bytes = data_bits / 8U;
-    m_zero    = static_cast<float>(sub.find_number("ZERO_OFF").value_or(0.0));
-    m_signint = sub.find_integer("SIGNINT").value_or(0) != 0;
-    m_data    = detail::require_column(m_table, "DATA");
+    if (m_options.product >= 0) {
+        if (std::cmp_greater_equal(m_options.product, npol)) {
+            throw ValidationError(fmt::format(
+                "psrio: polarisation product {} is out of range for NPOL {}",
+                m_options.product, npol));
+        }
+        m_sum  = false;
+        m_pol0 = static_cast<std::uint64_t>(m_options.product);
+    } else if (m_options.product != -1) {
+        throw ValidationError(fmt::format(
+            "psrio: polarisation product must be -1 or 0 .. {}, got {}",
+            npol - 1, m_options.product));
+    }
+    m_zero = m_options.scloffs
+                 ? static_cast<float>(sub.find_number("ZERO_OFF").value_or(0.0))
+                 : 0.0F;
+    m_signint        = sub.find_integer("SIGNINT").value_or(0) != 0;
+    m_data           = detail::require_column(m_table, "DATA");
     m_scales_col     = detail::require_column(m_table, "DAT_SCL");
     m_offsets_col    = detail::require_column(m_table, "DAT_OFFS");
     m_weights_col    = detail::require_column(m_table, "DAT_WTS");
@@ -928,11 +972,14 @@ inline void SearchFile::load_calibration(std::uint64_t row) {
     detail::load_reals(meta_cell(row, m_weights_col), m_weights_col,
                        m_weight_raw);
     for (std::size_t index = 0; index < m_scales.size(); ++index) {
-        m_scales[index]  = static_cast<float>(m_scale_raw[index]);
-        m_offsets[index] = static_cast<float>(m_offset_raw[index]);
+        m_scales[index] =
+            m_options.scloffs ? static_cast<float>(m_scale_raw[index]) : 1.0F;
+        m_offsets[index] =
+            m_options.scloffs ? static_cast<float>(m_offset_raw[index]) : 0.0F;
     }
     for (std::size_t index = 0; index < m_weights.size(); ++index) {
-        m_weights[index] = static_cast<float>(m_weight_raw[index]);
+        m_weights[index] =
+            m_options.weights ? static_cast<float>(m_weight_raw[index]) : 1.0F;
     }
     m_cal_row = row;
 }
@@ -976,24 +1023,33 @@ template <bool Signed, bool Sum>
 inline void SearchFile::decode_u8(const std::byte* cell,
                                   std::uint64_t isamp,
                                   std::span<float> dest) const {
-    const auto* base = cell + ((isamp * m_npol) * m_nchan);
-    const float zero = m_zero;
-    for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-        const auto raw0 = static_cast<std::uint8_t>(base[chan]);
-        float first = Signed && raw0 >= 128 ? static_cast<float>(raw0) - 256.0F
-                                            : static_cast<float>(raw0);
-        first       = ((first - zero) * m_scales[chan]) + m_offsets[chan];
-        float value = first; // NOLINT(misc-const-correctness): modified in Sum
-        if constexpr (Sum) {
-            const auto raw1 = static_cast<std::uint8_t>(base[m_nchan + chan]);
-            float second    = Signed && raw1 >= 128
-                                  ? static_cast<float>(raw1) - 256.0F
-                                  : static_cast<float>(raw1);
-            second          = ((second - zero) * m_scales[m_nchan + chan]) +
-                              m_offsets[m_nchan + chan];
-            value           = first + second;
+    const auto nchan = static_cast<std::size_t>(m_nchan);
+    const auto pol0  = static_cast<std::size_t>(m_pol0);
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    const auto* raw0 = reinterpret_cast<const std::uint8_t*>(
+        cell + (((isamp * m_npol) + m_pol0) * m_nchan));
+    const auto* raw1    = raw0 + nchan;
+    const float* scl0   = m_scales.data() + (pol0 * nchan);
+    const float* off0   = m_offsets.data() + (pol0 * nchan);
+    const float* scl1   = scl0 + nchan;
+    const float* off1   = off0 + nchan;
+    const float* wts    = m_weights.data();
+    float* out          = dest.data();
+    const float zero    = m_zero;
+    const auto as_float = [](std::uint8_t raw) {
+        if constexpr (Signed) {
+            return static_cast<float>(static_cast<std::int8_t>(raw));
+        } else {
+            return static_cast<float>(raw);
         }
-        dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
+    };
+    PSRIO_OMP(omp simd)
+    for (std::size_t chan = 0; chan < nchan; ++chan) {
+        float value = ((as_float(raw0[chan]) - zero) * scl0[chan]) + off0[chan];
+        if constexpr (Sum) {
+            value += ((as_float(raw1[chan]) - zero) * scl1[chan]) + off1[chan];
+        }
+        out[chan] = value * wts[chan];
     }
 }
 
@@ -1001,19 +1057,26 @@ template <bool Sum>
 inline void SearchFile::decode_i16(const std::byte* cell,
                                    std::uint64_t isamp,
                                    std::span<float> dest) const {
-    const auto* base = cell + ((isamp * m_npol) * m_nchan * 2U);
-    for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
+    const auto nchan  = static_cast<std::size_t>(m_nchan);
+    const auto pol0   = static_cast<std::size_t>(m_pol0);
+    const auto* base0 = cell + ((((isamp * m_npol) + m_pol0) * m_nchan) * 2U);
+    const auto* base1 = base0 + (nchan * 2U);
+    const float* scl0 = m_scales.data() + (pol0 * nchan);
+    const float* off0 = m_offsets.data() + (pol0 * nchan);
+    const float* scl1 = scl0 + nchan;
+    const float* off1 = off0 + nchan;
+    const float* wts  = m_weights.data();
+    float* out        = dest.data();
+    for (std::size_t chan = 0; chan < nchan; ++chan) {
         const auto first = static_cast<float>(
-            detail::load_be<std::int16_t>(base + (chan * 2U)));
-        // NOLINTNEXTLINE(misc-const-correctness): modified in Sum
-        float value = (first * m_scales[chan]) + m_offsets[chan];
+            detail::load_be<std::int16_t>(base0 + (chan * 2U)));
+        float value = (first * scl0[chan]) + off0[chan];
         if constexpr (Sum) {
             const auto second = static_cast<float>(
-                detail::load_be<std::int16_t>(base + ((m_nchan + chan) * 2U)));
-            value +=
-                (second * m_scales[m_nchan + chan]) + m_offsets[m_nchan + chan];
+                detail::load_be<std::int16_t>(base1 + (chan * 2U)));
+            value += (second * scl1[chan]) + off1[chan];
         }
-        dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
+        out[chan] = value * wts[chan];
     }
 }
 
@@ -1023,6 +1086,7 @@ inline void SearchFile::decode_packed(const std::byte* cell,
                                       std::span<float> dest) const {
     const unsigned samples_per_byte = 8U / static_cast<unsigned>(m_input_nbits);
     const unsigned mask = (1U << static_cast<unsigned>(m_input_nbits)) - 1U;
+    const auto pol0     = static_cast<int>(m_pol0);
     const auto value_of = [&](int pol, std::uint64_t chan) {
         const auto byte_index = static_cast<int>(chan / samples_per_byte);
         const auto field      = static_cast<unsigned>(chan % samples_per_byte);
@@ -1040,13 +1104,15 @@ inline void SearchFile::decode_packed(const std::byte* cell,
         }
         return raw;
     };
+    const auto first0 = m_pol0 * m_nchan;
+    const auto first1 = first0 + m_nchan;
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-        float value = value_of(0, chan);
-        value       = (value * m_scales[chan]) + m_offsets[chan];
+        float value = value_of(pol0, chan);
+        value = (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
         if constexpr (Sum) {
-            float second = value_of(1, chan);
+            float second = value_of(pol0 + 1, chan);
             second =
-                (second * m_scales[m_nchan + chan]) + m_offsets[m_nchan + chan];
+                (second * m_scales[first1 + chan]) + m_offsets[first1 + chan];
             value += second;
         }
         dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
@@ -1070,15 +1136,17 @@ inline void SearchFile::decode_indexed(const std::byte* cell,
                                 : static_cast<float>(byte);
         return value - m_zero;
     };
+    const auto pol0   = static_cast<int>(m_pol0);
+    const auto first0 = m_pol0 * m_nchan;
+    const auto first1 = first0 + m_nchan;
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-        float first = raw_at(0, chan);
-        first       = (first * m_scales[chan]) + m_offsets[chan];
-        float value = first; // NOLINT(misc-const-correctness): modified in Sum
+        float value = raw_at(pol0, chan);
+        value = (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
         if constexpr (Sum) {
-            float second = raw_at(1, chan);
+            float second = raw_at(pol0 + 1, chan);
             second =
-                (second * m_scales[m_nchan + chan]) + m_offsets[m_nchan + chan];
-            value = first + second;
+                (second * m_scales[first1 + chan]) + m_offsets[first1 + chan];
+            value += second;
         }
         dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
     }

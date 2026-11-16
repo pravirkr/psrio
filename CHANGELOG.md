@@ -4,6 +4,30 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### sigpyproc `spp_digifil` parity
+
+- **Behaviour change**: `psrio digifil` on search-mode PSRFITS no longer
+  applies `DAT_SCL`/`DAT_OFFS`/`ZERO_OFF` or `DAT_WTS` unless `--scloffs` is
+  given, as dspsr and `spp_digifil`. Pass `--scloffs` for the previous
+  output. Library readers are unchanged: `SearchFile`/`SearchStream` still
+  decode calibrated, weighted Stokes I by default.
+- `psrfits::DecodeOptions` (`scloffs`, `weights`, `product`) for
+  `SearchFile` and `SearchStream`. `product` reads one stored polarisation
+  (AA, BB, CR, CI) instead of Stokes I. `digifil::decode_options(config)`
+  gives dspsr's choice.
+- `psrio digifil`:
+  - `-P` on PSRFITS selects a stored product.
+  - New `--scloffs`, `-U,--max-ram` (`Config::max_ram_mb`), `-B` (ignored)
+    and `-d 1`.
+  - `-o` is optional and defaults to the input stem with `.fil`.
+- On a Parkes UWL file psrio matches `spp_digifil` to within 1e-5 of output
+  bytes, all at ±1 level, for the default, `--scloffs`, `-P`, `-U` and
+  `-I 0` cases. On SIGPROC input 1-, 2- and float32-bit output is identical;
+  4-, 8- and 16-bit output differs only at .5 rounding boundaries, because
+  sigpyproc's `fastmath` kernel fuses the multiply-add.
+
+### Earlier unreleased work
+
 Fixes and performance work from validation on Parkes UWL search-mode data
 (3 × 12 GB `.sf`, 6656 channels, `AABBCRCI`, on BeeGFS).
 

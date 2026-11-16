@@ -118,7 +118,9 @@ bool is_tim_path(const std::filesystem::path& path) {
     return lower_extension(path) == ".tim";
 }
 
-Input::Input(const std::filesystem::path& path) : m_path(path) {
+Input::Input(const std::filesystem::path& path,
+             const formats::psrfits::DecodeOptions& decode)
+    : m_path(path) {
     if (is_tim_path(path)) {
         m_series.emplace(path);
         m_header = *m_series->sigproc_header();
@@ -134,7 +136,7 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
         return;
     }
     if (formats::psrfits::is_search_path(path)) {
-        formats::psrfits::SearchFile file(path);
+        formats::psrfits::SearchFile file(path, decode);
         m_header         = file.sigproc_header();
         m_psrfits        = true;
         m_stored_nbits   = file.input_nbits();
@@ -172,12 +174,13 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
     m_block.emplace(std::move(reader));
 }
 
-Input::Input(std::span<const std::filesystem::path> paths) {
+Input::Input(std::span<const std::filesystem::path> paths,
+             const formats::psrfits::DecodeOptions& decode) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
     if (paths.size() == 1U) {
-        *this = Input(paths.front());
+        *this = Input(paths.front(), decode);
         return;
     }
     const bool search = formats::psrfits::is_search_path(paths.front());
@@ -206,7 +209,7 @@ Input::Input(std::span<const std::filesystem::path> paths) {
     }
     m_path = paths.front();
     if (search) {
-        formats::psrfits::SearchStream stream(paths);
+        formats::psrfits::SearchStream stream(paths, decode);
         m_header          = stream.sigproc_header();
         m_psrfits         = true;
         m_stored_nbits    = stream.input_nbits();

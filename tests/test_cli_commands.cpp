@@ -366,6 +366,41 @@ TEST_CASE("psrio digifil matches the library pipeline", "[cli][digifil]") {
     CHECK(FilterbankReader(dir / "d.fil").nchans() == 16U);
 }
 
+TEST_CASE("psrio digifil takes dspsr's block and output options",
+          "[cli][digifil]") {
+    const TempDir dir;
+    SECTION("-U sets the block from a RAM limit") {
+        require_ok(psrio_run({"digifil", kTutorial.string(), "-o",
+                              dir / "u.fil", "-U", "1", "-B", "16"}));
+        FilterbankReader reader(kTutorial);
+        const auto header = reader.header();
+        psrio::BlockSource source(std::move(reader));
+        psrio::digifil::Config config;
+        config.max_ram_mb = 1.0;
+        psrio::digifil::run(source, header, dir / "lib.fil", config);
+        CHECK(read_payload(dir / "u.fil") == read_payload(dir / "lib.fil"));
+    }
+    SECTION("without -o the output is the input stem in the working "
+            "directory") {
+        const auto previous = fs::current_path();
+        fs::current_path(dir.path());
+        const auto result = psrio_run({"digifil", kTutorial.string()});
+        fs::current_path(previous);
+        require_ok(result);
+        auto name = kTutorial.filename();
+        name.replace_extension(".fil");
+        CHECK(fs::exists(dir / name.string()));
+    }
+    SECTION("unsupported combinations fail") {
+        CHECK(psrio_run({"digifil", kTutorial.string(), "-o", dir / "a.fil",
+                         "-d", "2"})
+                  .code != 0);
+        CHECK(psrio_run({"digifil", kTutorial.string(), "-o", dir / "b.fil",
+                         "--gulp", "64", "-U", "8"})
+                  .code != 0);
+    }
+}
+
 #ifdef PSRIO_CLI_HAS_DMT
 TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
     const TempDir dir;

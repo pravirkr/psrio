@@ -94,7 +94,12 @@ inline void require_nsuboffs(const SearchFile& previous,
  */
 class SearchStream {
 public:
-    explicit SearchStream(std::span<const std::filesystem::path> paths);
+    explicit SearchStream(std::span<const std::filesystem::path> paths)
+        : SearchStream(paths, DecodeOptions{}) {}
+
+    /// Every file is decoded with @p options (see SearchFile).
+    SearchStream(std::span<const std::filesystem::path> paths,
+                 DecodeOptions options);
 
     SearchStream(const SearchStream&)                = delete;
     SearchStream& operator=(const SearchStream&)     = delete;
@@ -253,15 +258,15 @@ private:
     double m_dej{0.0};
 };
 
-inline SearchStream::SearchStream(
-    std::span<const std::filesystem::path> paths) {
+inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
+                                  DecodeOptions options) {
     if (paths.empty()) {
         throw ValidationError("psrio: a PSRFITS stream needs a file");
     }
     m_files.reserve(paths.size());
     for (const auto& path : paths) {
         m_files.push_back(File{
-            .reader = SearchFile(path),
+            .reader = SearchFile(path, options),
             .first  = 0,
             .count  = 0,
         });
