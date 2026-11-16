@@ -21,7 +21,6 @@
 #include <span>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -47,7 +46,6 @@ struct CleanOptions {
     std::uint64_t zap_start{0};
     std::uint64_t zap_end{0};
     std::string zap_mode{"zero"};
-    bool in_place{false};
 };
 
 /// sigpyproc's default name: the first input's stem plus @p suffix, in the
@@ -283,49 +281,21 @@ void run_zap_times(const CleanOptions& opts, const Context& ctx) {
     } else if (opts.zap_mode == "samples") {
         mode = clean::ZapMode::kSamples;
     }
-    std::filesystem::path output;
-    std::filesystem::path final_path;
-    if (opts.in_place) {
-        if (opts.inputs.size() != 1U) {
-            throw ValidationError("psrio: --in-place takes one input file");
-        }
-        final_path = opts.inputs.front();
-        output     = final_path;
-        output.replace_filename("." + final_path.filename().string() +
-                                ".zap.tmp");
-    } else {
-        output = output_path(opts, "_zap");
-        require_distinct(opts.inputs, output);
-    }
+    const auto output = output_path(opts, "_zap");
+    require_distinct(opts.inputs, output);
     std::mt19937_64 rng{std::random_device{}()};
-    std::uint64_t written = 0;
-    {
-        auto input     = open_filterbank(opts);
-        const auto row = input.row();
-        try {
-            written = write_stream(
-                input.block(), input.header(), output, opts.gulp,
-                [&](std::uint64_t first, std::uint64_t rows,
-                    std::span<float> values) {
-                    const auto lo = std::max(opts.zap_start, first);
-                    const auto hi = std::min(opts.zap_end, first + rows);
-                    if (lo < hi) {
-                        clean::zap_rows(values, rows, row, lo - first,
-                                        hi - first, mode, rng);
-                    }
-                });
-        } catch (...) {
-            if (opts.in_place) {
-                std::error_code ec;
-                std::filesystem::remove(output, ec);
+    auto input         = open_filterbank(opts);
+    const auto row     = input.row();
+    const auto written = write_stream(
+        input.block(), input.header(), output, opts.gulp,
+        [&](std::uint64_t first, std::uint64_t rows, std::span<float> values) {
+            const auto lo = std::max(opts.zap_start, first);
+            const auto hi = std::min(opts.zap_end, first + rows);
+            if (lo < hi) {
+                clean::zap_rows(values, rows, row, lo - first, hi - first, mode,
+                                rng);
             }
-            throw;
-        }
-    }
-    if (opts.in_place) {
-        std::filesystem::rename(output, final_path);
-        output = std::move(final_path);
-    }
+        });
     ctx.info("psrio clean zap-times: replaced samples [{}, {}) with {}; "
              "wrote {} samples to {}",
              opts.zap_start, opts.zap_end, opts.zap_mode, written,
@@ -411,8 +381,6 @@ void add_clean(CLI::App& app, Context& ctx) {
                     "rest of the block), or samples (random other samples)")
         ->capture_default_str()
         ->check(CLI::IsMember({"zero", "gaussian", "samples"}));
-    sub->add_flag("--in-place", times->in_place,
-                  "Replace the input file through a temporary file");
     sub->callback([times, &ctx] { run_zap_times(*times, ctx); });
 
     const auto zerodm = std::make_shared<CleanOptions>();

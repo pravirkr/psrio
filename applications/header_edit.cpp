@@ -51,6 +51,28 @@ std::int64_t parse_int(std::string_view key, std::string_view value) {
     return out;
 }
 
+/// True when @p value is a valid SIGPROC packed coordinate: HHMMSS.S right
+/// ascension below 24 h (@p max_degrees 24), or DDMMSS.S declination within
+/// +-90 degrees (@p max_degrees 90), as sigpyproc's `_sexagesimal_ok`.
+bool sexagesimal_ok(double value, double max_degrees) {
+    if (value < 0.0 && max_degrees == 24.0) {
+        return false;
+    }
+    const double angle   = std::abs(value);
+    const double head    = std::floor(angle / 10000.0);
+    const double rest    = angle - (head * 10000.0);
+    const double minutes = std::floor(rest / 100.0);
+    const double seconds = rest - (minutes * 100.0);
+    // minutes and seconds are never negative: angle is |value|.
+    if (minutes >= 60.0 || seconds >= 60.0) {
+        return false;
+    }
+    if (max_degrees == 24.0) {
+        return head < 24.0;
+    }
+    return head < 90.0 || (head == 90.0 && minutes == 0.0 && seconds == 0.0);
+}
+
 template <typename T> std::string show(const std::optional<T>& value) {
     if (!value.has_value()) {
         return "";
@@ -138,7 +160,14 @@ void apply(sigproc::FilterbankHeader& header,
                 field = target;
             }
         }
-        set_existing(*field, key, int32(false, true), change);
+        const auto number = int32(false, true);
+        if (key == "data_type" &&
+            std::ranges::none_of(sigproc::kDataTypes, [&](const auto& entry) {
+                return entry.id == number;
+            })) {
+            bad_value(key, value, "must be a SIGPROC data_type (0 to 6)");
+        }
+        set_existing(*field, key, number, change);
         return;
     }
     if (key == "barycentric" || key == "pulsarcentric") {
@@ -173,6 +202,15 @@ void apply(sigproc::FilterbankHeader& header,
     }
     if (key == "za_start" && (number < 0.0 || number > 180.0)) {
         bad_value(key, value, "must be within [0, 180]");
+    }
+    if (key == "foff" && number == 0.0) {
+        bad_value(key, value, "must be non-zero");
+    }
+    if (key == "src_raj" && !sexagesimal_ok(number, 24.0)) {
+        bad_value(key, value, "must be a valid HHMMSS.S right ascension");
+    }
+    if (key == "src_dej" && !sexagesimal_ok(number, 90.0)) {
+        bad_value(key, value, "must be a valid DDMMSS.S declination");
     }
     std::optional<double>* field = nullptr;
     for (const auto& [name, target] : {

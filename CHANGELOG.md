@@ -4,166 +4,31 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
-### sigpyproc `spp_digifil` parity
-
-- **Behaviour change**: `psrio digifil` on search-mode PSRFITS no longer
-  applies `DAT_SCL`/`DAT_OFFS`/`ZERO_OFF` or `DAT_WTS` unless `--scloffs` is
-  given, as dspsr and `spp_digifil`. Pass `--scloffs` for the previous
-  output. Library readers are unchanged: `SearchFile`/`SearchStream` still
-  decode calibrated, weighted Stokes I by default.
-- `psrfits::DecodeOptions` (`scloffs`, `weights`, `product`) for
-  `SearchFile` and `SearchStream`. `product` reads one stored polarisation
-  (AA, BB, CR, CI) instead of Stokes I. `digifil::decode_options(config)`
-  gives dspsr's choice.
-- `psrio digifil`:
-  - `-P` on PSRFITS selects a stored product.
-  - New `--scloffs`, `-U,--max-ram` (`Config::max_ram_mb`), `-B` (ignored)
-    and `-d 1`.
-  - `-o` is optional and defaults to the input stem with `.fil`.
-- A CLI built for the host CPU (`PSRIO_CLI_CPU_ARCH=native`, with FMA)
-  matches `spp_digifil` byte for byte on a Parkes UWL file (default,
-  `--scloffs`, `-P 0`) and on SIGPROC input at every bit depth. A build
-  without FMA rounds `x*scale+mean` twice, as dspsr does, and differs from
-  sigpyproc's fused kernel by one level at .5 boundaries (≤ 1e-5 of
-  bytes).
-
-### Channel statistics
-
-- `psrio::stats::ChannelStats`: per-channel mean, variance, skewness,
-  (excess) kurtosis, min and max in one pass. Each block uses double power
-  sums about the running mean, merged with Pébay's update; the threads split
-  the channels, so results do not depend on the thread count.
-  `stats::compute(BlockSource&, options)` reads the next block while the
-  current one is accumulated.
-- `psrio stats` and `psrio bandpass` (`spp_stats`/`spp_bandpass` output,
-  table or CSV), over `.fil`, `.sf` and multi-file input. On a 1.7 GB 8-bit
-  UWL filterbank, `stats` takes 1.6 s against `spp_stats`' 10.8 s and agrees
-  to 2e-7 (kurtosis 4e-5). `bandpass` matches the float64 channel means;
-  `spp_bandpass` sums in float32 and is off by up to 0.49 (0.4%).
-
-### RFI cleaning and header edits
-
-- `psrio clean` (`spp_clean` parity):
-  - `rfi -m mad|iqrm -t 3`: masks channels whose variance, skewness, or
-    kurtosis is an outlier across channels, and fills them with the median
-    channel mean. `--mask-out` writes the masked channel list,
-    `--stats-out` writes the statistics, and `--stats-samples N` estimates
-    them from the first N samples.
-  - `zap-channels -c 1,2 | --mask-file`, `zap-times -s -e -m
-    zero|gaussian|samples [--in-place]`, and `zerodm`.
-  - On a 1.7 GB 8-bit UWL filterbank the `rfi` masks equal `spp_clean`'s
-    (1480 channels for mad, 2242 for iqrm), and the `rfi` and `zap-channels`
-    outputs are byte-identical. With one thread psrio takes 6.5–9 s per
-    command (about 5 s CPU; reads bound the rest) against spp's 32–38 s
-    (output to `/dev/null`).
-  - `zerodm` rounds to the nearest level where sigpyproc truncates, so about
-    half the output bytes are one level higher. sigpyproc's output is biased
-    by -0.5 level.
-- Library `psrio/clean.hpp`:
-  - `mask_doublemad`, `mask_iqrm`, `channel_mask`, `fill_value`,
-    `apply_mask`, `ZeroDm`, and `zap_rows`.
-  - `clean::Source`, a float32 `BlockReader` that masks and removes zero-DM
-    while reading, so it can feed `digifil::Source` with no intermediate
-    file.
-- `psrio header FILE --set key=value ... [--dry-run]` edits SIGPROC keys in
-  place, as `spp_header update`:
-  - It is all or nothing, and the header size never changes. A shorter
-    string is padded with spaces.
-  - Absent keys and `nbits`/`nchans`/`nifs` are refused.
-  - `-k` still prints one key.
-- `psrio::sigproc_header_of(BlockSource)` (shared by digifil and clean).
-
-### Speed and GPU dedispersion
-
-- Vectorised hot loops:
-  - The SIGPROC writer quantises with comparisons instead of
-    `std::fmin`/`fmax`/`std::round`, which are library calls that block
-    vectorisation, and threads the loop.
-  - digifil's encoder quantises whole rows (`quantise_row`).
-  - Rescaler and PSRFITS 8-bit decode loops carry `omp simd`.
-  - Levels are unchanged.
-- `PSRIO_CLI_CPU_ARCH` (default `native`, as dmt) builds the CLI with
-  `-march`; CI pins `x86-64-v3`. With FMA available, `a*b+c` may fuse, so
-  output can differ from earlier builds at rounding level: floats ≤ 5e-7
-  relative, and quantised samples by one level in ≤ 2e-4 of samples.
-  These builds match sigpyproc's fused kernels byte for byte. A build
-  without `-march` reproduces 0.5.0's bytes.
-- On a 1.7 GB 8-bit filterbank in RAM, single-threaded: `digifil` 4.1 s →
-  1.9 s, `clean rfi` 11.4 s → 2.5 s, `stats` 2.1 s → 1.3 s. The full 3-file
-  UWL `digifil` reads at the BeeGFS limit (27–29 s; 27.6 s with `-j 1`).
-- `psrio dedisperse --device cpu|cuda[:N]|hip[:N]` runs dmt on a GPU
-  through its API; psrio has no GPU code. `PSRIO_DMT_GPU`
-  (`AUTO`/`CUDA`/`HIP`/`OFF`) picks dmt's backend. Without a visible GPU
-  at build time, set `DMT_CUDA_ARCHITECTURES` (dmt's `native` falls back to
-  sm_52). Verified to build and to reach the CUDA runtime; not yet run on a
-  GPU.
-
-### Earlier unreleased work
-
-Fixes and performance work from validation on Parkes UWL search-mode data
-(3 × 12 GB `.sf`, 6656 channels, `AABBCRCI`, on BeeGFS).
-
-- **I/O: positioned reads instead of whole-file mappings**:
-  - `SearchFile` and `FilterbankReader` read with `pread` (`detail::ReadFile`).
-    On a parallel file system page faults on a mapping ran at 150–180 MB/s;
-    large aligned reads run at 1.1–1.4 GB/s. The resident set no longer grows
-    with the file: a full 3-file `digifil` peaked at 15.5 GB and now stays
-    near 0.6 GB.
-  - Once reads run forward, `detail::ReadAhead` streams the rest of the file
-    on a background thread in 16 MiB blocks on 16 MiB file boundaries
-    (alignment alone is worth ~25% on BeeGFS), four blocks ahead of the
-    caller. Seeks fall back to direct reads. `set_prefetch(false)` turns it
-    off; `release_buffers()` frees it, and the streams call it when they move
-    past a file.
-  - PSRFITS metadata (`TSUBINT`, `OFFS_SUB`, `DAT_FREQ`, `DAT_WTS`,
-    `DAT_OFFS`, `DAT_SCL`) is read once per row in one request. Headers are
-    parsed from file prefixes (`FilterbankHeader::read`,
-    `parse_prefix`; `psrfits::detail::Source`, `locate_cell`, `read_cell`).
-  - `FilterbankReader::view_bytes()`/`view_block()` keep their zero-copy
-    contract by mapping the file on first use.
-  - Opt-in page-cache eviction: `set_drop_cache(true)` or `PSRIO_DROP_CACHE=1`.
-  - `psrio::psrio` now links `Threads::Threads`.
-- **CPU**: hot loops (PSRFITS decode, digifil rescale/apply/encode) use
-  `PSRIO_OMP(...)` pragmas, active only when the consumer compiles with
-  OpenMP; psrio gains no OpenMP dependency. Every parallel loop keeps each
-  output's arithmetic in serial order, so results do not depend on the thread
-  count. Measured on BeeGFS with 8 cores (cold cache; run-to-run spread is
-  large): full 3-file `psrio digifil -b 8` 258 s → 27–39 s; reading a 9.3 GB
-  8-bit `.fil` 55 s → 9 s. Outputs are byte-identical to 0.5.0 at 1, 3 and 8
-  threads (in a build without `-march`; see above).
-- **`digifil::Source`**: digifil as an in-memory `BlockReader` over any
-  `BlockSource` (including a multi-file PSRFITS stream), so a pipeline can
-  read 8-bit redigitised data without writing a `.fil`. It reads the next
-  input block on another thread while the pipeline runs. `digifil::run` now
-  drives it. Also `digifil::header_of(BlockSource)` and `default_gulp`.
-- **Robust rescaling (opt-in)**: `Config::rescale_clip` / `psrio digifil
-  --rescale-clip k` leaves values beyond k σ of a channel's statistics out of
-  its next statistics. The default stays dspsr's plain mean and variance.
-- **`BlockSource::refdm()` and `BlockSource::sigproc_header()`**, detected
-  from the wrapped reader (the `BlockReader` concept is unchanged).
-  `refdm()` on `FilterbankReader`, `SearchFile`, and `SearchStream`.
-  `SearchFile::frontend()`, `backend()`, `obs_mode()`; `SearchStream::nfiles()`
-  and `file(i)`.
-- **Fixes**:
-  - `ftop()`/`fbottom()` (SIGPROC and `psrio::Header`) returned swapped band
-    edges when `foff > 0`; a frequency table now gives edges too.
-  - `psrio dedisperse --dm 0,411 in.fil` no longer takes `in.fil` as a DM;
-    `--dm` may be repeated.
-  - An installed package built with `PSRIO_WITH_HDF5=ON` and a fetched
-    HighFive failed `find_package(psrio)` on `HighFive::HighFive`; the
-    HighFive headers are now installed and `psrio::fbh5` links `HDF5::HDF5`.
+- **Behaviour changes**:
+  - `psrio digifil` on PSRFITS applies `DAT_SCL`/`DAT_OFFS`/`ZERO_OFF` only with `--scloffs` and never `DAT_WTS`, as dspsr and `spp_digifil`. Library readers still decode calibrated, weighted Stokes I.
+  - `ftop()`/`fbottom()` (SIGPROC and `psrio::Header`) return the band top and bottom whichever way `foff` points; they were swapped for `foff > 0`.
+- **I/O**:
+  - `FilterbankReader` and `SearchFile` read with `pread` instead of `mmap`, with a 16 MiB-aligned read-ahead thread once reads run forward. A full 3-file Parkes UWL `digifil` goes from 258 s to 31 s and 15.5 GB to 0.6 GB peak RSS, byte-identical to 0.5.0.
+  - Internal buffers are bounded (16 MiB staging, 64 MiB read-ahead) and freed when a stream moves past a file. `set_prefetch()`, `release_buffers()`, and `PSRIO_DROP_CACHE=1` / `set_drop_cache()`.
+  - `psrio::psrio` links `Threads::Threads`.
+- **Library**:
+  - `psrfits::DecodeOptions` (`scloffs`, `weights`, `product`) for `SearchFile` and `SearchStream`.
+  - `digifil::Source` (digifil as a `BlockReader`, no intermediate file) and opt-in `Config::rescale_clip`.
+  - `stats::ChannelStats`: one-pass per-channel mean, variance, skewness, kurtosis, min and max, independent of the thread count.
+  - `psrio/clean.hpp`: double-MAD and IQRM channel masks, zero-DM, sample zapping, and `clean::Source`.
+  - `BlockSource::refdm()`, `BlockSource::sigproc_header()`, and `astro::mjd_to_iso8601`.
+  - Hot loops use `PSRIO_OMP(...)`, active only when the consumer builds with OpenMP, and vectorise; results do not depend on the thread count.
 - **CLI**:
-  - `inspect` prints the ISO 8601 UTC start, and for PSRFITS the frontend,
-    backend, observing mode, polarisation type and count, `NSBLK`, subints
-    per file, and `NSUBOFFS`.
-  - `-j,--threads` on `slice`, `splice`, `decimate`, `convert`, `digifil`. The
-    defaults follow `OMP_NUM_THREADS`/`OMP_THREAD_LIMIT` (HTCondor sets them);
-    `dedisperse` no longer defaults to every core of the host.
-  - With OpenMP and no wait policy chosen, `psrio` re-executes itself with
-    `OMP_WAIT_POLICY=passive`, so idle threads do not spin through file
-    waits (this cut charged CPU time about threefold).
-  - `PSRIO_CLI_WITH_DMT=OFF` builds the CLI without dmt/FFTW (no
-    `dedisperse`). `psrio` is installed with `INSTALL_RPATH_USE_LINK_PATH`.
+  - `stats`, `bandpass`, and `clean rfi|zap-channels|zap-times|zerodm`, matching `spp_stats`, `spp_bandpass`, and `spp_clean`. Every `clean` subcommand writes a new file.
+  - `header --set key=value [--dry-run]` edits a `.fil` header in place, as `spp_header update`: all or nothing, same header size, values checked as sigpyproc.
+  - `digifil`: `--scloffs`, `-P` stored product, `-U`, `-B`, `-d 1`, `--rescale-clip`, optional `-o`. Matches `spp_digifil` byte for byte in a native build.
+  - `dedisperse --device cpu|cuda[:N]|hip[:N]` through dmt (`PSRIO_DMT_GPU`; untested on a GPU). `PSRIO_CLI_WITH_DMT=OFF` builds without dmt.
+  - `-j,--threads` follows `OMP_NUM_THREADS`; `psrio` runs OpenMP threads with a passive wait policy.
+  - `inspect` shows the ISO UTC start and PSRFITS frontend, backend, mode, `NSBLK`, subints per file, and `NSUBOFFS`.
+  - `PSRIO_CLI_CPU_ARCH` (default `native`, CI `x86-64-v3`) sets the CLI's `-march`.
+- **Fixes**:
+  - `dedisperse --dm 0,411 in.fil` no longer reads `in.fil` as a DM.
+  - Installed `PSRIO_WITH_HDF5=ON` packages built with a fetched HighFive now pass `find_package(psrio)`.
 
 ## [0.5.0] - 2026-11-11
 

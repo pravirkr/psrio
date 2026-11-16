@@ -16,7 +16,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fmt/format.h>
+#include <fstream>
 #include <initializer_list>
+#include <ios>
 #include <psrio/block_source.hpp>
 #include <psrio/digifil.hpp>
 #include <psrio/formats/sigproc.hpp>
@@ -382,11 +384,10 @@ TEST_CASE("psrio clean zap-times replaces a sample range", "[cli][clean]") {
         }
     }
 
-    const auto copy = dir.path() / "copy.fil";
-    fs::copy_file(kTutorial, copy);
-    require_ok(psrio_run({"clean", "zap-times", copy.string(), "-s", "10", "-e",
-                          "20", "--in-place"}));
-    CHECK(read_payload(copy) == read_payload(dir / "z.fil"));
+    // There is no in-place mode: the input is never overwritten.
+    CHECK(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "10", "-e",
+                     "20", "--in-place"})
+              .code != 0);
     CHECK(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "20", "-e",
                      "10", "-o", dir / "bad.fil"})
               .code != 0);
@@ -418,15 +419,48 @@ TEST_CASE("psrio header --set edits SIGPROC keys in place", "[cli][header]") {
     CHECK(read_payload(copy) == before);
 
     // Refused edits leave the file as it was.
-    const std::vector<std::string> refused{
-        "nbits=8", "tsamp=-1", "unknown=1", "refdm=4",
-        "source_name=" + std::string(80, 'x')};
+    const std::vector<std::string> refused{"nbits=8",
+                                           "tsamp=-1",
+                                           "unknown=1",
+                                           "refdm=4",
+                                           "foff=0",
+                                           "data_type=9",
+                                           "source_name=" +
+                                               std::string(80, 'x')};
     for (const auto& bad : refused) {
         INFO(bad);
         const auto refusal = psrio_run({"header", copy.string(), "--set", bad});
         CHECK(refusal.code != 0);
     }
     CHECK(FilterbankReader(copy).header().tstart == 55000.5);
+
+    // Sky positions must be valid packed HHMMSS.S / DDMMSS.S values, as in
+    // sigpyproc.
+    auto with_position    = FilterbankReader(kTutorial).header();
+    with_position.src_raj = 123456.0;
+    with_position.src_dej = -101010.0;
+    const auto header_raw = with_position.to_bytes();
+    const auto payload    = read_payload(kTutorial);
+    const auto positioned = dir.path() / "position.fil";
+    {
+        std::ofstream out(positioned, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(header_raw.data()), // NOLINT
+                  static_cast<std::streamsize>(header_raw.size()));
+        out.write(reinterpret_cast<const char*>(payload.data()), // NOLINT
+                  static_cast<std::streamsize>(payload.size()));
+    }
+    for (const std::string bad :
+         {"src_raj=250000", "src_raj=126000", "src_raj=-10000",
+          "src_dej=910000", "src_dej=106100"}) {
+        INFO(bad);
+        CHECK(psrio_run({"header", positioned.string(), "--set", bad}).code !=
+              0);
+    }
+    require_ok(psrio_run({"header", positioned.string(), "--set",
+                          "src_raj=101010.5", "--set", "src_dej=-900000"}));
+    const auto moved = FilterbankReader(positioned).header();
+    CHECK(moved.src_raj == 101010.5);
+    CHECK(moved.src_dej == -900000.0);
 }
 
 TEST_CASE("psrio digifil takes dspsr's block and output options",

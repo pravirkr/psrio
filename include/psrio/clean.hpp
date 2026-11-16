@@ -409,7 +409,8 @@ struct Steps {
  * Models concepts::BlockReader as a float32 stream with the input's
  * channels, so it can feed digifil::Source or a writer without an
  * intermediate file. Masked columns are set to Steps::fill, then zero-DM
- * removal (when asked for) runs on the masked samples.
+ * removal (when asked for) runs on the masked samples. Steps index columns
+ * in file order, so the input's fswap is turned off.
  */
 class Source {
 public:
@@ -537,6 +538,9 @@ public:
 
 private:
     void init() {
+        // The mask and bandpass index columns in file order; set_fswap()
+        // reverses this object's output instead.
+        m_input->set_fswap(false);
         m_row = m_input->nifs() * m_input->nchans();
         if (!m_steps.mask.empty() && m_steps.mask.size() != m_row) {
             throw ValidationError(fmt::format(

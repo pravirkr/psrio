@@ -204,6 +204,9 @@ public:
 
     /// Blocks of ReadAhead::kBlockBytes read ahead of the caller.
     static constexpr std::size_t kReadAheadBlocks = 4;
+
+    /// Most raw bytes read_samples() stages at once before unpacking.
+    static constexpr std::uint64_t kStageBytes = std::uint64_t{16} << 20U;
     [[nodiscard]] bool fswap_enabled() const noexcept { return m_apply_fswap; }
 
     /// Move the cursor by @p delta time samples. Negative moves backward.
@@ -548,39 +551,48 @@ inline std::uint64_t FilterbankReader::read_samples(std::uint64_t count,
     }
 
     const auto stride = m_header.bytes_per_sample();
-    m_raw.resize(static_cast<std::size_t>(to_read * stride));
-    read_payload(m_sample * stride, m_raw);
-    const std::span<const std::byte> raw(m_raw);
     const auto output =
         dest.first(static_cast<std::size_t>(to_read * per_sample));
-
-    if (m_header.nbits <= 4) {
-        if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError(
-                "psrio: uint16_t output requires 16-bit samples");
+    // Raw bytes are staged at most kStageBytes at a time, so the reader's
+    // own buffer stays bounded whatever the caller asks for.
+    const auto chunk = std::max<std::uint64_t>(kStageBytes / stride, 1U);
+    for (std::uint64_t done = 0; done < to_read;) {
+        const auto rows = std::min(chunk, to_read - done);
+        m_raw.resize(static_cast<std::size_t>(rows * stride));
+        read_payload((m_sample + done) * stride, m_raw);
+        const std::span<const std::byte> raw(m_raw);
+        const auto out =
+            output.subspan(static_cast<std::size_t>(done * per_sample),
+                           static_cast<std::size_t>(rows * per_sample));
+        if (m_header.nbits <= 4) {
+            if constexpr (std::same_as<T, std::uint16_t>) {
+                throw ValidationError(
+                    "psrio: uint16_t output requires 16-bit samples");
+            } else {
+                ::psrio::detail::unpack_sub_byte(raw, out, m_header.nbits,
+                                                 order);
+            }
+        } else if (m_header.nbits == 8) {
+            if constexpr (std::same_as<T, std::uint16_t>) {
+                throw ValidationError(
+                    "psrio: uint16_t output requires 16-bit samples");
+            } else {
+                ::psrio::detail::unpack_8bit(raw, out,
+                                             m_header.samples_are_signed());
+            }
+        } else if (m_header.nbits == 16) {
+            if constexpr (std::same_as<T, std::uint8_t>) {
+                throw ValidationError(
+                    "psrio: uint8_t output requires nbits of 8 or less");
+            } else {
+                ::psrio::detail::unpack_16le(raw, out);
+            }
+        } else if constexpr (std::same_as<T, float>) {
+            ::psrio::detail::unpack_32le(raw, out);
         } else {
-            ::psrio::detail::unpack_sub_byte(raw, output, m_header.nbits,
-                                             order);
+            throw ValidationError("psrio: 32-bit samples unpack to float");
         }
-    } else if (m_header.nbits == 8) {
-        if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError(
-                "psrio: uint16_t output requires 16-bit samples");
-        } else {
-            ::psrio::detail::unpack_8bit(raw, output,
-                                         m_header.samples_are_signed());
-        }
-    } else if (m_header.nbits == 16) {
-        if constexpr (std::same_as<T, std::uint8_t>) {
-            throw ValidationError(
-                "psrio: uint8_t output requires nbits of 8 or less");
-        } else {
-            ::psrio::detail::unpack_16le(raw, output);
-        }
-    } else if constexpr (std::same_as<T, float>) {
-        ::psrio::detail::unpack_32le(raw, output);
-    } else {
-        throw ValidationError("psrio: 32-bit samples unpack to float");
+        done += rows;
     }
 
     if (m_apply_fswap) {

@@ -554,3 +554,22 @@ TEST_CASE("a header is read from a prefix of the file", "[sigproc][reader]") {
     CHECK_THROWS_AS(psrio::formats::sigproc::FilterbankHeader::read(cut),
                     psrio::FormatError);
 }
+
+TEST_CASE("read_samples stages a large request in bounded chunks",
+          "[sigproc][reader]") {
+    // About 20 MB of 8-bit samples: more than one kStageBytes chunk, with
+    // a chunk boundary that does not fall on a 16 MiB file block.
+    constexpr std::int32_t kChans = 4099;
+    constexpr std::size_t kRows   = 5000;
+    static_assert(kRows * kChans > FilterbankReader::kStageBytes);
+    std::vector<std::uint8_t> samples(kRows * kChans);
+    for (std::size_t index = 0; index < samples.size(); ++index) {
+        samples[index] = static_cast<std::uint8_t>((index * 7U) % 251U);
+    }
+    const TempFile file(file_8bit(samples, kChans).out);
+    FilterbankReader reader(file.path());
+    std::vector<std::uint8_t> got(samples.size());
+    REQUIRE(reader.read(kRows, std::span<std::uint8_t>{got}) == kRows);
+    CHECK(got == samples);
+    CHECK(reader.tell() == kRows);
+}

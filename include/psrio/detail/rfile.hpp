@@ -57,7 +57,7 @@ public:
     /// @throws psrio::IoError if @p path cannot be opened or is not a regular
     ///         file.
     explicit ReadFile(const std::filesystem::path& path,
-                      Access access = Access::kSequential)
+                      [[maybe_unused]] Access access = Access::kSequential)
         : m_drop_cache(drop_cache_requested()) {
         // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
         m_fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -174,7 +174,8 @@ public:
 
     /// Tell the kernel that [@p offset, @p offset + @p nbytes) will not be
     /// read again. A no-op unless drop-cache is enabled.
-    void release(std::uint64_t offset, std::uint64_t nbytes) const noexcept {
+    void release([[maybe_unused]] std::uint64_t offset,
+                 std::uint64_t nbytes) const noexcept {
         if (!m_drop_cache || m_fd < 0 || nbytes == 0U) {
             return;
         }

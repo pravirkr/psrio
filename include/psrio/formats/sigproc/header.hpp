@@ -786,9 +786,15 @@ FilterbankHeader::read(const ::psrio::detail::ReadFile& file) {
         try {
             return parse_prefix(prefix, file.size(), path);
         } catch (const FormatError&) {
-            // A header cut by the prefix fails like a malformed one; read
-            // more until the whole file, or kMaxRead, has been tried.
-            if (want >= file.size() || want >= kMaxRead) {
+            // A header cut by the prefix fails like a malformed one. Read
+            // more only while HEADER_END is not yet in the prefix; once it
+            // is, the header itself is bad and more bytes cannot help.
+            constexpr std::string_view kEnd = "HEADER_END";
+            const std::string_view text(
+                reinterpret_cast<const char*>(prefix.data()), // NOLINT
+                prefix.size());
+            if (text.find(kEnd) != std::string_view::npos ||
+                want >= file.size() || want >= kMaxRead) {
                 throw;
             }
             want = std::min({file.size(), want * 4U, kMaxRead});

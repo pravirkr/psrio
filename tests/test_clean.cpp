@@ -170,6 +170,22 @@ TEST_CASE("clean::Source masks, removes zero-DM, and reverses channels",
     CHECK(reversed[2] == 7.5F);
     CHECK(reversed[3] == data[0]);
 
+    // The mask indexes columns in file order even when the input was set to
+    // reverse its channels.
+    auto swapped = memory_source(data, kCols);
+    swapped.set_fswap(true);
+    psrio::clean::Source file_order(swapped,
+                                    psrio::clean::Steps{
+                                        .mask            = {0, 1, 0, 0},
+                                        .fill            = 7.5F,
+                                        .zerodm_bandpass = std::nullopt,
+                                    });
+    CHECK_FALSE(swapped.fswap_enabled());
+    auto first = std::vector<float>(kCols);
+    REQUIRE(file_order.read_samples(1, first) == 1U);
+    CHECK(first[0] == data[0]);
+    CHECK(first[1] == 7.5F);
+
     CHECK_THROWS_AS(psrio::clean::Source(input,
                                          psrio::clean::Steps{
                                              .mask            = {1, 0},
