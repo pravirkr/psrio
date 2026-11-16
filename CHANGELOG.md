@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.6.0] - 2026-11-16
 
 - **Behaviour changes**:
   - `psrio digifil` on PSRFITS applies `DAT_SCL`/`DAT_OFFS`/`ZERO_OFF` only with `--scloffs` and never `DAT_WTS`, as dspsr and `spp_digifil`. Library readers still decode calibrated, weighted Stokes I.
@@ -11,24 +11,12 @@ All notable changes to this project will be documented in this file.
   - `FilterbankReader` and `SearchFile` read with `pread` instead of `mmap`, with a 16 MiB-aligned read-ahead thread once reads run forward. A full 3-file Parkes UWL `digifil` goes from 258 s to 31 s and 15.5 GB to 0.6 GB peak RSS, byte-identical to 0.5.0.
   - Internal buffers are bounded (16 MiB staging, 64 MiB read-ahead) and freed when a stream moves past a file. `set_prefetch()`, `release_buffers()`, and `PSRIO_DROP_CACHE=1` / `set_drop_cache()`.
   - `psrio::psrio` links `Threads::Threads`.
-- **Library**:
-  - `psrfits::DecodeOptions` (`scloffs`, `weights`, `product`) for `SearchFile` and `SearchStream`.
-  - `digifil::Source` (digifil as a `BlockReader`, no intermediate file) and opt-in `Config::rescale_clip`.
-  - `stats::ChannelStats`: one-pass per-channel mean, variance, skewness, kurtosis, min and max, independent of the thread count.
-  - `psrio/clean.hpp`: double-MAD and IQRM channel masks, zero-DM, sample zapping, and `clean::Source`.
-  - `BlockSource::refdm()`, `BlockSource::sigproc_header()`, and `astro::mjd_to_iso8601`.
-  - Hot loops use `PSRIO_OMP(...)`, active only when the consumer builds with OpenMP, and vectorise; results do not depend on the thread count.
 - **CLI**:
   - `stats`, `bandpass`, and `clean rfi|zap-channels|zap-times|zerodm`, matching `spp_stats`, `spp_bandpass`, and `spp_clean`. Every `clean` subcommand writes a new file.
   - `header --set key=value [--dry-run]` edits a `.fil` header in place, as `spp_header update`: all or nothing, same header size, values checked as sigpyproc.
   - `digifil`: `--scloffs`, `-P` stored product, `-U`, `-B`, `-d 1`, `--rescale-clip`, optional `-o`. Matches `spp_digifil` byte for byte in a native build.
   - `dedisperse --device cpu|cuda[:N]|hip[:N]` through dmt (`PSRIO_DMT_GPU`; untested on a GPU). `PSRIO_CLI_WITH_DMT=OFF` builds without dmt.
   - `-j,--threads` follows `OMP_NUM_THREADS`; `psrio` runs OpenMP threads with a passive wait policy.
-  - `inspect` shows the ISO UTC start and PSRFITS frontend, backend, mode, `NSBLK`, subints per file, and `NSUBOFFS`.
-  - `PSRIO_CLI_CPU_ARCH` (default `native`, CI `x86-64-v3`) sets the CLI's `-march`.
-- **Fixes**:
-  - `dedisperse --dm 0,411 in.fil` no longer reads `in.fil` as a DM.
-  - Installed `PSRIO_WITH_HDF5=ON` packages built with a fetched HighFive now pass `find_package(psrio)`.
 
 ## [0.5.0] - 2026-11-11
 

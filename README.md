@@ -35,7 +35,7 @@ Add `psrio` directly from GitHub using [CPM.cmake](https://github.com/cpm-cmake/
 CPMAddPackage(
   NAME psrio
   GITHUB_REPOSITORY pravirkr/psrio
-  GIT_TAG v0.5.0  # Or a specific branch/commit
+  GIT_TAG v0.6.0  # Or a specific branch/commit
 )
 
 target_link_libraries(my_downstream_target PRIVATE psrio::psrio)
@@ -53,7 +53,7 @@ include(FetchContent)
 FetchContent_Declare(
   psrio
   GIT_REPOSITORY https://github.com/pravirkr/psrio.git
-  GIT_TAG v0.5.0  # Or a specific branch/commit
+  GIT_TAG v0.6.0  # Or a specific branch/commit
 )
 
 FetchContent_MakeAvailable(psrio)
