@@ -2,7 +2,13 @@
 # Tests inherit the root .clang-tidy. These checks fight Catch2 and test
 # idioms, so they are off here only:
 #   bugprone-random-generator-seed           fixed seeds are intended
-#   clang-analyzer-optin.core.EnumCastOutOfRange  Catch2 flag enums
+#   clang-analyzer-*                         path-sensitive analysis of
+#                                            Catch2 bodies is ~90% of the
+#                                            tidy time (23 s -> 2 s per
+#                                            file); the library headers keep
+#                                            it through header_checks, which
+#                                            build-ci-tidy/ generates outside
+#                                            this directory
 #   bugprone-throwing-static-initialization  file-scope test tables
 #   bugprone-unchecked-optional-access       REQUIRE(opt) precedes the access
 #   concurrency-mt-unsafe                    setenv/system in serial tests
@@ -15,7 +21,7 @@ Checks: >
   -bugprone-random-generator-seed,
   -bugprone-throwing-static-initialization,
   -bugprone-unchecked-optional-access,
-  -clang-analyzer-optin.core.EnumCastOutOfRange,
+  -clang-analyzer-*,
   -concurrency-mt-unsafe,
   -google-runtime-int,
   -modernize-use-designated-initializers,
