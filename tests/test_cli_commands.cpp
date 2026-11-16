@@ -438,6 +438,20 @@ TEST_CASE("psrio digifil takes dspsr's block and output options",
 }
 
 #ifdef PSRIO_CLI_HAS_DMT
+TEST_CASE("psrio dedisperse checks --device", "[cli][dedisperse]") {
+    const TempDir dir;
+    require_ok(psrio_run({"dedisperse", "--dm", "0,30", kTutorial.string(),
+                          "-o", dir / "cpu", "--device", "cpu"}));
+    for (const auto* device : {"tpu", "cuda:x", "cuda:-1"}) {
+        INFO(device);
+        const auto result =
+            psrio_run({"dedisperse", "--dm", "0", kTutorial.string(), "-o",
+                       dir / "bad", "--device", device});
+        CHECK(result.code != 0);
+        CHECK(result.err.find("--device") != std::string::npos);
+    }
+}
+
 TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
     const TempDir dir;
     FilterbankReader in(kTutorial);

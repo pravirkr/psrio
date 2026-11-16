@@ -238,7 +238,40 @@ int main() {
 }
 ```
 
-### 6. GUPPI RAW bytes
+### 6. Clean RFI, then redigitise, in memory (`stats`, `clean::Source`)
+
+`stats::compute` gives per-channel mean, variance, skewness, and kurtosis in one pass. `clean::channel_mask` flags outlying channels as `spp_clean rfi` does, and `clean::Source` replaces them while reading. Like `digifil::Source`, it is a `BlockReader`, so the two chain without a file in between.
+
+```cpp
+#include <psrio/psrio.hpp>
+
+#include <filesystem>
+#include <utility>
+#include <vector>
+
+int main() {
+    const std::vector<std::filesystem::path> files{"obs_0001.sf", "obs_0002.sf"};
+    auto input = psrio::open_block_source(files);
+
+    // Statistics from the first 2^18 samples, then a double-MAD mask.
+    const auto stats = psrio::stats::compute(
+        input, psrio::stats::ComputeOptions{.nsamps = std::uint64_t{1} << 18U});
+    auto mask = psrio::clean::channel_mask(stats, psrio::clean::Method::kMad, 3.0);
+    const auto fill = static_cast<float>(psrio::clean::fill_value(stats, mask));
+
+    input.rewind();
+    psrio::clean::Source cleaned(
+        input, psrio::clean::Steps{.mask = std::move(mask), .fill = fill});
+    psrio::digifil::Source stream(psrio::BlockSource(std::move(cleaned)),
+                                  psrio::digifil::Config{});
+    std::vector<std::uint8_t> block(4096 * stream.nchans());
+    while (stream.read_samples(4096, std::span<std::uint8_t>(block)) > 0) {
+    }
+    return 0;
+}
+```
+
+### 7. GUPPI RAW bytes
 
 `RawReader` walks one header and the payload that follows it. It does not model the block fronts.
 
@@ -258,7 +291,7 @@ int main() {
 }
 ```
 
-### 7. Baseband block front
+### 8. Baseband block front
 
 GUPPI RAW and DADA files model `concepts::BasebandReader`. `BasebandSource` erases either one. `read_block` copies canonical time-major voltages (`[time][antenna][channel][polarization][component]`). `read_samples` unpacks them into a caller buffer.
 
@@ -296,6 +329,23 @@ int main() {
     return 0;
 }
 ```
+
+---
+
+## The `psrio` command
+
+Built with `-DPSRIO_BUILD_APPLICATIONS=ON`. Every command takes one or more `.fil` or search-mode `.sf` files in time order, and `-j` threads.
+
+| Command | sigpyproc / dspsr equivalent |
+|---|---|
+| `inspect` (alias `header`), `header FILE --set key=value` | `spp_header print/get/update` |
+| `slice`, `splice`, `decimate`, `convert` | `spp_io extract/splice`, `spp_decimate` |
+| `digifil` (`--scloffs`, `-P`, `-U`, `--rescale-clip`) | `spp_digifil`, dspsr `digifil` |
+| `stats`, `bandpass` | `spp_stats`, `spp_bandpass` |
+| `clean rfi/zap-channels/zap-times/zerodm` | `spp_clean` |
+| `dedisperse` (`--device cpu\|cuda[:N]`, needs dmt) | `spp_dedisperse` |
+
+CLI build options: `PSRIO_CLI_CPU_ARCH` (`-march`, default `native`; use e.g. `x86-64-v3` for binaries that move between machines), `PSRIO_CLI_WITH_DMT` (dedisperse), and `PSRIO_DMT_GPU` (`AUTO`, `CUDA`, `HIP`, `OFF`: dmt's GPU backend for `dedisperse --device`).
 
 ---
 

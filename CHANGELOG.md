@@ -71,6 +71,27 @@ All notable changes to this project will be documented in this file.
   - `-k` still prints one key.
 - `psrio::sigproc_header_of(BlockSource)` (shared by digifil and clean).
 
+### Speed and GPU dedispersion
+
+- Vectorised hot loops:
+  - The SIGPROC writer quantises with comparisons instead of
+    `std::fmin`/`fmax`/`std::round`, which are library calls that block
+    vectorisation, and threads the loop.
+  - digifil's encoder quantises whole rows (`quantise_row`).
+  - Rescaler and PSRFITS 8-bit decode loops carry `omp simd`.
+  - Levels are unchanged.
+- `PSRIO_CLI_CPU_ARCH` (default `native`, as dmt) builds the CLI with
+  `-march`; CI pins `x86-64-v3`. With FMA available, `a*b+c` may fuse, so
+  output can differ from earlier builds at rounding level: floats ≤ 5e-7
+  relative, and quantised samples by one level in ≤ 2e-4 of samples.
+- On a 1.7 GB 8-bit filterbank in RAM, single-threaded: `digifil` 4.1 s →
+  1.9 s, `clean rfi` 11.4 s → 2.5 s, `stats` 2.1 s → 1.3 s. The full 3-file
+  UWL `digifil` reads at the BeeGFS limit (27–29 s; 27.6 s with `-j 1`).
+- `psrio dedisperse --device cpu|cuda[:N]|hip[:N]` runs dmt on a GPU
+  through its API; psrio has no GPU code. `PSRIO_DMT_GPU`
+  (`AUTO`/`CUDA`/`HIP`/`OFF`) picks dmt's backend, and a GPU need not be
+  present at build time.
+
 ### Earlier unreleased work
 
 Fixes and performance work from validation on Parkes UWL search-mode data

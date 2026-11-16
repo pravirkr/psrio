@@ -332,6 +332,7 @@ private:
             const auto last  = std::min(first + kTile, ncols);
             for (std::size_t row = 0; row < nrows; ++row) {
                 const float* values = data + (row * ncols);
+                PSRIO_OMP(omp simd)
                 for (std::size_t col = first; col < last; ++col) {
                     const auto value = static_cast<double>(values[col]);
                     sums[col] += value;
@@ -389,6 +390,7 @@ private:
         PSRIO_OMP(omp parallel for schedule(static) if (wide))
         for (std::size_t row = 0; row < nrows; ++row) {
             float* values = data + (row * ncols);
+            PSRIO_OMP(omp simd)
             for (std::size_t col = 0; col < ncols; ++col) {
                 const float shifted = values[col] + offset[col];
                 values[col]         = shifted * scale[col];
@@ -431,6 +433,39 @@ private:
         return 0;
     }
     return std::min(static_cast<std::uint32_t>(level), digi_max);
+}
+
+/// quantise() over one row of @p n values into @p out, reading the row in
+/// reverse when @p flip. Equal to quantise() for every input: the value is
+/// clamped to [0, digi_max] first (NaN to 0), after which rounding half up
+/// is floor(v + 0.5) formed exactly in double. Written to vectorise.
+template <typename Out>
+inline void quantise_row(const float* src,
+                         std::size_t n,
+                         bool flip,
+                         float mean,
+                         float scale,
+                         float digi_max,
+                         Out* out) noexcept {
+    const auto level = [=](float value) {
+        const float shifted = (value * scale) + mean;
+        const float above   = shifted >= 0.0F ? shifted : 0.0F;
+        const float clamped = above > digi_max ? digi_max : above;
+        return static_cast<Out>(
+            static_cast<std::uint32_t>(static_cast<double>(clamped) + 0.5));
+    };
+    if (flip) {
+        const float* last = src + (n - 1U);
+        PSRIO_OMP(omp simd)
+        for (std::size_t index = 0; index < n; ++index) {
+            out[index] = level(*(last - index));
+        }
+    } else {
+        PSRIO_OMP(omp simd)
+        for (std::size_t index = 0; index < n; ++index) {
+            out[index] = level(src[index]);
+        }
+    }
 }
 
 /// Geometry of the data entering the pipeline.
@@ -607,19 +642,21 @@ private:
             return m_bytes;
         }
 
-        const auto npol = static_cast<std::size_t>(m_nifs_out);
+        const auto npol     = static_cast<std::size_t>(m_nifs_out);
+        const auto digi_max = static_cast<float>(m_digi_max);
+        const float* in     = data.data();
         if (m_nbits == 16) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            auto* out = reinterpret_cast<std::uint16_t*>(m_bytes.data());
             PSRIO_OMP(omp parallel for schedule(static) if (wide))
             for (std::size_t row = 0; row < nrows; ++row) {
-                const float mean = m_pol_mean[row % npol];
-                for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
-                    const auto level = ::psrio::detail::to_little_endian(
-                        static_cast<std::uint16_t>(
-                            quantise(data[(row * nchans) + channel(ochan)],
-                                     mean, m_digi_scale, m_digi_max)));
-                    std::memcpy(m_bytes.data() +
-                                    (((row * nchans) + ochan) * 2U),
-                                &level, 2U);
+                quantise_row(in + (row * nchans), nchans, m_flip,
+                             m_pol_mean[row % npol], m_digi_scale, digi_max,
+                             out + (row * nchans));
+            }
+            if (!::psrio::detail::host_is_little_endian()) {
+                for (std::size_t index = 0; index < nrows * nchans; ++index) {
+                    out[index] = ::psrio::detail::to_little_endian(out[index]);
                 }
             }
             return m_bytes;
@@ -629,19 +666,14 @@ private:
         if (packed) {
             m_levels.resize(nrows * nchans);
         }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto* out = packed ? m_levels.data()
+                           : reinterpret_cast<std::uint8_t*>(m_bytes.data());
         PSRIO_OMP(omp parallel for schedule(static) if (wide))
         for (std::size_t row = 0; row < nrows; ++row) {
-            const float mean = m_pol_mean[row % npol];
-            for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
-                const auto level = static_cast<std::uint8_t>(
-                    quantise(data[(row * nchans) + channel(ochan)], mean,
-                             m_digi_scale, m_digi_max));
-                if (packed) {
-                    m_levels[(row * nchans) + ochan] = level;
-                } else {
-                    m_bytes[(row * nchans) + ochan] = std::byte{level};
-                }
-            }
+            quantise_row(in + (row * nchans), nchans, m_flip,
+                         m_pol_mean[row % npol], m_digi_scale, digi_max,
+                         out + (row * nchans));
         }
         if (packed) {
             ::psrio::detail::pack_sub_byte(m_levels, m_bytes, m_nbits,

@@ -4,6 +4,7 @@
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/parallel.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 
 #include <algorithm>
@@ -166,6 +167,29 @@ template <typename Out>
     return static_cast<Out>(std::round(std::fmin(std::fmax(value, lo), hi)));
 }
 
+/// quantise() for 0 <= lo: rounding half away from zero is floor(x + 0.5)
+/// on the clamped value, which compilers vectorise (std::round is a libm
+/// call). The sum is formed in double, so it is exact.
+template <typename Out>
+inline void quantise_unsigned(std::span<const float> values,
+                              Out* out,
+                              float lo,
+                              float hi) noexcept {
+    const auto count = values.size();
+    const float* in  = values.data();
+    [[maybe_unused]] const bool wide =
+        ::psrio::detail::parallel_worthwhile(count);
+    PSRIO_OMP(omp parallel for simd schedule(static) if (wide))
+    for (std::size_t index = 0; index < count; ++index) {
+        // Comparisons, not std::fmin/fmax (library calls that block
+        // vectorisation); NaN fails >= and maps to lo.
+        const float value   = in[index];
+        const float above   = value >= lo ? value : lo;
+        const float clamped = above > hi ? hi : above;
+        out[index] = static_cast<Out>(static_cast<double>(clamped) + 0.5);
+    }
+}
+
 template <typename T>
 inline void store_le(std::span<const T> values, std::span<std::byte> out) {
     for (std::size_t index = 0; index < values.size(); ++index) {
@@ -326,6 +350,13 @@ inline void FilterbankWriter::encode(std::span<const T> values,
                 writer_detail::store_le(values, out);
                 return;
             }
+            if (::psrio::detail::host_is_little_endian()) {
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                auto* levels = reinterpret_cast<std::uint16_t*>(out.data());
+                writer_detail::quantise_unsigned(values, levels, 0.0F,
+                                                 65535.0F);
+                return;
+            }
             for (std::size_t index = 0; index < values.size(); ++index) {
                 const auto level = ::psrio::detail::to_little_endian(
                     quantise<std::uint16_t>(values[index], 0.0F, 65535.0F));
@@ -346,19 +377,16 @@ inline void FilterbankWriter::encode(std::span<const T> values,
                             values[index], -128.0F, 127.0F)));
                 }
             } else {
-                for (std::size_t index = 0; index < values.size(); ++index) {
-                    out[index] = static_cast<std::byte>(
-                        quantise<std::uint8_t>(values[index], 0.0F, 255.0F));
-                }
+                // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+                auto* levels = reinterpret_cast<std::uint8_t*>(out.data());
+                writer_detail::quantise_unsigned(values, levels, 0.0F, 255.0F);
             }
             return;
         }
         const auto hi =
             static_cast<float>((1U << static_cast<unsigned>(bits)) - 1U);
         m_levels.resize(values.size());
-        for (std::size_t index = 0; index < values.size(); ++index) {
-            m_levels[index] = quantise<std::uint8_t>(values[index], 0.0F, hi);
-        }
+        writer_detail::quantise_unsigned(values, m_levels.data(), 0.0F, hi);
         ::psrio::detail::pack_sub_byte(m_levels, out, bits, order);
     } else if constexpr (std::same_as<T, std::uint8_t>) {
         ::psrio::detail::pack_sub_byte(values, out, bits, order);

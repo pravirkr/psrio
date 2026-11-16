@@ -42,8 +42,52 @@ struct DedisperseOptions {
     std::string ignorechans;
     std::uint64_t gulp{kDefaultGulp};
     int threads{0};
+    std::string device{"cpu"};
     std::string format{"auto"};
 };
+
+/// dmt backend for `--device`: cpu, cuda, cuda:N, hip, or hip:N.
+dmt::Exec make_exec(const std::string& device, int threads) {
+    const auto colon       = device.find(':');
+    const std::string name = device.substr(0, colon);
+    int ordinal            = 0;
+    if (colon != std::string::npos) {
+        const auto text = std::string_view(device).substr(colon + 1U);
+        const auto result =
+            std::from_chars(text.data(), text.data() + text.size(), ordinal);
+        if (result.ec != std::errc{} ||
+            result.ptr != text.data() + text.size() || ordinal < 0) {
+            throw ValidationError(fmt::format(
+                "psrio: --device {}: the device number must be >= 0", device));
+        }
+    }
+    if (name == "cpu" && colon == std::string::npos) {
+        return dmt::Exec::cpu(threads);
+    }
+    dmt::Backend backend = dmt::Backend::kCPU;
+    if (name == "cuda") {
+        backend = dmt::Backend::kCUDA;
+    } else if (name == "hip") {
+        backend = dmt::Backend::kHIP;
+    } else {
+        throw ValidationError(fmt::format(
+            "psrio: --device must be cpu, cuda[:N], or hip[:N], got {}",
+            device));
+    }
+    if (!dmt::is_available(backend)) {
+        std::string built;
+        for (const auto have : dmt::available_backends()) {
+            built += built.empty() ? "" : ", ";
+            built += dmt::to_string(have);
+        }
+        throw ValidationError(fmt::format(
+            "psrio: this psrio's dmt was built without {} (available: {}); "
+            "rebuild with -DPSRIO_DMT_GPU={}",
+            name, built, name == "cuda" ? "CUDA" : "HIP"));
+    }
+    return backend == dmt::Backend::kCUDA ? dmt::Exec::cuda(ordinal)
+                                          : dmt::Exec::hip(ordinal);
+}
 
 /// Largest DM count for which `auto` picks DDMT over SDMT.
 constexpr std::size_t kDirectMaxTrials = 8;
@@ -414,7 +458,7 @@ void run_dedisperse(const DedisperseOptions& opts, const Context& ctx) {
     }
 
     const int threads = opts.threads > 0 ? opts.threads : default_threads();
-    const auto exec   = dmt::Exec::cpu(threads);
+    const auto exec   = make_exec(opts.device, threads);
     auto algo         = opts.algo;
     if (algo == "auto") {
         algo = dms.size() <= kDirectMaxTrials ? "ddmt" : "sdmt";
@@ -523,6 +567,10 @@ void add_dedisperse(CLI::App& app, Context& ctx) {
                     "Threads (default: OMP_NUM_THREADS, else all available "
                     "cores)")
         ->check(CLI::NonNegativeNumber);
+    sub->add_option("--device", opts->device,
+                    "Where dmt runs: cpu, cuda[:N], or hip[:N] (GPU backends "
+                    "need a dmt built with them)")
+        ->capture_default_str();
     sub->add_option("--format", opts->format,
                     "Output format: tim, dat, or auto (from -o, else tim)")
         ->capture_default_str()

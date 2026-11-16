@@ -20,6 +20,14 @@ endif()
 # dmt needs OpenMP and FFTW. Pass -DCPM_dmt_SOURCE=<path> to build a local
 # checkout instead of the pinned commit. With PSRIO_CLI_WITH_DMT=OFF the CLI
 # builds without dmt and has no dedisperse command.
+# PSRIO_DMT_GPU picks dmt's GPU backend for `psrio dedisperse --device`:
+# AUTO (CUDA when nvcc is found, else HIP when ROCm is found), CUDA, HIP, or
+# OFF. A GPU need not be present at build time.
+set(PSRIO_DMT_GPU
+    "AUTO"
+    CACHE STRING "dmt GPU backend for psrio dedisperse: AUTO, CUDA, HIP, or OFF"
+)
+set_property(CACHE PSRIO_DMT_GPU PROPERTY STRINGS AUTO CUDA HIP OFF)
 if(PSRIO_CLI_WITH_DMT)
   if(NOT TARGET dmt::dmt)
     CPMAddPackage(
@@ -27,7 +35,7 @@ if(PSRIO_CLI_WITH_DMT)
       GIT_REPOSITORY https://github.com/pravirkr/dmt.git
       GIT_TAG 64fc478835586ae8b91b4b96f5edf9eba021b9fa
       OPTIONS "DMT_BUILD_PYTHON OFF" "DMT_BUILD_TESTING OFF" "DMT_BUILD_BENCHMARKS OFF"
-              "DMT_BUILD_DOCS OFF"
+              "DMT_BUILD_DOCS OFF" "DMT_GPU ${PSRIO_DMT_GPU}" "DMT_GPU_CHECK_DEVICE OFF"
       EXCLUDE_FROM_ALL YES
       SYSTEM YES
     )
@@ -70,6 +78,23 @@ if(PSRIO_CLI_WITH_DMT)
 endif()
 if(OpenMP_CXX_FOUND)
   target_link_libraries(psrio_cli_commands PUBLIC OpenMP::OpenMP_CXX)
+endif()
+# The psrio headers are portable; the CLI that ships them is tuned for the
+# build host, as dmt is by default (DMT_ENABLE_NATIVE_ARCH). Set an
+# -march target such as x86-64-v3 for binaries that move between CPUs, or an
+# empty string for the compiler default.
+set(PSRIO_CLI_CPU_ARCH
+    "native"
+    CACHE STRING "-march for the psrio CLI (e.g. native, x86-64-v3; empty for none)"
+)
+if(PSRIO_CLI_CPU_ARCH)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=${PSRIO_CLI_CPU_ARCH}" PSRIO_CLI_HAS_MARCH)
+  if(PSRIO_CLI_HAS_MARCH)
+    target_compile_options(psrio_cli_commands PUBLIC -march=${PSRIO_CLI_CPU_ARCH})
+  else()
+    message(WARNING "psrio: the compiler does not accept -march=${PSRIO_CLI_CPU_ARCH}")
+  endif()
 endif()
 if(TARGET psrio::fbh5)
   target_link_libraries(psrio_cli_commands PUBLIC psrio::fbh5)
