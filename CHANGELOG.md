@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-11-16
+
+- **Behaviour changes**:
+  - `psrio digifil` on PSRFITS applies `DAT_SCL`/`DAT_OFFS`/`ZERO_OFF` only with `--scloffs` and never `DAT_WTS`, as dspsr and `spp_digifil`. Library readers still decode calibrated, weighted Stokes I.
+  - `ftop()`/`fbottom()` (SIGPROC and `psrio::Header`) return the band top and bottom whichever way `foff` points; they were swapped for `foff > 0`.
+- **I/O**:
+  - `FilterbankReader` and `SearchFile` read with `pread` instead of `mmap`, with a 16 MiB-aligned read-ahead thread once reads run forward. A full 3-file Parkes UWL `digifil` goes from 258 s to 31 s and 15.5 GB to 0.6 GB peak RSS, byte-identical to 0.5.0.
+  - Internal buffers are bounded (16 MiB staging, 64 MiB read-ahead) and freed when a stream moves past a file. `set_prefetch()`, `release_buffers()`, and `PSRIO_DROP_CACHE=1` / `set_drop_cache()`.
+  - `psrio::psrio` links `Threads::Threads`.
+- **CLI**:
+  - `stats`, `bandpass`, and `clean rfi|zap-channels|zap-times|zerodm`, matching `spp_stats`, `spp_bandpass`, and `spp_clean`. Every `clean` subcommand writes a new file.
+  - `header --set key=value [--dry-run]` edits a `.fil` header in place, as `spp_header update`: all or nothing, same header size, values checked as sigpyproc.
+  - `digifil`: `--scloffs`, `-P` stored product, `-U`, `-B`, `-d 1`, `--rescale-clip`, optional `-o`. Matches `spp_digifil` byte for byte in a native build.
+  - `dedisperse --device cpu|cuda[:N]|hip[:N]` through dmt (`PSRIO_DMT_GPU`; untested on a GPU). `PSRIO_CLI_WITH_DMT=OFF` builds without dmt.
+  - `-j,--threads` follows `OMP_NUM_THREADS`; `psrio` runs OpenMP threads with a passive wait policy.
+
 ## [0.5.0] - 2026-11-11
 
 - **Search-mode PSRFITS reader (`psrio::formats::psrfits`)**:

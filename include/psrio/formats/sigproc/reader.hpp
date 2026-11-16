@@ -5,6 +5,8 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/mmap.hpp"
 #include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/readahead.hpp"
+#include "psrio/detail/rfile.hpp"
 #include "psrio/detail/skip.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/packed.hpp"
@@ -20,6 +22,8 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
+#include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -29,7 +33,11 @@ namespace psrio::formats::sigproc {
 
 /// Sequential reader for one SIGPROC filterbank file.
 ///
-/// The file is mapped read-only. read_samples(count, span) or read(count, span)
+/// The file is read with `pread`: only the header is read at open, and each
+/// read copies its samples straight from the file, which streams large files
+/// on networked file systems far faster than a memory mapping. view_bytes()
+/// and view_block() map the file on first use. read_samples(count, span) or
+/// read(count, span)
 /// unpacks the next time samples into a caller-owned span. read_bytes(nbytes,
 /// span) and view_bytes(nbytes) expose the raw payload. One time sample is nifs
 /// * nchans values in file order, index ipol * nchans + ichan, with no scaling
@@ -116,6 +124,11 @@ public:
         return m_header.foff.value_or(0.0);
     }
 
+    /// Reference DM (`refdm`) the data were dedispersed to, when present.
+    [[nodiscard]] std::optional<double> refdm() const noexcept {
+        return m_header.refdm;
+    }
+
     /// Beam index from the header, or 0 when `ibeam` is absent.
     [[nodiscard]] int beam() const noexcept {
         return static_cast<int>(m_header.ibeam.value_or(0));
@@ -167,6 +180,33 @@ public:
     /// Enable or disable channel reversal (fswap) on read_block and
     /// read_samples. Raw byte reads and views stay in file order.
     void set_fswap(bool enable) noexcept { m_apply_fswap = enable; }
+
+    /// Drop cached file pages once their samples are read. Off by default,
+    /// or on when `PSRIO_DROP_CACHE=1` is set at open.
+    void set_drop_cache(bool enable) noexcept { m_file.set_drop_cache(enable); }
+
+    /// Once two reads in a row are contiguous, stream the rest of the file on
+    /// a background thread, kReadAheadBlocks blocks ahead of the caller. On by
+    /// default.
+    void set_prefetch(bool enable) noexcept {
+        m_prefetch = enable;
+        if (!enable) {
+            m_ahead.reset();
+        }
+    }
+
+    /// Stop reading ahead and free its buffers, for example once a stream
+    /// has moved past this file.
+    void release_buffers() {
+        m_ahead.reset();
+        m_raw = {};
+    }
+
+    /// Blocks of ReadAhead::kBlockBytes read ahead of the caller.
+    static constexpr std::size_t kReadAheadBlocks = 4;
+
+    /// Most raw bytes read_samples() stages at once before unpacking.
+    static constexpr std::uint64_t kStageBytes = std::uint64_t{16} << 20U;
     [[nodiscard]] bool fswap_enabled() const noexcept { return m_apply_fswap; }
 
     /// Move the cursor by @p delta time samples. Negative moves backward.
@@ -241,9 +281,9 @@ public:
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
 
     /// Zero-copy view of the next @p nbytes raw payload bytes.
-    /// The span refers to the mapped file and stays valid until that mapping
-    /// is destroyed. Advances the cursor by the corresponding number of
-    /// samples.
+    /// The first view maps the file. The span refers to that mapping and
+    /// stays valid until the reader is destroyed. Advances the cursor by the
+    /// corresponding number of samples.
     [[nodiscard]] std::span<const std::byte> view_bytes(std::uint64_t nbytes);
 
     /// Zero-copy view alias for view_bytes.
@@ -286,12 +326,19 @@ private:
 
     void check_byte_request(std::uint64_t nbytes) const;
 
-    [[nodiscard]] std::span<const std::byte>
-    mapped_bytes(std::uint64_t offset, std::uint64_t nbytes) const;
+    [[nodiscard]] std::span<const std::byte> mapped_bytes(std::uint64_t offset,
+                                                          std::uint64_t nbytes);
 
-    ::psrio::detail::MappedFile m_file;
+    /// Copy payload bytes [offset, offset + dest.size()) into @p dest.
+    void read_payload(std::uint64_t offset, std::span<std::byte> dest);
+
+    ::psrio::detail::ReadFile m_file;
+    ::psrio::detail::MappedFile m_map;
     FilterbankHeader m_header;
-    std::span<const std::byte> m_payload;
+    std::vector<std::byte> m_raw;
+    std::unique_ptr<::psrio::detail::ReadAhead> m_ahead;
+    std::uint64_t m_read_end{std::numeric_limits<std::uint64_t>::max()};
+    bool m_prefetch{true};
     std::uint64_t m_sample{0};
     BitOrder m_bit_order{BitOrder::kLsbFirst};
     bool m_apply_fswap{false};
@@ -301,26 +348,26 @@ inline FilterbankReader::FilterbankReader(const std::filesystem::path& path,
                                           BitOrder bit_order)
     : m_bit_order(bit_order) {
     try {
-        m_file = ::psrio::detail::MappedFile(path);
-        m_file.advise_sequential();
+        m_file = ::psrio::detail::ReadFile(path);
     } catch (const std::exception& ex) {
         throw IoError(ex.what());
     }
 
     const std::string path_string = path.string();
-    m_header = FilterbankHeader::parse(m_file.bytes(), path_string);
+    if (m_file.size() == 0U) {
+        throw FormatError(fmt::format("{}: file is empty", path_string));
+    }
+    m_header = FilterbankHeader::read(m_file);
     try {
         m_header.validate();
     } catch (const ValidationError& ex) {
         throw ValidationError(fmt::format("{}: {}", path_string, ex.what()));
     }
 
-    const auto mapped = m_file.bytes();
-    if (m_header.header_bytes > mapped.size()) {
+    if (m_header.header_bytes > m_file.size()) {
         throw FormatError(
             fmt::format("{}: header extends past end of file", path_string));
     }
-    m_payload = mapped.subspan(static_cast<std::size_t>(m_header.header_bytes));
 }
 
 inline void FilterbankReader::seek(std::uint64_t sample) {
@@ -357,8 +404,8 @@ inline std::uint64_t FilterbankReader::read_block(std::uint64_t count,
         return 0;
     }
     const auto nbytes = to_read * stride;
-    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
-    std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(nbytes));
+    read_payload(m_sample * stride,
+                 dest.first(static_cast<std::size_t>(nbytes)));
     if (m_apply_fswap && to_read > 0U) {
         ::psrio::reverse_channels(dest.first(static_cast<std::size_t>(nbytes)),
                                   to_read * nifs(), nchans(), nbits());
@@ -400,13 +447,50 @@ inline std::uint64_t FilterbankReader::values_per_sample() const {
 }
 
 inline std::span<const std::byte>
-FilterbankReader::mapped_bytes(std::uint64_t offset,
-                               std::uint64_t nbytes) const {
-    if (offset > m_payload.size() || nbytes > m_payload.size() - offset) {
+FilterbankReader::mapped_bytes(std::uint64_t offset, std::uint64_t nbytes) {
+    if (!m_map.is_mapped()) {
+        try {
+            m_map = ::psrio::detail::MappedFile(m_file.path());
+            m_map.advise_sequential();
+        } catch (const std::exception& ex) {
+            throw IoError(ex.what());
+        }
+    }
+    const auto mapped = m_map.bytes();
+    const auto start  = m_header.header_bytes;
+    if (start > mapped.size()) {
+        throw FormatError("psrio: header extends past the mapped file");
+    }
+    const auto payload = mapped.subspan(static_cast<std::size_t>(start));
+    if (offset > payload.size() || nbytes > payload.size() - offset) {
         throw FormatError("psrio: sample offset is outside the mapped payload");
     }
-    return m_payload.subspan(static_cast<std::size_t>(offset),
-                             static_cast<std::size_t>(nbytes));
+    return payload.subspan(static_cast<std::size_t>(offset),
+                           static_cast<std::size_t>(nbytes));
+}
+
+inline void FilterbankReader::read_payload(std::uint64_t offset,
+                                           std::span<std::byte> dest) {
+    const auto start = m_header.header_bytes;
+    const auto size  = m_file.size() - start;
+    if (offset > size || dest.size() > size - offset) {
+        throw FormatError("psrio: sample offset is outside the payload");
+    }
+    const auto at = start + offset;
+    if (m_ahead != nullptr && !m_ahead->covers(at, dest.size())) {
+        m_ahead.reset();
+    }
+    if (m_ahead == nullptr && m_prefetch && at == m_read_end && !dest.empty()) {
+        m_ahead = std::make_unique<::psrio::detail::ReadAhead>(
+            m_file.duplicate(), at, m_file.size(), kReadAheadBlocks);
+    }
+    if (m_ahead != nullptr) {
+        m_ahead->read(at, dest);
+    } else {
+        m_file.read_at(at, dest);
+        m_file.release(at, dest.size());
+    }
+    m_read_end = at + dest.size();
 }
 
 inline void FilterbankReader::check_byte_request(std::uint64_t nbytes) const {
@@ -467,37 +551,48 @@ inline std::uint64_t FilterbankReader::read_samples(std::uint64_t count,
     }
 
     const auto stride = m_header.bytes_per_sample();
-    const auto raw    = mapped_bytes(m_sample * stride, to_read * stride);
     const auto output =
         dest.first(static_cast<std::size_t>(to_read * per_sample));
-
-    if (m_header.nbits <= 4) {
-        if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError(
-                "psrio: uint16_t output requires 16-bit samples");
+    // Raw bytes are staged at most kStageBytes at a time, so the reader's
+    // own buffer stays bounded whatever the caller asks for.
+    const auto chunk = std::max<std::uint64_t>(kStageBytes / stride, 1U);
+    for (std::uint64_t done = 0; done < to_read;) {
+        const auto rows = std::min(chunk, to_read - done);
+        m_raw.resize(static_cast<std::size_t>(rows * stride));
+        read_payload((m_sample + done) * stride, m_raw);
+        const std::span<const std::byte> raw(m_raw);
+        const auto out =
+            output.subspan(static_cast<std::size_t>(done * per_sample),
+                           static_cast<std::size_t>(rows * per_sample));
+        if (m_header.nbits <= 4) {
+            if constexpr (std::same_as<T, std::uint16_t>) {
+                throw ValidationError(
+                    "psrio: uint16_t output requires 16-bit samples");
+            } else {
+                ::psrio::detail::unpack_sub_byte(raw, out, m_header.nbits,
+                                                 order);
+            }
+        } else if (m_header.nbits == 8) {
+            if constexpr (std::same_as<T, std::uint16_t>) {
+                throw ValidationError(
+                    "psrio: uint16_t output requires 16-bit samples");
+            } else {
+                ::psrio::detail::unpack_8bit(raw, out,
+                                             m_header.samples_are_signed());
+            }
+        } else if (m_header.nbits == 16) {
+            if constexpr (std::same_as<T, std::uint8_t>) {
+                throw ValidationError(
+                    "psrio: uint8_t output requires nbits of 8 or less");
+            } else {
+                ::psrio::detail::unpack_16le(raw, out);
+            }
+        } else if constexpr (std::same_as<T, float>) {
+            ::psrio::detail::unpack_32le(raw, out);
         } else {
-            ::psrio::detail::unpack_sub_byte(raw, output, m_header.nbits,
-                                             order);
+            throw ValidationError("psrio: 32-bit samples unpack to float");
         }
-    } else if (m_header.nbits == 8) {
-        if constexpr (std::same_as<T, std::uint16_t>) {
-            throw ValidationError(
-                "psrio: uint16_t output requires 16-bit samples");
-        } else {
-            ::psrio::detail::unpack_8bit(raw, output,
-                                         m_header.samples_are_signed());
-        }
-    } else if (m_header.nbits == 16) {
-        if constexpr (std::same_as<T, std::uint8_t>) {
-            throw ValidationError(
-                "psrio: uint8_t output requires nbits of 8 or less");
-        } else {
-            ::psrio::detail::unpack_16le(raw, output);
-        }
-    } else if constexpr (std::same_as<T, float>) {
-        ::psrio::detail::unpack_32le(raw, output);
-    } else {
-        throw ValidationError("psrio: 32-bit samples unpack to float");
+        done += rows;
     }
 
     if (m_apply_fswap) {
@@ -516,8 +611,7 @@ inline std::uint64_t FilterbankReader::read_bytes(std::uint64_t nbytes,
             dest.size(), nbytes));
     }
     const auto stride = m_header.bytes_per_sample();
-    const auto raw    = mapped_bytes(m_sample * stride, nbytes);
-    std::memcpy(dest.data(), raw.data(), static_cast<std::size_t>(nbytes));
+    read_payload(m_sample * stride, dest);
     m_sample += nbytes / stride;
     return nbytes;
 }

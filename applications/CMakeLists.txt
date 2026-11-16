@@ -18,21 +18,39 @@ if(NOT TARGET CLI11::CLI11)
 endif()
 
 # dmt needs OpenMP and FFTW. Pass -DCPM_dmt_SOURCE=<path> to build a local
-# checkout instead of the pinned commit.
-if(NOT TARGET dmt::dmt)
-  CPMAddPackage(
-    NAME dmt
-    GIT_REPOSITORY https://github.com/pravirkr/dmt.git
-    GIT_TAG 64fc478835586ae8b91b4b96f5edf9eba021b9fa
-    OPTIONS "DMT_BUILD_PYTHON OFF" "DMT_BUILD_TESTING OFF" "DMT_BUILD_BENCHMARKS OFF"
-            "DMT_BUILD_DOCS OFF"
-    EXCLUDE_FROM_ALL YES
-    SYSTEM YES
-  )
+# checkout instead of the pinned commit. With PSRIO_CLI_WITH_DMT=OFF the CLI
+# builds without dmt and has no dedisperse command.
+# PSRIO_DMT_GPU picks dmt's GPU backend for `psrio dedisperse --device`:
+# AUTO (CUDA when nvcc is found, else HIP when ROCm is found), CUDA, HIP, or
+# OFF. dmt's check for a visible GPU is skipped, but its CUDA architectures
+# default to "native", which falls back to sm_52 when no GPU is visible (for
+# example inside a CPU-only batch job): pass -DDMT_CUDA_ARCHITECTURES=89 (L40)
+# or the target GPU's compute capability when building without one.
+set(PSRIO_DMT_GPU
+    "AUTO"
+    CACHE STRING "dmt GPU backend for psrio dedisperse: AUTO, CUDA, HIP, or OFF"
+)
+set_property(CACHE PSRIO_DMT_GPU PROPERTY STRINGS AUTO CUDA HIP OFF)
+if(PSRIO_CLI_WITH_DMT)
+  if(NOT TARGET dmt::dmt)
+    CPMAddPackage(
+      NAME dmt
+      GIT_REPOSITORY https://github.com/pravirkr/dmt.git
+      GIT_TAG 64fc478835586ae8b91b4b96f5edf9eba021b9fa
+      OPTIONS "DMT_BUILD_PYTHON OFF" "DMT_BUILD_TESTING OFF" "DMT_BUILD_BENCHMARKS OFF"
+              "DMT_BUILD_DOCS OFF" "DMT_GPU ${PSRIO_DMT_GPU}" "DMT_GPU_CHECK_DEVICE OFF"
+      EXCLUDE_FROM_ALL YES
+      SYSTEM YES
+    )
+  endif()
+  if(NOT TARGET dmt::dmt)
+    message(FATAL_ERROR "dmt::dmt target not available after CPM setup.")
+  endif()
 endif()
-if(NOT TARGET dmt::dmt)
-  message(FATAL_ERROR "dmt::dmt target not available after CPM setup.")
-endif()
+
+# The library headers parallelise hot loops with `#pragma omp`, which a build
+# without OpenMP ignores. The CLI turns it on when the compiler supports it.
+find_package(OpenMP COMPONENTS CXX)
 
 # The commands live in a library so the tests can drive them in-process.
 add_library(
@@ -45,22 +63,51 @@ add_library(
   cmd_decimate.cpp
   cmd_convert.cpp
   cmd_digifil.cpp
-  cmd_dedisperse.cpp
+  cmd_stats.cpp
+  cmd_clean.cpp
+  header_edit.cpp
 )
 target_include_directories(psrio_cli_commands PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
   psrio_cli_commands
   PUBLIC psrio::psrio CLI11::CLI11
-  PRIVATE dmt::dmt psrio_developer_flags
+  PRIVATE psrio_developer_flags
 )
 target_compile_definitions(psrio_cli_commands PRIVATE PSRIO_CLI_VERSION="${PROJECT_VERSION}")
+if(PSRIO_CLI_WITH_DMT)
+  target_sources(psrio_cli_commands PRIVATE cmd_dedisperse.cpp)
+  target_link_libraries(psrio_cli_commands PRIVATE dmt::dmt)
+  target_compile_definitions(psrio_cli_commands PUBLIC PSRIO_CLI_HAS_DMT=1)
+endif()
+if(OpenMP_CXX_FOUND)
+  target_link_libraries(psrio_cli_commands PUBLIC OpenMP::OpenMP_CXX)
+endif()
+# The psrio headers are portable; the CLI that ships them is tuned for the
+# build host, as dmt is by default (DMT_ENABLE_NATIVE_ARCH). Set an
+# -march target such as x86-64-v3 for binaries that move between CPUs, or an
+# empty string for the compiler default.
+set(PSRIO_CLI_CPU_ARCH
+    "native"
+    CACHE STRING "-march for the psrio CLI (e.g. native, x86-64-v3; empty for none)"
+)
+if(PSRIO_CLI_CPU_ARCH)
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag("-march=${PSRIO_CLI_CPU_ARCH}" PSRIO_CLI_HAS_MARCH)
+  if(PSRIO_CLI_HAS_MARCH)
+    target_compile_options(psrio_cli_commands PUBLIC -march=${PSRIO_CLI_CPU_ARCH})
+  else()
+    message(WARNING "psrio: the compiler does not accept -march=${PSRIO_CLI_CPU_ARCH}")
+  endif()
+endif()
 if(TARGET psrio::fbh5)
   target_link_libraries(psrio_cli_commands PUBLIC psrio::fbh5)
   target_compile_definitions(psrio_cli_commands PRIVATE PSRIO_CLI_HAS_HDF5=1)
 endif()
 
 add_executable(psrio_cli psrio.cpp)
-set_target_properties(psrio_cli PROPERTIES OUTPUT_NAME psrio)
+# An installed psrio finds shared libraries (HDF5, FFTW, libgomp) where it was
+# linked against them, for example a conda prefix, without LD_LIBRARY_PATH.
+set_target_properties(psrio_cli PROPERTIES OUTPUT_NAME psrio INSTALL_RPATH_USE_LINK_PATH TRUE)
 target_link_libraries(psrio_cli PRIVATE psrio_cli_commands psrio_developer_flags)
 
 if(PSRIO_INSTALL)

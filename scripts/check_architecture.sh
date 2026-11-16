@@ -69,7 +69,7 @@ for h in $(find include/psrio -name '*.hpp' | sort); do
     rel=${h#include/psrio/}
     dir=$(dirname "$rel")
     case $dir in
-        .) ok="${common_ns}|psrio::astro|psrio::digifil" ;;
+        .) ok="${common_ns}|psrio::astro|psrio::digifil|psrio::stats|psrio::clean" ;;
         common | detail) ok="${common_ns}" ;;
         formats) ok="${common_ns}|psrio::formats::[a-z0-9_]+|psrio::formats::[a-z0-9_]+::detail" ;;
         formats/*)

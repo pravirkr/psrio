@@ -341,6 +341,10 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
         if (got == 0U) {
             break;
         }
+        if (local + got == file.count) {
+            // The stream has moved past this file: stop its read-ahead.
+            file.reader.release_buffers();
+        }
         done += got;
     }
     m_sample += done;

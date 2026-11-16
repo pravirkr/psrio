@@ -6,6 +6,7 @@
 #include "psrio/astro.hpp"             // IWYU pragma: export
 #include "psrio/baseband.hpp"          // IWYU pragma: export
 #include "psrio/block_source.hpp"      // IWYU pragma: export
+#include "psrio/clean.hpp"             // IWYU pragma: export
 #include "psrio/common/concepts.hpp"   // IWYU pragma: export
 #include "psrio/common/types.hpp"      // IWYU pragma: export
 #include "psrio/detail/exceptions.hpp" // IWYU pragma: export
@@ -20,6 +21,7 @@
 #include "psrio/open.hpp"              // IWYU pragma: export
 #include "psrio/packed.hpp"            // IWYU pragma: export
 #include "psrio/scrunch.hpp"           // IWYU pragma: export
+#include "psrio/stats.hpp"             // IWYU pragma: export
 #include "psrio/timeseries.hpp"        // IWYU pragma: export
 
 #include <string_view>
@@ -27,7 +29,7 @@
 namespace psrio {
 
 /// @return Semantic version string matching the CMake project version.
-constexpr std::string_view version() noexcept { return "0.5.0"; }
+constexpr std::string_view version() noexcept { return "0.6.0"; }
 
 // Main convenient public types
 using formats::dada::DadaReader;

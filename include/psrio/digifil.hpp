@@ -1,23 +1,35 @@
 #pragma once
 
+#include "psrio/astro.hpp"
 #include "psrio/block_source.hpp"
 #include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
+#include "psrio/detail/parallel.hpp"
+#include "psrio/detail/skip.hpp"
+#include "psrio/formats/psrfits/reader.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 #include "psrio/formats/sigproc/writer.hpp"
+#include "psrio/packed.hpp"
 #include "psrio/scrunch.hpp"
 
 #include <algorithm>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fmt/format.h>
+#include <future>
+#include <limits>
+#include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -66,6 +78,11 @@ struct Config {
     double rescale_seconds{10.0};
     /// Freeze the offset and scale after the first interval (-c).
     bool rescale_constant{false};
+    /// Robust rescaling: once a channel has statistics, values more than
+    /// this many standard deviations from its mean are left out of the next
+    /// statistics, so bursts of RFI do not inflate the scale. 0 keeps
+    /// dspsr's plain mean and variance (--rescale-clip).
+    double rescale_clip{0.0};
     /// Time decimation factor; 0 means 1 (-t).
     std::uint64_t tscrunch{1};
     /// Frequency decimation factor; 0 means 1 (-f).
@@ -75,9 +92,19 @@ struct Config {
     /// Keep only this input IF, or all IFs when negative (-P).
     int poln_select{-1};
     /// Input samples per block. Rescaling statistics depend on the block
-    /// boundaries during the first interval. Defaults to dspsr's block for a
-    /// 256 MB RAM limit (default_gulp()).
+    /// boundaries during the first interval. Defaults to dspsr's block for
+    /// max_ram_mb (default_gulp()).
     std::optional<std::uint64_t> gulp;
+    /// RAM limit in MiB that sets the default block, as dspsr `-U`.
+    double max_ram_mb{256.0};
+    /// Search-mode PSRFITS: apply `DAT_SCL`, `DAT_OFFS`, and `ZERO_OFF`
+    /// (dspsr `--scloffs`). Used by decode_options() when the caller opens
+    /// the file; the pipeline itself does not read it.
+    bool scloffs{false};
+
+    [[nodiscard]] double max_ram_bytes() const noexcept {
+        return max_ram_mb * 1024.0 * 1024.0;
+    }
 
     /// @throws ValidationError if a setting is out of range.
     void validate() const {
@@ -90,6 +117,11 @@ struct Config {
                 "got {}",
                 rescale_seconds));
         }
+        if (!std::isfinite(rescale_clip) || rescale_clip < 0.0) {
+            throw ValidationError(fmt::format(
+                "psrio: digifil rescale clip must be finite and >= 0, got {}",
+                rescale_clip));
+        }
         if (!std::isfinite(scale_fac) || scale_fac == 0.0F) {
             throw ValidationError(fmt::format(
                 "psrio: digifil scale factor must be finite and non-zero, "
@@ -99,8 +131,27 @@ struct Config {
         if (gulp.has_value() && *gulp == 0U) {
             throw ValidationError("psrio: digifil gulp must be positive");
         }
+        if (!std::isfinite(max_ram_mb) || max_ram_mb <= 0.0) {
+            throw ValidationError(fmt::format(
+                "psrio: digifil RAM limit must be positive, got {} MB",
+                max_ram_mb));
+        }
     }
 };
+
+/// How dspsr's digifil decodes search-mode PSRFITS for @p config: DAT_SCL
+/// and DAT_OFFS only with Config::scloffs, no DAT_WTS, and `-P` picking a
+/// stored product (AA, BB, ...) instead of an IF of the decoded stream.
+/// Open the file with these options and run the pipeline with
+/// poln_select -1.
+[[nodiscard]] inline formats::psrfits::DecodeOptions
+decode_options(const Config& config) noexcept {
+    return formats::psrfits::DecodeOptions{
+        .scloffs = config.scloffs,
+        .weights = false,
+        .product = config.poln_select >= 0 ? config.poln_select : -1,
+    };
+}
 
 /// Input samples per block that dspsr reads under a RAM limit.
 ///
@@ -141,13 +192,14 @@ psrfits_block_samples(int stored_nbits,
                       std::uint64_t subint_samples,
                       bool sum_feeds,
                       std::uint64_t tscrunch,
-                      std::uint64_t fscrunch) {
+                      std::uint64_t fscrunch,
+                      double max_ram_bytes = kDefaultMaxRamBytes) {
     const auto time_factor = std::max<std::uint64_t>(tscrunch, 1U);
     const auto chan_factor = std::max<std::uint64_t>(fscrunch, 1U);
     const int copies       = 1 + (chan_factor > 1U ? 1 : 0) +
                              (time_factor > 1U ? 1 : 0) + (sum_feeds ? 1 : 0);
     return block_samples(stored_nbits, npol, nchans, copies, subint_samples,
-                         kDefaultMaxRamBytes);
+                         max_ram_bytes);
 }
 
 /// Per-column rescaling to zero mean and unit variance, as dspsr `Rescale`.
@@ -157,12 +209,21 @@ psrfits_block_samples(int stored_nbits,
 /// statistics are recomputed at the end of every block, so block boundaries
 /// matter there. Each row is rescaled as (x + offset) * scale with the latest
 /// statistics.
+///
+/// With a clip of k > 0, a column that already has statistics adds only the
+/// values within k standard deviations of its mean to the next statistics,
+/// which then average over the values kept. The first block is taken whole.
 class Rescaler {
 public:
-    /// @throws ValidationError if @p ncols or @p nsample is 0.
-    Rescaler(std::uint64_t ncols, std::uint64_t nsample, bool constant)
+    /// @throws ValidationError if @p ncols or @p nsample is 0, or @p clip is
+    ///         negative.
+    Rescaler(std::uint64_t ncols,
+             std::uint64_t nsample,
+             bool constant,
+             double clip = 0.0)
         : m_nsample(nsample),
           m_constant(constant),
+          m_clip(clip),
           m_sums(static_cast<std::size_t>(ncols), 0.0),
           m_sumsq(static_cast<std::size_t>(ncols), 0.0),
           m_offset(static_cast<std::size_t>(ncols), 0.0F),
@@ -170,6 +231,14 @@ public:
         if (ncols == 0U || nsample == 0U) {
             throw ValidationError(
                 "psrio: rescaler needs at least one column and sample");
+        }
+        if (!(clip >= 0.0) || !std::isfinite(clip)) {
+            throw ValidationError("psrio: rescaler clip must be >= 0");
+        }
+        if (clip > 0.0) {
+            m_count.assign(static_cast<std::size_t>(ncols), 0U);
+            m_lower.assign(static_cast<std::size_t>(ncols), 0.0);
+            m_upper.assign(static_cast<std::size_t>(ncols), 0.0);
         }
     }
 
@@ -208,6 +277,7 @@ public:
                     m_isample = 0;
                     std::ranges::fill(m_sums, 0.0);
                     std::ranges::fill(m_sumsq, 0.0);
+                    std::ranges::fill(m_count, 0U);
                 }
             }
             if (m_constant && !m_first) {
@@ -220,17 +290,66 @@ public:
 
 private:
     void accumulate(std::span<const float> rows) {
-        const auto ncols = m_sums.size();
-        for (std::size_t base = 0; base < rows.size(); base += ncols) {
-            for (std::size_t col = 0; col < ncols; ++col) {
-                const auto value = static_cast<double>(rows[base + col]);
-                m_sums[col] += value;
-                m_sumsq[col] += value * value;
+        // Threads own tiles of columns, and each column still sums its rows
+        // in order, so the sums match a serial pass bit for bit.
+        constexpr std::size_t kTile = 64;
+        const auto ncols            = m_sums.size();
+        const auto nrows            = rows.size() / ncols;
+        const auto ntiles           = (ncols + kTile - 1U) / kTile;
+        [[maybe_unused]] const bool wide =
+            ::psrio::detail::parallel_worthwhile(rows.size());
+        const float* data = rows.data();
+        double* sums      = m_sums.data();
+        double* sumsq     = m_sumsq.data();
+        if (m_clip > 0.0) {
+            const bool clip     = m_have_stats;
+            std::uint64_t* kept = m_count.data();
+            const double* lower = m_lower.data();
+            const double* upper = m_upper.data();
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(ntiles, ncols, nrows, data, sums, sumsq, clip, kept,
+                             lower, upper))
+            for (std::size_t tile = 0; tile < ntiles; ++tile) {
+                const auto first = tile * kTile;
+                const auto last  = std::min(first + kTile, ncols);
+                for (std::size_t row = 0; row < nrows; ++row) {
+                    const float* values = data + (row * ncols);
+                    for (std::size_t col = first; col < last; ++col) {
+                        const auto value = static_cast<double>(values[col]);
+                        if (clip &&
+                            (value < lower[col] || value > upper[col])) {
+                            continue;
+                        }
+                        sums[col] += value;
+                        sumsq[col] += value * value;
+                        kept[col] += 1U;
+                    }
+                }
+            }
+            return;
+        }
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(ntiles, ncols, nrows, data, sums, sumsq))
+        for (std::size_t tile = 0; tile < ntiles; ++tile) {
+            const auto first = tile * kTile;
+            const auto last  = std::min(first + kTile, ncols);
+            for (std::size_t row = 0; row < nrows; ++row) {
+                const float* values = data + (row * ncols);
+                PSRIO_OMP(omp simd)
+                for (std::size_t col = first; col < last; ++col) {
+                    const auto value = static_cast<double>(values[col]);
+                    sums[col] += value;
+                    sumsq[col] += value * value;
+                }
             }
         }
     }
 
     void compute() {
+        if (m_clip > 0.0) {
+            compute_clipped();
+            return;
+        }
         const double recip = 1.0 / static_cast<double>(m_isample);
         for (std::size_t col = 0; col < m_sums.size(); ++col) {
             const double mean     = m_sums[col] * recip;
@@ -242,24 +361,60 @@ private:
         }
     }
 
+    void compute_clipped() {
+        for (std::size_t col = 0; col < m_sums.size(); ++col) {
+            if (m_count[col] == 0U) {
+                continue; // every value was clipped: keep the last statistics
+            }
+            const double recip    = 1.0 / static_cast<double>(m_count[col]);
+            const double mean     = m_sums[col] * recip;
+            const double variance = (m_sumsq[col] * recip) - (mean * mean);
+            const double sigma    = variance > 0.0 ? std::sqrt(variance) : 0.0;
+            m_offset[col]         = static_cast<float>(-mean);
+            m_scale[col] = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 1.0F;
+            // A constant channel has no spread to clip against.
+            const double half = sigma > 0.0
+                                    ? m_clip * sigma
+                                    : std::numeric_limits<double>::infinity();
+            m_lower[col]      = mean - half;
+            m_upper[col]      = mean + half;
+        }
+        m_have_stats = true;
+    }
+
     void apply(std::span<float> rows) const {
         const auto ncols = m_offset.size();
-        for (std::size_t base = 0; base < rows.size(); base += ncols) {
+        const auto nrows = rows.size() / ncols;
+        [[maybe_unused]] const bool wide =
+            ::psrio::detail::parallel_worthwhile(rows.size());
+        float* data         = rows.data();
+        const float* offset = m_offset.data();
+        const float* scale  = m_scale.data();
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, ncols, data, offset, scale))
+        for (std::size_t row = 0; row < nrows; ++row) {
+            float* values = data + (row * ncols);
+            PSRIO_OMP(omp simd)
             for (std::size_t col = 0; col < ncols; ++col) {
-                const float shifted = rows[base + col] + m_offset[col];
-                rows[base + col]    = shifted * m_scale[col];
+                const float shifted = values[col] + offset[col];
+                values[col]         = shifted * scale[col];
             }
         }
     }
 
     std::uint64_t m_nsample;
     bool m_constant;
+    double m_clip{0.0};
+    bool m_have_stats{false};
     bool m_first{true};
     std::uint64_t m_isample{0};
     std::vector<double> m_sums;
     std::vector<double> m_sumsq;
     std::vector<float> m_offset;
     std::vector<float> m_scale;
+    std::vector<std::uint64_t> m_count;
+    std::vector<double> m_lower;
+    std::vector<double> m_upper;
 };
 
 /// Quantise one value as dspsr's SigProcDigitizer: round(value * scale +
@@ -282,6 +437,39 @@ private:
         return 0;
     }
     return std::min(static_cast<std::uint32_t>(level), digi_max);
+}
+
+/// quantise() over one row of @p n values into @p out, reading the row in
+/// reverse when @p flip. Equal to quantise() for every input: the value is
+/// clamped to [0, digi_max] first (NaN to 0), after which rounding half up
+/// is floor(v + 0.5) formed exactly in double. Written to vectorise.
+template <typename Out>
+inline void quantise_row(const float* src,
+                         std::size_t n,
+                         bool flip,
+                         float mean,
+                         float scale,
+                         float digi_max,
+                         Out* out) noexcept {
+    const auto level = [=](float value) {
+        const float shifted = (value * scale) + mean;
+        const float above   = shifted >= 0.0F ? shifted : 0.0F;
+        const float clamped = above > digi_max ? digi_max : above;
+        return static_cast<Out>(
+            static_cast<std::uint32_t>(static_cast<double>(clamped) + 0.5));
+    };
+    if (flip) {
+        const float* last = src + (n - 1U);
+        PSRIO_OMP(omp simd)
+        for (std::size_t index = 0; index < n; ++index) {
+            out[index] = level(*(last - index));
+        }
+    } else {
+        PSRIO_OMP(omp simd)
+        for (std::size_t index = 0; index < n; ++index) {
+            out[index] = level(src[index]);
+        }
+    }
 }
 
 /// Geometry of the data entering the pipeline.
@@ -352,7 +540,7 @@ public:
                     config.rescale_seconds));
             }
             m_rescaler.emplace(m_nifs_out * m_nchans, nsample,
-                               config.rescale_constant);
+                               config.rescale_constant, config.rescale_clip);
         }
         if (!m_is_float) {
             const float mean = digitiser_mean(m_nbits);
@@ -421,7 +609,10 @@ public:
 
         const auto row_out = static_cast<std::size_t>(m_nifs_out * m_nchans);
         const auto work    = m_tscrunch.push(data, nsamp);
-        const auto nout    = work.size() / row_out;
+        if (row_out == 0U) {
+            return {};
+        }
+        const auto nout = work.size() / row_out;
         if (nout == 0U) {
             return {};
         }
@@ -442,7 +633,11 @@ private:
             return m_flip ? nchans - 1U - ochan : ochan;
         };
 
+        [[maybe_unused]] const bool wide =
+            ::psrio::detail::parallel_worthwhile(nrows * nchans);
         if (m_is_float) {
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, data, channel))
             for (std::size_t row = 0; row < nrows; ++row) {
                 for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
                     const float value = ::psrio::detail::to_little_endian(
@@ -455,18 +650,22 @@ private:
             return m_bytes;
         }
 
-        const auto npol = static_cast<std::size_t>(m_nifs_out);
+        const auto npol     = static_cast<std::size_t>(m_nifs_out);
+        const auto digi_max = static_cast<float>(m_digi_max);
+        const float* in     = data.data();
         if (m_nbits == 16) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            auto* out = reinterpret_cast<std::uint16_t*>(m_bytes.data());
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, in, npol, digi_max, out))
             for (std::size_t row = 0; row < nrows; ++row) {
-                const float mean = m_pol_mean[row % npol];
-                for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
-                    const auto level = ::psrio::detail::to_little_endian(
-                        static_cast<std::uint16_t>(
-                            quantise(data[(row * nchans) + channel(ochan)],
-                                     mean, m_digi_scale, m_digi_max)));
-                    std::memcpy(m_bytes.data() +
-                                    (((row * nchans) + ochan) * 2U),
-                                &level, 2U);
+                quantise_row(in + (row * nchans), nchans, m_flip,
+                             m_pol_mean[row % npol], m_digi_scale, digi_max,
+                             out + (row * nchans));
+            }
+            if (!::psrio::detail::host_is_little_endian()) {
+                for (std::size_t index = 0; index < nrows * nchans; ++index) {
+                    out[index] = ::psrio::detail::to_little_endian(out[index]);
                 }
             }
             return m_bytes;
@@ -476,18 +675,15 @@ private:
         if (packed) {
             m_levels.resize(nrows * nchans);
         }
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+        auto* out = packed ? m_levels.data()
+                           : reinterpret_cast<std::uint8_t*>(m_bytes.data());
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nrows, nchans, in, npol, digi_max, out))
         for (std::size_t row = 0; row < nrows; ++row) {
-            const float mean = m_pol_mean[row % npol];
-            for (std::size_t ochan = 0; ochan < nchans; ++ochan) {
-                const auto level = static_cast<std::uint8_t>(
-                    quantise(data[(row * nchans) + channel(ochan)], mean,
-                             m_digi_scale, m_digi_max));
-                if (packed) {
-                    m_levels[(row * nchans) + ochan] = level;
-                } else {
-                    m_bytes[(row * nchans) + ochan] = std::byte{level};
-                }
-            }
+            quantise_row(in + (row * nchans), nchans, m_flip,
+                         m_pol_mean[row % npol], m_digi_scale, digi_max,
+                         out + (row * nchans));
         }
         if (packed) {
             ::psrio::detail::pack_sub_byte(m_levels, m_bytes, m_nbits,
@@ -552,6 +748,439 @@ output_header(const formats::sigproc::FilterbankHeader& input,
     return out;
 }
 
+/// Default input block for @p source: dspsr's block for a RAM limit
+/// (256 MB unless given).
+[[nodiscard]] inline std::uint64_t
+default_gulp(const BlockSource& source,
+             const Pipeline& pipeline,
+             double max_ram_bytes = kDefaultMaxRamBytes) {
+    return block_samples(source.nbits(), source.nifs(), source.nchans(),
+                         pipeline.float_copies(), kSigprocResolution,
+                         max_ram_bytes);
+}
+
+/// SIGPROC header that describes @p source, from the reader's own header when
+/// it has one, else from its metadata getters.
+[[nodiscard]] inline formats::sigproc::FilterbankHeader
+header_of(const BlockSource& source) {
+    return sigproc_header_of(source);
+}
+
+/**
+ * @brief digifil output streamed from a BlockSource, without a file.
+ *
+ * Wraps an input BlockSource (any format, including a multi-file PSRFITS
+ * stream) and runs the digifil Pipeline as samples are read. It models
+ * `concepts::BlockReader`, so it can itself be wrapped in a BlockSource.
+ * The stream is the SIGPROC payload digifil writes: nifs_out IFs of
+ * nchans_out channels at nbits_out bits, channels descending in frequency,
+ * sub-byte samples packed least significant bit first. header() is the
+ * SIGPROC header digifil writes, with refdm kept.
+ *
+ * Reads run forward. While one input block is processed, the next is read on
+ * another thread, so file reads overlap the rescaling. seek(), skip(), and
+ * rewind() restart the pipeline at the matching input sample, so rescaling
+ * statistics restart there as they would for a fresh run over that range.
+ * Output samples are input samples / tscrunch.
+ *
+ * The wrapped source must not be used by anyone else while this object
+ * reads it.
+ */
+class Source {
+public:
+    /// Read @p source, which this object then owns.
+    /// @param start First input sample.
+    /// @param nsamps Input samples to read; all after @p start by default.
+    /// @throws ValidationError if the configuration does not fit the input.
+    Source(BlockSource source,
+           const Config& config,
+           std::uint64_t start                 = 0,
+           std::optional<std::uint64_t> nsamps = std::nullopt)
+        : m_owned(std::make_unique<BlockSource>(std::move(source))),
+          m_input(m_owned.get()),
+          m_config(config) {
+        init(header_of(*m_input), start, nsamps);
+    }
+
+    /// Read @p source, which must outlive this object. @p header is the full
+    /// input header (FilterbankReader::header(), or one built for another
+    /// format).
+    Source(BlockSource& source,
+           const formats::sigproc::FilterbankHeader& header,
+           const Config& config,
+           std::uint64_t start                 = 0,
+           std::optional<std::uint64_t> nsamps = std::nullopt)
+        : m_input(&source),
+          m_config(config) {
+        init(header, start, nsamps);
+    }
+
+    Source(const Source&)            = delete;
+    Source& operator=(const Source&) = delete;
+    Source(Source&&) noexcept        = default;
+    // A read may be in flight into this object's buffers.
+    Source& operator=(Source&&) = delete;
+    ~Source() { wait(); }
+
+    /// SIGPROC header of the output stream.
+    [[nodiscard]] const formats::sigproc::FilterbankHeader&
+    header() const noexcept {
+        return m_header;
+    }
+    [[nodiscard]] const Pipeline& pipeline() const noexcept {
+        return *m_pipeline;
+    }
+    /// Input samples per block pushed through the pipeline.
+    [[nodiscard]] std::uint64_t gulp() const noexcept { return m_gulp; }
+    /// Input samples read so far.
+    [[nodiscard]] std::uint64_t input_samples_read() const noexcept {
+        return m_consumed;
+    }
+
+    [[nodiscard]] std::optional<double> refdm() const noexcept {
+        return m_header.refdm;
+    }
+    [[nodiscard]] std::uint64_t nchans() const noexcept {
+        return m_pipeline->nchans_out();
+    }
+    [[nodiscard]] std::uint64_t nifs() const noexcept {
+        return m_pipeline->nifs_out();
+    }
+    [[nodiscard]] int nbits() const noexcept { return m_pipeline->nbits_out(); }
+    [[nodiscard]] SampleType sample_type() const {
+        return sample_type_from_nbits(nbits(), false);
+    }
+    [[nodiscard]] std::uint64_t bytes_per_sample() const noexcept {
+        return m_pipeline->bytes_per_sample();
+    }
+    [[nodiscard]] std::uint64_t nsamples() const noexcept { return m_nsamples; }
+    [[nodiscard]] static bool has_nsamples() noexcept { return true; }
+    [[nodiscard]] double tsamp() const { return m_header.tsamp.value_or(0.0); }
+    [[nodiscard]] double tstart() const {
+        return m_header.tstart.value_or(0.0);
+    }
+    [[nodiscard]] std::string_view source_name() const {
+        return m_input->source_name();
+    }
+    [[nodiscard]] std::string_view telescope() const {
+        return m_input->telescope();
+    }
+    [[nodiscard]] double raj() const { return m_input->raj(); }
+    [[nodiscard]] double dej() const { return m_input->dej(); }
+    [[nodiscard]] double fch1() const { return m_header.fch1.value_or(0.0); }
+    [[nodiscard]] double foff() const { return m_header.foff.value_or(0.0); }
+    [[nodiscard]] double bandwidth() const {
+        return std::abs(foff()) * static_cast<double>(nchans());
+    }
+    [[nodiscard]] double center_frequency() const {
+        return fch1() + (foff() * (static_cast<double>(nchans()) - 1.0) / 2.0);
+    }
+    [[nodiscard]] int beam() const { return m_input->beam(); }
+    [[nodiscard]] double spectra_rate() const {
+        const double interval = tsamp();
+        return interval > 0.0 ? 1.0 / interval : 0.0;
+    }
+    [[nodiscard]] std::time_t utc_start() const {
+        return astro::mjd_to_time(tstart());
+    }
+    [[nodiscard]] std::uint64_t tell() const noexcept { return m_sample; }
+
+    /// Reverse the output channels (to ascending frequency) on read_block()
+    /// and read_samples().
+    void set_fswap(bool enable) noexcept { m_fswap = enable; }
+    [[nodiscard]] bool fswap_enabled() const noexcept { return m_fswap; }
+
+    /// Restart the pipeline so the next output sample is @p sample.
+    /// @throws ValidationError if @p sample is past nsamples().
+    void seek(std::uint64_t sample) {
+        if (sample > m_nsamples) {
+            throw ValidationError("psrio: seek is past the readable samples");
+        }
+        wait();
+        const auto tfac = m_pipeline->tscrunch();
+        const auto skip = sample * tfac;
+        restart(m_start + skip, m_count - skip);
+        m_sample = sample;
+    }
+    void rewind() { seek(0); }
+    void skip(std::int64_t delta) {
+        seek(::psrio::detail::apply_skip(m_sample, delta, m_nsamples));
+    }
+
+    /// The next encoded output, as the pipeline produces it, valid until the
+    /// next call. Empty at the end. Does not honour fswap.
+    std::span<const std::byte> next() {
+        if (m_ready_at < m_ready.size()) {
+            const auto rest =
+                std::span<const std::byte>(m_ready).subspan(m_ready_at);
+            m_ready_at = m_ready.size();
+            m_sample += rest.size() / bytes_per_sample();
+            return rest;
+        }
+        while (true) {
+            const auto got = take_block();
+            if (got == 0U) {
+                return {};
+            }
+            const auto bytes = m_pipeline->push(m_current, got);
+            if (!bytes.empty()) {
+                m_sample += bytes.size() / bytes_per_sample();
+                return bytes;
+            }
+        }
+    }
+
+    /// Copy up to @p count output samples into @p dest.
+    /// @return Samples copied; short only at the end.
+    std::uint64_t read_block(std::uint64_t count, std::span<std::byte> dest) {
+        const auto stride = bytes_per_sample();
+        if (dest.size() / stride < count) {
+            throw ValidationError(fmt::format(
+                "psrio: destination has {} bytes but the block needs {}",
+                dest.size(), count * stride));
+        }
+        std::uint64_t done = 0;
+        while (done < count) {
+            if (m_ready_at == m_ready.size() && !refill()) {
+                break;
+            }
+            const auto have = (m_ready.size() - m_ready_at) / stride;
+            const auto take = std::min<std::uint64_t>(have, count - done);
+            std::memcpy(dest.data() + (done * stride),
+                        m_ready.data() + m_ready_at,
+                        static_cast<std::size_t>(take * stride));
+            m_ready_at += static_cast<std::size_t>(take * stride);
+            done += take;
+        }
+        m_sample += done;
+        if (m_fswap && done > 0U) {
+            reverse_channels(
+                dest.first(static_cast<std::size_t>(done * stride)),
+                done * nifs(), nchans(), nbits());
+        }
+        return done;
+    }
+
+    /// Convenience allocating read of up to @p count output samples.
+    [[nodiscard]] std::vector<std::byte> read_block(std::uint64_t count) {
+        std::vector<std::byte> out(
+            static_cast<std::size_t>(count * bytes_per_sample()));
+        const auto got = read_block(count, out);
+        out.resize(static_cast<std::size_t>(got * bytes_per_sample()));
+        return out;
+    }
+
+    /// Unpack up to @p count output samples into @p dest, which holds
+    /// count * nifs * nchans values. T is float for any nbits, uint8_t for 8
+    /// bits or fewer, uint16_t for 16 bits.
+    template <typename T>
+        requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
+                 std::same_as<T, std::uint16_t>
+    std::uint64_t read_samples(std::uint64_t count, std::span<T> dest) {
+        const auto per_sample = nifs() * nchans();
+        if (dest.size() != count * per_sample) {
+            throw ValidationError(fmt::format(
+                "psrio: destination has {} values but the request needs {}",
+                dest.size(), count * per_sample));
+        }
+        const int bits = nbits();
+        if constexpr (std::same_as<T, std::uint8_t>) {
+            if (bits > 8) {
+                throw ValidationError(
+                    "psrio: uint8_t output requires nbits of 8 or less");
+            }
+        } else if constexpr (std::same_as<T, std::uint16_t>) {
+            if (bits != 16) {
+                throw ValidationError(
+                    "psrio: uint16_t output requires 16-bit samples");
+            }
+        }
+        m_unpacked.resize(static_cast<std::size_t>(count * bytes_per_sample()));
+        const bool fswap = m_fswap;
+        m_fswap          = false;
+        const auto got   = read_block(count, m_unpacked);
+        m_fswap          = fswap;
+        const auto raw =
+            std::span<const std::byte>(m_unpacked)
+                .first(static_cast<std::size_t>(got * bytes_per_sample()));
+        const auto out = dest.first(static_cast<std::size_t>(got * per_sample));
+        if (bits < 8) {
+            if constexpr (!std::same_as<T, std::uint16_t>) {
+                ::psrio::detail::unpack_sub_byte(raw, out, bits,
+                                                 BitOrder::kLsbFirst);
+            }
+        } else if (bits == 8) {
+            if constexpr (!std::same_as<T, std::uint16_t>) {
+                ::psrio::detail::unpack_8bit(raw, out, false);
+            }
+        } else if (bits == 16) {
+            if constexpr (!std::same_as<T, std::uint8_t>) {
+                ::psrio::detail::unpack_16le(raw, out);
+            }
+        } else if constexpr (std::same_as<T, float>) {
+            ::psrio::detail::unpack_32le(raw, out);
+        } else {
+            throw ValidationError("psrio: 32-bit samples unpack to float");
+        }
+        if (m_fswap && got > 0U) {
+            reverse_unpacked_channels(out, got, nchans(), nifs());
+        }
+        return got;
+    }
+
+    /// Copy the next @p nbytes output bytes, a whole number of samples.
+    std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest) {
+        const auto stride = bytes_per_sample();
+        if (nbytes == 0U || nbytes % stride != 0U || dest.size() != nbytes) {
+            throw ValidationError("psrio: byte request must be a positive "
+                                  "multiple of the sample stride");
+        }
+        if (nbytes / stride > m_nsamples - m_sample) {
+            throw ValidationError(
+                "psrio: byte request extends past the readable samples");
+        }
+        const bool fswap = m_fswap;
+        m_fswap          = false;
+        const auto got   = read_block(nbytes / stride, dest);
+        m_fswap          = fswap;
+        return got * stride;
+    }
+
+private:
+    void init(const formats::sigproc::FilterbankHeader& header,
+              std::uint64_t start,
+              std::optional<std::uint64_t> nsamps) {
+        const auto total = m_input->nsamples();
+        if (start >= total) {
+            throw ValidationError(fmt::format(
+                "psrio: start sample {} is outside the input ({} samples)",
+                start, total));
+        }
+        const auto count = nsamps.value_or(total - start);
+        if (count == 0U || count > total - start) {
+            throw ValidationError(fmt::format(
+                "psrio: {} samples from {} exceed the input ({} samples)",
+                count, start, total));
+        }
+        m_start    = start;
+        m_count    = count;
+        m_pipeline = std::make_unique<Pipeline>(m_config, layout());
+        m_gulp     = m_config.gulp.value_or(
+            default_gulp(*m_input, *m_pipeline, m_config.max_ram_bytes()));
+        m_header   = output_header(header, *m_pipeline, start);
+        m_nsamples = count / m_pipeline->tscrunch();
+        m_input->set_fswap(false);
+        restart(start, count);
+    }
+
+    [[nodiscard]] InputLayout layout() const {
+        return InputLayout{
+            .nchans = m_input->nchans(),
+            .nifs   = m_input->nifs(),
+            .nbits  = m_input->nbits(),
+            .tsamp  = m_input->tsamp(),
+            .foff   = m_input->foff(),
+        };
+    }
+
+    /// Start reading @p count input samples at @p start with a new pipeline.
+    void restart(std::uint64_t start, std::uint64_t count) {
+        wait();
+        if (m_consumed != 0U || m_requested != 0U) {
+            m_pipeline = std::make_unique<Pipeline>(m_config, layout());
+        }
+        m_consumed  = 0;
+        m_requested = 0;
+        m_ready.clear();
+        m_ready_at = 0;
+        m_input->seek(start);
+        m_count_left = count;
+        launch();
+    }
+
+    /// Read the next input block on another thread.
+    void launch() {
+        const auto row  = m_input->nifs() * m_input->nchans();
+        const auto want = std::min(m_gulp, m_count_left - m_requested);
+        if (want == 0U) {
+            return;
+        }
+        m_next.resize(static_cast<std::size_t>(want * row));
+        m_requested += want;
+        m_pending =
+            std::async(std::launch::async, [input = m_input, want,
+                                            block = std::span<float>(m_next)] {
+                return input->read_samples(want, block);
+            });
+    }
+
+    /// Wait for the block in flight, start the one after, and return how
+    /// many samples m_current now holds.
+    std::uint64_t take_block() {
+        if (!m_pending.valid()) {
+            return 0;
+        }
+        const auto got = m_pending.get();
+        std::swap(m_current, m_next);
+        m_consumed += got;
+        if (got > 0U) {
+            launch();
+        }
+        return got;
+    }
+
+    bool refill() {
+        const auto bytes = next_from_pipeline();
+        if (bytes.empty()) {
+            return false;
+        }
+        m_ready.assign(bytes.begin(), bytes.end());
+        m_ready_at = 0;
+        return true;
+    }
+
+    std::span<const std::byte> next_from_pipeline() {
+        while (true) {
+            const auto got = take_block();
+            if (got == 0U) {
+                return {};
+            }
+            const auto bytes = m_pipeline->push(m_current, got);
+            if (!bytes.empty()) {
+                return bytes;
+            }
+        }
+    }
+
+    void wait() noexcept {
+        if (m_pending.valid()) {
+            m_pending.wait();
+        }
+    }
+
+    std::unique_ptr<BlockSource> m_owned;
+    BlockSource* m_input{nullptr};
+    Config m_config;
+    formats::sigproc::FilterbankHeader m_header;
+    std::unique_ptr<Pipeline> m_pipeline;
+    std::uint64_t m_start{0};
+    std::uint64_t m_count{0};
+    std::uint64_t m_count_left{0};
+    std::uint64_t m_gulp{0};
+    std::uint64_t m_consumed{0};
+    std::uint64_t m_requested{0};
+    std::uint64_t m_sample{0};
+    std::uint64_t m_nsamples{0};
+    bool m_fswap{false};
+    std::vector<std::byte> m_ready;
+    std::size_t m_ready_at{0};
+    std::vector<float> m_current;
+    std::vector<float> m_next;
+    std::vector<std::byte> m_unpacked;
+    // Last, so it is destroyed (and joined) before the buffers it fills.
+    std::future<std::uint64_t> m_pending;
+};
+
 /// Counts reported by run().
 struct Summary {
     std::uint64_t nsamples_in{0};
@@ -574,54 +1203,21 @@ inline Summary run(BlockSource& source,
                    const Config& config,
                    std::uint64_t start                 = 0,
                    std::optional<std::uint64_t> nsamps = std::nullopt) {
-    const auto total = source.nsamples();
-    if (start >= total) {
-        throw ValidationError(fmt::format(
-            "psrio: start sample {} is outside the input ({} samples)", start,
-            total));
-    }
-    const auto count = nsamps.value_or(total - start);
-    if (count == 0U || count > total - start) {
-        throw ValidationError(fmt::format(
-            "psrio: {} samples from {} exceed the input ({} samples)", count,
-            start, total));
-    }
-
-    Pipeline pipeline(config, InputLayout{
-                                  .nchans = source.nchans(),
-                                  .nifs   = source.nifs(),
-                                  .nbits  = source.nbits(),
-                                  .tsamp  = source.tsamp(),
-                                  .foff   = source.foff(),
-                              });
-    const auto gulp = config.gulp.value_or(block_samples(
-        source.nbits(), source.nifs(), source.nchans(), pipeline.float_copies(),
-        kSigprocResolution, kDefaultMaxRamBytes));
-
-    formats::sigproc::FilterbankWriter writer(
-        output, output_header(header, pipeline, start));
-
-    source.set_fswap(false);
-    source.seek(start);
-    const auto row = source.nifs() * source.nchans();
-    std::vector<float> block(
-        static_cast<std::size_t>(std::min(gulp, count) * row));
-    Summary summary{.nsamples_in = 0, .nsamples_out = 0, .gulp = gulp};
-    while (summary.nsamples_in < count) {
-        const auto want = std::min(gulp, count - summary.nsamples_in);
-        const auto got  = source.read_samples(
-            want, std::span<float>(block).first(
-                      static_cast<std::size_t>(want * row)));
-        if (got == 0U) {
+    Source stream(source, header, config, start, nsamps);
+    formats::sigproc::FilterbankWriter writer(output, stream.header());
+    while (true) {
+        const auto bytes = stream.next();
+        if (bytes.empty()) {
             break;
         }
-        const auto bytes = pipeline.push(block, got);
         writer.write_bytes(bytes);
-        summary.nsamples_in += got;
     }
     writer.close();
-    summary.nsamples_out = writer.nsamples_written();
-    return summary;
+    return Summary{
+        .nsamples_in  = stream.input_samples_read(),
+        .nsamples_out = writer.nsamples_written(),
+        .gulp         = stream.gulp(),
+    };
 }
 
 } // namespace psrio::digifil

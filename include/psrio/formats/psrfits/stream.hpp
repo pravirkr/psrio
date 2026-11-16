@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -93,7 +94,12 @@ inline void require_nsuboffs(const SearchFile& previous,
  */
 class SearchStream {
 public:
-    explicit SearchStream(std::span<const std::filesystem::path> paths);
+    explicit SearchStream(std::span<const std::filesystem::path> paths)
+        : SearchStream(paths, DecodeOptions{}) {}
+
+    /// Every file is decoded with @p options (see SearchFile).
+    SearchStream(std::span<const std::filesystem::path> paths,
+                 DecodeOptions options);
 
     SearchStream(const SearchStream&)                = delete;
     SearchStream& operator=(const SearchStream&)     = delete;
@@ -112,6 +118,16 @@ public:
     [[nodiscard]] bool sums_polarisations() const noexcept { return m_sum; }
     [[nodiscard]] std::string_view pol_type() const noexcept {
         return m_pol_type;
+    }
+    /// Files in the stream, in time order.
+    [[nodiscard]] std::size_t nfiles() const noexcept { return m_files.size(); }
+    /// File @p index of the stream, for its own metadata (rows, NSUBOFFS).
+    [[nodiscard]] const SearchFile& file(std::size_t index) const {
+        return m_files.at(index).reader;
+    }
+    /// `CHAN_DM` of the first file, which every file must match.
+    [[nodiscard]] std::optional<double> refdm() const noexcept {
+        return m_header.refdm;
     }
 
     [[nodiscard]] std::uint64_t nchans() const noexcept { return m_nchan; }
@@ -242,15 +258,15 @@ private:
     double m_dej{0.0};
 };
 
-inline SearchStream::SearchStream(
-    std::span<const std::filesystem::path> paths) {
+inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
+                                  DecodeOptions options) {
     if (paths.empty()) {
         throw ValidationError("psrio: a PSRFITS stream needs a file");
     }
     m_files.reserve(paths.size());
     for (const auto& path : paths) {
         m_files.push_back(File{
-            .reader = SearchFile(path),
+            .reader = SearchFile(path, options),
             .first  = 0,
             .count  = 0,
         });
@@ -355,6 +371,10 @@ inline std::uint64_t SearchStream::read_across(std::uint64_t count,
         const auto got = read(file.reader, take, piece);
         if (got == 0U) {
             break;
+        }
+        if (local + got == file.count) {
+            // The stream has moved past this file: free its staging.
+            file.reader.release_buffers();
         }
         done += got;
     }

@@ -3,6 +3,7 @@
 #include "psrio/astro.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/detail/rfile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -242,6 +243,22 @@ struct FilterbankHeader {
     [[nodiscard]] static FilterbankHeader parse(std::span<const std::byte> file,
                                                 std::string_view path);
 
+    /// Parse a header from @p prefix, the first bytes of a file of
+    /// @p file_bytes bytes. data_bytes and the sample count follow
+    /// @p file_bytes.
+    /// @throws FormatError if @p prefix does not hold the whole header.
+    [[nodiscard]] static FilterbankHeader
+    parse_prefix(std::span<const std::byte> prefix,
+                 std::uint64_t file_bytes,
+                 std::string_view path = {});
+
+    /// Read and parse the header of an open file. Only the header bytes are
+    /// read: a prefix that grows until it holds HEADER_END.
+    /// @throws FormatError if the file is not SIGPROC.
+    /// @throws IoError if the file cannot be read.
+    [[nodiscard]] static FilterbankHeader
+    read(const ::psrio::detail::ReadFile& file);
+
     /// Serialize this header into the binary HEADER_START..HEADER_END format.
     ///
     /// Engaged keys are written little-endian in SIGPROC order, then the
@@ -286,10 +303,17 @@ struct FilterbankHeader {
     /// @throws ValidationError if foff is absent or nchans is not positive.
     [[nodiscard]] double bandwidth() const;
 
-    /// Upper edge of the first channel, fch1 - 0.5 * foff, in MHz.
+    /// Upper edge of the band, in MHz, whichever way foff points.
+    ///
+    /// For a uniform grid the band edges are fch1 - 0.5 * foff and
+    /// fch1 - 0.5 * foff + nchans * foff; ftop is the larger. A
+    /// frequency_table wins over fch1 and foff: the edges then lie half a
+    /// channel beyond its extreme centres.
+    /// @throws ValidationError if neither description is present.
     [[nodiscard]] double ftop() const;
 
-    /// Lower edge of the last channel, in MHz.
+    /// Lower edge of the band, in MHz, whichever way foff points.
+    /// @throws ValidationError if neither description is present.
     [[nodiscard]] double fbottom() const;
 
     /// Centre frequency of the uniform grid, in MHz.
@@ -745,11 +769,48 @@ FilterbankHeader::parse(std::span<const std::byte> file) {
 
 inline FilterbankHeader FilterbankHeader::parse(std::span<const std::byte> file,
                                                 std::string_view path) {
-    if (file.empty()) {
-        throw FormatError(detail::error_at(path, 0, "file is empty"));
+    return parse_prefix(file, file.size(), path);
+}
+
+inline FilterbankHeader
+FilterbankHeader::read(const ::psrio::detail::ReadFile& file) {
+    // Headers are a few hundred bytes, or tens of KiB with a frequency table.
+    constexpr std::uint64_t kFirstRead = std::uint64_t{64} << 10U;
+    constexpr std::uint64_t kMaxRead   = std::uint64_t{64} << 20U;
+    const auto path                    = file.path().string();
+    std::vector<std::byte> prefix;
+    std::uint64_t want = std::min(file.size(), kFirstRead);
+    while (true) {
+        prefix.resize(static_cast<std::size_t>(want));
+        file.read_at(0, prefix);
+        try {
+            return parse_prefix(prefix, file.size(), path);
+        } catch (const FormatError&) {
+            // A header cut by the prefix fails like a malformed one. Read
+            // more only while HEADER_END is not yet in the prefix; once it
+            // is, the header itself is bad and more bytes cannot help.
+            constexpr std::string_view kEnd = "HEADER_END";
+            const std::string_view text(
+                reinterpret_cast<const char*>(prefix.data()), // NOLINT
+                prefix.size());
+            if (text.find(kEnd) != std::string_view::npos ||
+                want >= file.size() || want >= kMaxRead) {
+                throw;
+            }
+            want = std::min({file.size(), want * 4U, kMaxRead});
+        }
+    }
+}
+
+inline FilterbankHeader
+FilterbankHeader::parse_prefix(std::span<const std::byte> prefix,
+                               std::uint64_t file_bytes,
+                               std::string_view path) {
+    if (prefix.empty()) {
+        throw FormatError(detail::error_at(path, 0, "prefix is empty"));
     }
 
-    detail::ByteCursor cursor(file, path);
+    detail::ByteCursor cursor(prefix, path);
     const std::string magic = cursor.read_string();
     if (magic != "HEADER_START") {
         throw FormatError(detail::error_at(path, 0, "missing HEADER_START"));
@@ -775,10 +836,10 @@ inline FilterbankHeader FilterbankHeader::parse(std::span<const std::byte> file,
     }
 
     header.header_bytes = cursor.position();
-    header.file_bytes   = file.size();
+    header.file_bytes   = std::max<std::uint64_t>(file_bytes, prefix.size());
     if (header.header_bytes > header.file_bytes) {
-        throw FormatError(detail::error_at(path, header.header_bytes,
-                                           "header extends past end of file"));
+        throw FormatError(detail::error_at(
+            path, header.header_bytes, "header extends past end of prefix"));
     }
     header.data_bytes = header.file_bytes - header.header_bytes;
     header.note_sample_count();
@@ -957,25 +1018,48 @@ inline double FilterbankHeader::bandwidth() const {
     return std::fabs(*foff) * static_cast<double>(nchans);
 }
 
-inline double FilterbankHeader::ftop() const {
-    if (!fch1.has_value() || !foff.has_value()) {
-        throw ValidationError("psrio: ftop needs fch1 and foff");
+namespace detail {
+
+/// Band edges in file order: (edge before the first channel, edge after the
+/// last channel), in MHz.
+[[nodiscard]] inline std::pair<double, double>
+band_edges(const FilterbankHeader& header) {
+    // The table wins over fch1 and foff, as in channel_frequencies().
+    const auto& table = header.frequency_table;
+    if (!table.empty()) {
+        const auto [lo, hi] = std::ranges::minmax_element(table);
+        const double half =
+            table.size() > 1U ? 0.5 * std::fabs(table[1] - table[0]) : 0.0;
+        return {*hi + half, *lo - half};
     }
-    return *fch1 - (0.5 * (*foff));
+    if (header.nchans > 0 && header.fch1.has_value() &&
+        header.foff.has_value()) {
+        const double first = *header.fch1 - (0.5 * (*header.foff));
+        return {first,
+                first + ((*header.foff) * static_cast<double>(header.nchans))};
+    }
+    throw ValidationError(
+        "psrio: band edges need fch1, foff, and nchans, or a frequency table");
+}
+
+} // namespace detail
+
+inline double FilterbankHeader::ftop() const {
+    const auto [first, last] = detail::band_edges(*this);
+    return std::max(first, last);
 }
 
 inline double FilterbankHeader::fbottom() const {
-    if (nchans <= 0 || !fch1.has_value() || !foff.has_value()) {
-        throw ValidationError("psrio: fbottom needs fch1, foff, and nchans");
-    }
-    return ftop() + ((*foff) * static_cast<double>(nchans));
+    const auto [first, last] = detail::band_edges(*this);
+    return std::min(first, last);
 }
 
 inline double FilterbankHeader::fcenter() const {
     if (nchans <= 0 || !fch1.has_value() || !foff.has_value()) {
         throw ValidationError("psrio: fcenter needs fch1, foff, and nchans");
     }
-    return ftop() + (0.5 * (*foff) * static_cast<double>(nchans));
+    const double first = *fch1 - (0.5 * (*foff));
+    return first + (0.5 * (*foff) * static_cast<double>(nchans));
 }
 
 inline void FilterbankHeader::channel_frequencies(std::span<double> out) const {

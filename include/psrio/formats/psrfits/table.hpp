@@ -2,6 +2,7 @@
 
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/detail/rfile.hpp"
 
 #include <algorithm>
 #include <array>
@@ -233,6 +234,54 @@ struct ParsedTable {
     std::vector<Column> columns;
 };
 
+/// Random-access bytes of a FITS file: an in-memory image, or an open file
+/// read with `pread`. Cheap to copy; it does not own the bytes or the file.
+class Source {
+public:
+    explicit Source(std::span<const std::byte> memory) noexcept
+        : m_memory(memory),
+          m_size(memory.size()) {}
+
+    explicit Source(const ::psrio::detail::ReadFile& file) noexcept
+        : m_file(&file),
+          m_size(file.size()) {}
+
+    [[nodiscard]] std::uint64_t size() const noexcept { return m_size; }
+
+    /// Fill @p dest with the bytes at @p offset.
+    /// @throws FormatError if the range passes the end of the file.
+    void read(std::uint64_t offset, std::span<std::byte> dest) const {
+        if (offset > m_size || dest.size() > m_size - offset) {
+            throw FormatError("psrio: FITS read passes the end of the file");
+        }
+        if (m_file != nullptr) {
+            m_file->read_at(offset, dest);
+            return;
+        }
+        if (!dest.empty()) {
+            std::memcpy(dest.data(),
+                        m_memory.data() + static_cast<std::size_t>(offset),
+                        dest.size());
+        }
+    }
+
+    /// The in-memory image, or an empty span for a file.
+    [[nodiscard]] std::span<const std::byte> memory() const noexcept {
+        return m_memory;
+    }
+
+private:
+    std::span<const std::byte> m_memory;
+    const ::psrio::detail::ReadFile* m_file{nullptr};
+    std::uint64_t m_size{0};
+};
+
+/// Position of one cell in the file.
+struct CellRange {
+    std::uint64_t offset{0};
+    std::uint64_t nbytes{0};
+};
+
 [[nodiscard]] inline std::string unquote(std::string_view field,
                                          std::string_view key) {
     field = trim(field);
@@ -260,19 +309,20 @@ struct ParsedTable {
         "psrio: FITS keyword '{}' has an unterminated string", key));
 }
 
-[[nodiscard]] inline Cards parse_header(std::span<const std::byte> file,
+[[nodiscard]] inline Cards parse_header(const Source& file,
                                         std::uint64_t start,
                                         std::uint64_t& data_offset) {
     Cards cards;
     std::uint64_t record = start;
     bool ended           = false;
+    std::array<std::byte, kRecordBytes> buffer{};
     for (int block = 0; block < 64 && !ended; ++block) {
         if (record > file.size() || file.size() - record < kRecordBytes) {
             throw FormatError("psrio: FITS header is truncated");
         }
+        file.read(record, buffer);
         for (std::size_t card = 0; card < kCardsPerRecord; ++card) {
-            const auto* raw = file.data() + (static_cast<std::size_t>(record) +
-                                             (card * kCardBytes));
+            const auto* raw = buffer.data() + (card * kCardBytes);
             const std::string_view text(reinterpret_cast<const char*>(raw),
                                         kCardBytes);
             const auto key = std::string{trim(text.substr(0, 8))};
@@ -483,14 +533,16 @@ inline void reject_compressed(const Cards& header) {
     return *name;
 }
 
-[[nodiscard]] inline ParsedTable parse_search(std::span<const std::byte> file,
+[[nodiscard]] inline ParsedTable parse_search(const Source& file,
                                               std::string_view path) {
     try {
         if (file.size() < kRecordBytes) {
             throw FormatError("psrio: file is too small to be FITS");
         }
+        std::array<std::byte, 9> magic{};
+        file.read(0, magic);
         const std::string_view simple(
-            reinterpret_cast<const char*>(file.data()), 9);
+            reinterpret_cast<const char*>(magic.data()), magic.size());
         if (simple != "SIMPLE  =") {
             throw FormatError("psrio: file does not start with a FITS header");
         }
@@ -591,6 +643,11 @@ inline void reject_compressed(const Cards& header) {
     }
 }
 
+[[nodiscard]] inline ParsedTable parse_search(std::span<const std::byte> file,
+                                              std::string_view path) {
+    return parse_search(Source(file), path);
+}
+
 [[nodiscard]] inline const Column* find_column(const ParsedTable& table,
                                                std::string_view name) {
     for (const auto& column : table.columns) {
@@ -687,11 +744,13 @@ inline void load_reals(std::span<const std::byte> cell,
     }
 }
 
-[[nodiscard]] inline std::span<const std::byte>
-column_cell(std::span<const std::byte> file,
-            const ParsedTable& table,
-            std::uint64_t row,
-            const Column& column) {
+/// Locate the cell of @p column in @p row. A heap column's descriptor is read
+/// from @p file to find its array.
+/// @throws FormatError if the cell or its heap array is outside the file.
+[[nodiscard]] inline CellRange locate_cell(const Source& file,
+                                           const ParsedTable& table,
+                                           std::uint64_t row,
+                                           const Column& column) {
     if (row >= table.nrows) {
         throw FormatError(fmt::format("psrio: SUBINT row {} is outside 0..{}",
                                       row, table.nrows - 1U));
@@ -705,8 +764,7 @@ column_cell(std::span<const std::byte> file,
             column.name));
     }
     if (!column.heap) {
-        return file.subspan(static_cast<std::size_t>(start),
-                            static_cast<std::size_t>(column.nbytes));
+        return CellRange{.offset = start, .nbytes = column.nbytes};
     }
     if (column.descriptor_bytes != 8U && column.descriptor_bytes != 16U) {
         throw FormatError(
@@ -718,7 +776,10 @@ column_cell(std::span<const std::byte> file,
             "psrio: SUBINT row {} column '{}' extends past the file", row,
             column.name));
     }
-    const auto* descriptor = file.data() + static_cast<std::size_t>(start);
+    std::array<std::byte, 16> raw{};
+    file.read(start, std::span<std::byte>(raw).first(
+                         static_cast<std::size_t>(column.descriptor_bytes)));
+    const auto* descriptor = raw.data();
     std::int64_t count     = 0;
     std::int64_t heap_at   = 0;
     if (column.descriptor_bytes == 8U) {
@@ -754,8 +815,31 @@ column_cell(std::span<const std::byte> file,
             row, column.name));
     }
     const auto origin = table.data_offset + table.heap_offset + heap_pos;
-    return file.subspan(static_cast<std::size_t>(origin),
-                        static_cast<std::size_t>(nbytes));
+    return CellRange{.offset = origin, .nbytes = nbytes};
+}
+
+/// Read the cell of @p column in @p row into @p buffer, resized to fit.
+/// @return The cell bytes, a view of @p buffer.
+inline std::span<const std::byte> read_cell(const Source& file,
+                                            const ParsedTable& table,
+                                            std::uint64_t row,
+                                            const Column& column,
+                                            std::vector<std::byte>& buffer) {
+    const auto range = locate_cell(file, table, row, column);
+    buffer.resize(static_cast<std::size_t>(range.nbytes));
+    file.read(range.offset, buffer);
+    return buffer;
+}
+
+/// View of the cell of @p column in @p row of an in-memory file.
+[[nodiscard]] inline std::span<const std::byte>
+column_cell(std::span<const std::byte> file,
+            const ParsedTable& table,
+            std::uint64_t row,
+            const Column& column) {
+    const auto range = locate_cell(Source(file), table, row, column);
+    return file.subspan(static_cast<std::size_t>(range.offset),
+                        static_cast<std::size_t>(range.nbytes));
 }
 
 [[nodiscard]] inline std::vector<int> parse_tdim(std::string_view text) {

@@ -13,10 +13,12 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <psrio/astro.hpp>
 #include <psrio/baseband.hpp>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/formats/dada.hpp>
 #include <psrio/formats/guppi.hpp>
+#include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/header.hpp>
 #include <string>
@@ -32,6 +34,8 @@ struct InspectOptions {
     std::vector<std::filesystem::path> inputs;
     std::string key;
     bool stats{false};
+    std::vector<std::string> set;
+    bool dry_run{false};
     std::uint64_t stats_samples{4096};
     bool json{false};
 };
@@ -174,6 +178,8 @@ void sigproc_fields(Fields& fields,
     if (h.tstart) {
         fields.add("tstart", "Start time (MJD)", h.tstart);
         fields.add("date", "Start date (UTC)", h.gregorian_date());
+        fields.add("utc_start", "Start time (UTC)",
+                   astro::mjd_to_iso8601(*h.tstart));
     }
     fields.add("tsamp", "Sample time (s)", h.tsamp);
     fields.add("nsamples", "Number of samples", nsamples);
@@ -201,6 +207,42 @@ void sigproc_fields(Fields& fields,
             names += extra.name;
         }
         fields.add("extra_keys", "Unrecognised keys", names);
+    }
+}
+
+void psrfits_fields(Fields& fields, const Input& input) {
+    const auto& info = input.psrfits_info();
+    fields.add("stored_nbits", "Stored bits per sample", input.stored_nbits());
+    fields.add("npol", "Stored polarisations", input.stored_npol());
+    fields.add("pol_type", "Polarisation type", info.pol_type);
+    fields.add("stokes_sum", "Stokes I from first two products",
+               input.sums_polarisations() ? 1 : 0);
+    if (!info.frontend.empty()) {
+        fields.add("frontend", "Frontend", info.frontend);
+    }
+    if (!info.backend.empty()) {
+        fields.add("backend", "Backend", info.backend);
+    }
+    fields.add("obs_mode", "Observing mode", info.obs_mode);
+    fields.add("nsblk", "Samples per subint (NSBLK)", input.subint_samples());
+    std::uint64_t rows = 0;
+    std::string per_file;
+    std::string offsets;
+    for (std::size_t index = 0; index < info.rows.size(); ++index) {
+        rows += info.rows[index];
+        per_file +=
+            fmt::format("{}{}", index == 0U ? "" : ",", info.rows[index]);
+        const auto& offs = info.nsuboffs[index];
+        offsets += fmt::format("{}{}", index == 0U ? "" : ",",
+                               offs ? fmt::format("{}", *offs) : "-");
+    }
+    fields.add("nsubint", "Number of subints", rows);
+    if (info.rows.size() > 1U) {
+        fields.add("nsubint_per_file", "Subints per file", per_file);
+    }
+    if (std::ranges::any_of(
+            info.nsuboffs, [](const auto& offs) { return offs.has_value(); })) {
+        fields.add("nsuboffs", "Subint offset (NSUBOFFS)", offsets);
     }
 }
 
@@ -332,8 +374,7 @@ Fields collect(const InspectOptions& opts) {
         }
         sigproc_fields(fields, input.header(), input.nsamples(), format);
         if (input.is_psrfits()) {
-            fields.add("stored_nbits", "Stored bits per sample",
-                       input.stored_nbits());
+            psrfits_fields(fields, input);
         }
         if (opts.stats) {
             stats_fields(fields, input, opts.stats_samples);
@@ -369,8 +410,7 @@ Fields collect(const InspectOptions& opts) {
         }
         sigproc_fields(fields, input.header(), input.nsamples(), format);
         if (input.is_psrfits()) {
-            fields.add("stored_nbits", "Stored bits per sample",
-                       input.stored_nbits());
+            psrfits_fields(fields, input);
         }
     }
     if (opts.stats) {
@@ -401,7 +441,28 @@ void print_json(const Context& ctx, const Fields& fields) {
     ctx.out << "}\n";
 }
 
+void run_edit(const InspectOptions& opts, const Context& ctx) {
+    if (opts.inputs.size() != 1U || is_series_path(opts.inputs.front()) ||
+        formats::psrfits::is_search_path(opts.inputs.front())) {
+        throw ValidationError(
+            "psrio: --set edits the header of one SIGPROC .fil file");
+    }
+    const auto changes =
+        edit_sigproc_header(opts.inputs.front(), opts.set, opts.dry_run);
+    for (const auto& change : changes) {
+        ctx.out << fmt::format("{}: {} -> {}\n", change.key, change.before,
+                               change.after);
+    }
+    ctx.info("psrio header: {} {} key(s) of {}",
+             opts.dry_run ? "would update" : "updated", changes.size(),
+             opts.inputs.front().string());
+}
+
 void run_inspect(const InspectOptions& opts, const Context& ctx) {
+    if (!opts.set.empty()) {
+        run_edit(opts, ctx);
+        return;
+    }
     const auto fields = collect(opts);
     if (opts.key.empty()) {
         if (opts.json) {
@@ -455,8 +516,17 @@ void add_inspect(CLI::App& app, Context& ctx) {
                     "Time samples used by --stats")
         ->capture_default_str()
         ->check(CLI::PositiveNumber);
-    sub->add_flag("--json", opts->json, "Print the header as JSON")
-        ->excludes("--key");
+    auto* json = sub->add_flag("--json", opts->json, "Print the header as JSON")
+                     ->excludes("--key");
+    auto* set =
+        sub->add_option("--set", opts->set,
+                        "Change a SIGPROC header key in place, as KEY=VALUE "
+                        "(repeatable; the header size cannot change)")
+            ->excludes("--key")
+            ->excludes(json);
+    sub->add_flag("--dry-run", opts->dry_run,
+                  "With --set, show the changes without writing")
+        ->needs(set);
     sub->callback([opts, &ctx] { run_inspect(*opts, ctx); });
 }
 

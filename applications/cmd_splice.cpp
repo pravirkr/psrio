@@ -175,6 +175,7 @@ void add_splice(CLI::App& app, Context& ctx) {
     sub->add_flag("--keep-order", opts->keep_order,
                   "Keep the input order instead of sorting by descending "
                   "frequency");
+    add_threads_option(*sub);
     sub->callback([opts, &ctx] { run_splice(*opts, ctx); });
 }
 

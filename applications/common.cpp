@@ -1,5 +1,6 @@
 #include "common.hpp"
 
+#include <CLI/CLI.hpp>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
@@ -27,9 +28,16 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#ifndef _OPENMP
+#include <thread>
+#endif
 #include <utility>
 #include <variant>
 #include <vector>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace psrio::cli {
 
@@ -112,7 +120,9 @@ bool is_tim_path(const std::filesystem::path& path) {
     return lower_extension(path) == ".tim";
 }
 
-Input::Input(const std::filesystem::path& path) : m_path(path) {
+Input::Input(const std::filesystem::path& path,
+             const formats::psrfits::DecodeOptions& decode)
+    : m_path(path) {
     if (is_tim_path(path)) {
         m_series.emplace(path);
         m_header = *m_series->sigproc_header();
@@ -128,13 +138,21 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
         return;
     }
     if (formats::psrfits::is_search_path(path)) {
-        formats::psrfits::SearchFile file(path);
+        formats::psrfits::SearchFile file(path, decode);
         m_header         = file.sigproc_header();
         m_psrfits        = true;
         m_stored_nbits   = file.input_nbits();
         m_stored_npol    = file.input_npol();
         m_subint_samples = file.subint_samples();
         m_sum_feeds      = file.sums_polarisations();
+        m_info           = PsrfitsInfo{
+            .frontend = std::string(file.frontend()),
+            .backend  = std::string(file.backend()),
+            .obs_mode = std::string(file.obs_mode()),
+            .pol_type = std::string(file.pol_type()),
+            .rows     = {file.nrows()},
+            .nsuboffs = {file.nsuboffs()},
+        };
         m_block.emplace(std::move(file));
         return;
     }
@@ -158,12 +176,13 @@ Input::Input(const std::filesystem::path& path) : m_path(path) {
     m_block.emplace(std::move(reader));
 }
 
-Input::Input(std::span<const std::filesystem::path> paths) {
+Input::Input(std::span<const std::filesystem::path> paths,
+             const formats::psrfits::DecodeOptions& decode) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
     if (paths.size() == 1U) {
-        *this = Input(paths.front());
+        *this = Input(paths.front(), decode);
         return;
     }
     const bool search = formats::psrfits::is_search_path(paths.front());
@@ -192,13 +211,26 @@ Input::Input(std::span<const std::filesystem::path> paths) {
     }
     m_path = paths.front();
     if (search) {
-        formats::psrfits::SearchStream stream(paths);
-        m_header         = stream.sigproc_header();
-        m_psrfits        = true;
-        m_stored_nbits   = stream.input_nbits();
-        m_stored_npol    = stream.input_npol();
-        m_subint_samples = stream.subint_samples();
-        m_sum_feeds      = stream.sums_polarisations();
+        formats::psrfits::SearchStream stream(paths, decode);
+        m_header          = stream.sigproc_header();
+        m_psrfits         = true;
+        m_stored_nbits    = stream.input_nbits();
+        m_stored_npol     = stream.input_npol();
+        m_subint_samples  = stream.subint_samples();
+        m_sum_feeds       = stream.sums_polarisations();
+        const auto& first = stream.file(0);
+        m_info            = PsrfitsInfo{
+            .frontend = std::string(first.frontend()),
+            .backend  = std::string(first.backend()),
+            .obs_mode = std::string(first.obs_mode()),
+            .pol_type = std::string(stream.pol_type()),
+            .rows     = {},
+            .nsuboffs = {},
+        };
+        for (std::size_t index = 0; index < stream.nfiles(); ++index) {
+            m_info.rows.push_back(stream.file(index).nrows());
+            m_info.nsuboffs.push_back(stream.file(index).nsuboffs());
+        }
         m_block.emplace(std::move(stream));
         return;
     }
@@ -310,6 +342,29 @@ void require_distinct(const std::filesystem::path& input,
         throw ValidationError(fmt::format(
             "psrio: output {} would overwrite the input", output.string()));
     }
+}
+
+int default_threads() {
+#ifdef _OPENMP
+    return std::max(1, omp_get_max_threads());
+#else
+    return static_cast<int>(std::max(1U, std::thread::hardware_concurrency()));
+#endif
+}
+
+void add_threads_option(CLI::App& sub) {
+    sub.add_option_function<int>(
+           "-j,--threads",
+           [](int threads) {
+#ifdef _OPENMP
+               omp_set_num_threads(threads);
+#else
+               (void)threads;
+#endif
+           },
+           "Threads for decoding and rescaling (default: OMP_NUM_THREADS, "
+           "else all available cores)")
+        ->check(CLI::PositiveNumber);
 }
 
 void require_distinct(std::span<const std::filesystem::path> inputs,

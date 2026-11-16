@@ -1,6 +1,11 @@
 #include "cli.hpp"
 #include "psrfits_bytes.hpp"
 
+#ifdef PSRIO_CLI_HAS_DMT
+#include <dmt/algorithms/ddmt.hpp>
+#include <dmt/algorithms/fdmt.hpp>
+#endif
+
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_message.hpp>
 #include <catch2/catch_test_macros.hpp>
@@ -9,11 +14,11 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <dmt/algorithms/ddmt.hpp>
-#include <dmt/algorithms/fdmt.hpp>
 #include <filesystem>
 #include <fmt/format.h>
+#include <fstream>
 #include <initializer_list>
+#include <ios>
 #include <psrio/block_source.hpp>
 #include <psrio/digifil.hpp>
 #include <psrio/formats/sigproc.hpp>
@@ -117,7 +122,9 @@ TEST_CASE("psrio without a command prints usage and fails", "[cli]") {
     CHECK(result.code != 0);
     const auto help = psrio_run({"--help"});
     CHECK(help.code == 0);
+#ifdef PSRIO_CLI_HAS_DMT
     CHECK(help.out.find("dedisperse") != std::string::npos);
+#endif
 }
 
 TEST_CASE("psrio inspect prints keys, JSON, and statistics", "[cli][inspect]") {
@@ -361,6 +368,151 @@ TEST_CASE("psrio digifil matches the library pipeline", "[cli][digifil]") {
     CHECK(FilterbankReader(dir / "d.fil").nchans() == 16U);
 }
 
+TEST_CASE("psrio clean zap-times replaces a sample range", "[cli][clean]") {
+    const TempDir dir;
+    require_ok(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "10",
+                          "-e", "20", "-o", dir / "z.fil"}));
+    const auto row      = FilterbankReader(kTutorial).nchans();
+    const auto original = FilterbankReader(kTutorial).read_samples<float>(30);
+    const auto zapped = FilterbankReader(dir / "z.fil").read_samples<float>(30);
+    for (std::size_t index = 0; index < original.size(); ++index) {
+        const auto sample = index / row;
+        if (sample >= 10U && sample < 20U) {
+            CHECK(zapped[index] == 0.0F);
+        } else {
+            CHECK(zapped[index] == original[index]);
+        }
+    }
+
+    // There is no in-place mode: the input is never overwritten.
+    CHECK(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "10", "-e",
+                     "20", "--in-place"})
+              .code != 0);
+    CHECK(psrio_run({"clean", "zap-times", kTutorial.string(), "-s", "20", "-e",
+                     "10", "-o", dir / "bad.fil"})
+              .code != 0);
+}
+
+TEST_CASE("psrio header --set edits SIGPROC keys in place", "[cli][header]") {
+    const TempDir dir;
+    const auto copy = dir.path() / "edit.fil";
+    fs::copy_file(kTutorial, copy);
+    const auto before = read_payload(copy);
+
+    const auto result =
+        psrio_run({"header", copy.string(), "--set", "tstart=55000.5", "--set",
+                   "source_name=J1234", "--dry-run"});
+    require_ok(result);
+    CHECK(result.out.find("tstart: 50000 -> 55000.5") != std::string::npos);
+    CHECK(FilterbankReader(copy).header().tstart == 50000.0);
+
+    require_ok(
+        psrio_run({"header", copy.string(), "--set", "tstart=55000.5", "--set",
+                   "source_name=J1234", "--set", "machine_id=5"}));
+    const auto header = FilterbankReader(copy).header();
+    CHECK(header.tstart == 55000.5);
+    REQUIRE(header.source_name.has_value());
+    CHECK(header.source_name->starts_with("J1234 "));
+    CHECK(header.source_name->size() ==
+          FilterbankReader(kTutorial).header().source_name->size());
+    CHECK(fs::file_size(copy) == fs::file_size(kTutorial));
+    CHECK(read_payload(copy) == before);
+
+    // Refused edits leave the file as it was.
+    const std::vector<std::string> refused{"nbits=8",
+                                           "tsamp=-1",
+                                           "unknown=1",
+                                           "refdm=4",
+                                           "foff=0",
+                                           "data_type=9",
+                                           "source_name=" +
+                                               std::string(80, 'x')};
+    for (const auto& bad : refused) {
+        INFO(bad);
+        const auto refusal = psrio_run({"header", copy.string(), "--set", bad});
+        CHECK(refusal.code != 0);
+    }
+    CHECK(FilterbankReader(copy).header().tstart == 55000.5);
+
+    // Sky positions must be valid packed HHMMSS.S / DDMMSS.S values, as in
+    // sigpyproc.
+    auto with_position    = FilterbankReader(kTutorial).header();
+    with_position.src_raj = 123456.0;
+    with_position.src_dej = -101010.0;
+    const auto header_raw = with_position.to_bytes();
+    const auto payload    = read_payload(kTutorial);
+    const auto positioned = dir.path() / "position.fil";
+    {
+        std::ofstream out(positioned, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(header_raw.data()), // NOLINT
+                  static_cast<std::streamsize>(header_raw.size()));
+        out.write(reinterpret_cast<const char*>(payload.data()), // NOLINT
+                  static_cast<std::streamsize>(payload.size()));
+    }
+    for (const std::string bad :
+         {"src_raj=250000", "src_raj=126000", "src_raj=-10000",
+          "src_dej=910000", "src_dej=106100"}) {
+        INFO(bad);
+        CHECK(psrio_run({"header", positioned.string(), "--set", bad}).code !=
+              0);
+    }
+    require_ok(psrio_run({"header", positioned.string(), "--set",
+                          "src_raj=101010.5", "--set", "src_dej=-900000"}));
+    const auto moved = FilterbankReader(positioned).header();
+    CHECK(moved.src_raj == 101010.5);
+    CHECK(moved.src_dej == -900000.0);
+}
+
+TEST_CASE("psrio digifil takes dspsr's block and output options",
+          "[cli][digifil]") {
+    const TempDir dir;
+    SECTION("-U sets the block from a RAM limit") {
+        require_ok(psrio_run({"digifil", kTutorial.string(), "-o",
+                              dir / "u.fil", "-U", "1", "-B", "16"}));
+        FilterbankReader reader(kTutorial);
+        const auto header = reader.header();
+        psrio::BlockSource source(std::move(reader));
+        psrio::digifil::Config config;
+        config.max_ram_mb = 1.0;
+        psrio::digifil::run(source, header, dir / "lib.fil", config);
+        CHECK(read_payload(dir / "u.fil") == read_payload(dir / "lib.fil"));
+    }
+    SECTION("without -o the output is the input stem in the working "
+            "directory") {
+        const auto previous = fs::current_path();
+        fs::current_path(dir.path());
+        const auto result = psrio_run({"digifil", kTutorial.string()});
+        fs::current_path(previous);
+        require_ok(result);
+        auto name = kTutorial.filename();
+        name.replace_extension(".fil");
+        CHECK(fs::exists(dir / name.string()));
+    }
+    SECTION("unsupported combinations fail") {
+        CHECK(psrio_run({"digifil", kTutorial.string(), "-o", dir / "a.fil",
+                         "-d", "2"})
+                  .code != 0);
+        CHECK(psrio_run({"digifil", kTutorial.string(), "-o", dir / "b.fil",
+                         "--gulp", "64", "-U", "8"})
+                  .code != 0);
+    }
+}
+
+#ifdef PSRIO_CLI_HAS_DMT
+TEST_CASE("psrio dedisperse checks --device", "[cli][dedisperse]") {
+    const TempDir dir;
+    require_ok(psrio_run({"dedisperse", "--dm", "0,30", kTutorial.string(),
+                          "-o", dir / "cpu", "--device", "cpu"}));
+    for (const auto* device : {"tpu", "cuda:x", "cuda:-1"}) {
+        INFO(device);
+        const auto result =
+            psrio_run({"dedisperse", "--dm", "0", kTutorial.string(), "-o",
+                       dir / "bad", "--device", device});
+        CHECK(result.code != 0);
+        CHECK(result.err.find("--device") != std::string::npos);
+    }
+}
+
 TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
     const TempDir dir;
     FilterbankReader in(kTutorial);
@@ -508,6 +660,21 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
         }
     }
 
+    SECTION("--dm before the input does not take the input") {
+        const auto prefix = dir / "order";
+        require_ok(psrio_run(
+            {"dedisperse", "--dm", "0,10", kTutorial.string(), "-o", prefix}));
+        // Every trial is cut to the DM 10 sweep.
+        const auto dm0 = read_series(dir / "order_DM0.00.tim");
+        REQUIRE(dm0.size() == nout10);
+        CHECK(std::equal(dm0.begin(), dm0.end(), channel_sum.begin()));
+        CHECK(fs::exists(dir / "order_DM10.00.tim"));
+        require_ok(psrio_run({"dedisperse", "-d", "0", "-d", "10",
+                              kTutorial.string(), "-o", dir / "rep"}));
+        CHECK(fs::exists(dir / "rep_DM0.00.tim"));
+        CHECK(fs::exists(dir / "rep_DM10.00.tim"));
+    }
+
     SECTION("masked channels are left out of the sum") {
         require_ok(
             psrio_run({"dedisperse", kTutorial.string(), "-o", dir / "m.tim",
@@ -530,6 +697,7 @@ TEST_CASE("psrio dedisperse writes one series per DM", "[cli][dedisperse]") {
                   .code == 1);
     }
 }
+#endif
 
 TEST_CASE("psrio inspect reads a search-mode PSRFITS header",
           "[cli][psrfits]") {

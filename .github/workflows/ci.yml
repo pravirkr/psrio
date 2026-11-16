@@ -49,7 +49,7 @@ jobs:
           key: cpp-tests-${{ matrix.compiler.cc }}
           max-size: 500M
 
-      # dmt defaults to -march=native. ccache keys on that flag's text, not on
+      # dmt and the psrio CLI default to -march=native. ccache keys on that flag's text, not on
       # the CPU, so objects built on a runner with newer instructions (AVX-512)
       # crash with SIGILL on another. Pin a target every hosted runner supports.
       - name: Configure CMake
@@ -64,6 +64,7 @@ jobs:
           -DPSRIO_BUILD_TESTS=ON
           -DPSRIO_BUILD_APPLICATIONS=${{ matrix.compiler.apps }}
           -DDMT_CPU_ARCH=x86-64-v3
+          -DPSRIO_CLI_CPU_ARCH=x86-64-v3
           -DPSRIO_WITH_HDF5=ON
           -DPSRIO_WITH_PSRDADA=ON
           -DPSRIO_ENABLE_COVERAGE=OFF
@@ -144,6 +145,7 @@ jobs:
           -DPSRIO_BUILD_TESTS=ON
           -DPSRIO_BUILD_APPLICATIONS=ON
           -DDMT_CPU_ARCH=x86-64-v3
+          -DPSRIO_CLI_CPU_ARCH=x86-64-v3
           -DPSRIO_WITH_HDF5=ON
           -DPSRIO_WITH_PSRDADA=ON
           -DPSRIO_ENABLE_COVERAGE=OFF

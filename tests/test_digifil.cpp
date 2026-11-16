@@ -336,3 +336,127 @@ TEST_CASE("digifil run honours the sample range", "[digifil][run]") {
     CHECK_THROWS_AS(digifil::run(source, header, out.path(), config, 0, 187521),
                     psrio::ValidationError);
 }
+
+TEST_CASE("digifil Source streams the payload run() writes",
+          "[digifil][source]") {
+    static_assert(psrio::concepts::BlockReader<digifil::Source>);
+    const auto make = [](int nbits, std::uint64_t t, std::uint64_t f,
+                         double seconds, std::optional<std::uint64_t> gulp) {
+        digifil::Config config;
+        config.nbits           = nbits;
+        config.tscrunch        = t;
+        config.fscrunch        = f;
+        config.rescale_seconds = seconds;
+        config.gulp            = gulp;
+        return config;
+    };
+    const auto config = GENERATE_COPY(make(8, 1, 1, 10.0, std::nullopt),
+                                      make(2, 3, 4, 0.5, std::nullopt),
+                                      make(-32, 7, 2, 10.0, 333U));
+    const auto input  = kDataDir / "tutorial.fil";
+    FilterbankReader reader(input);
+    const auto header = reader.header();
+    psrio::BlockSource source(std::move(reader));
+    const TempPath out;
+    (void)digifil::run(source, header, out.path(), config);
+    const auto expected = payload(out.path());
+
+    digifil::Source stream(psrio::BlockSource(FilterbankReader(input)), config);
+    const auto stride = stream.bytes_per_sample();
+    CHECK(stream.nsamples() * stride == expected.size());
+    CHECK(stream.header().nchans ==
+          FilterbankReader(out.path()).header().nchans);
+    CHECK(stream.refdm() == header.refdm);
+
+    // Uneven reads, through the type-erased handle.
+    psrio::BlockSource wrapped(std::move(stream));
+    std::vector<std::byte> got;
+    std::vector<std::byte> piece(997U * stride);
+    while (true) {
+        const auto n = wrapped.read_block(997U, piece);
+        got.insert(got.end(), piece.begin(),
+                   piece.begin() + static_cast<std::ptrdiff_t>(n * stride));
+        if (n < 997U) {
+            break;
+        }
+    }
+    CHECK(got == expected);
+    CHECK(wrapped.tell() == wrapped.nsamples());
+
+    // A rewind restarts the pipeline from the first sample.
+    wrapped.rewind();
+    const auto again = wrapped.read_block(wrapped.nsamples());
+    CHECK(again == expected);
+}
+
+TEST_CASE("digifil Source unpacks 8-bit output and keeps refdm",
+          "[digifil][source]") {
+    auto header  = FilterbankReader(kDataDir / "tutorial.fil").header();
+    header.refdm = 413.0;
+    psrio::BlockSource source(FilterbankReader(kDataDir / "tutorial.fil"));
+    const digifil::Config config;
+    digifil::Source stream(source, header, config, 1000, 20000);
+    CHECK(stream.refdm() == std::optional<double>(413.0));
+    CHECK(stream.header().refdm == std::optional<double>(413.0));
+    CHECK(stream.nsamples() == 20000U);
+    const auto bytes = stream.read_block(100);
+    stream.seek(0);
+    std::vector<std::uint8_t> levels(100U * stream.nchans());
+    CHECK(stream.read_samples(100, std::span<std::uint8_t>(levels)) == 100U);
+    for (std::size_t i = 0; i < levels.size(); ++i) {
+        REQUIRE(levels[i] == std::to_integer<std::uint8_t>(bytes[i]));
+    }
+    stream.set_fswap(true);
+    stream.seek(0);
+    const auto swapped = stream.read_block(1);
+    CHECK(std::to_integer<int>(swapped.front()) ==
+          std::to_integer<int>(bytes[stream.nchans() - 1U]));
+}
+
+TEST_CASE("digifil Rescaler clipping ignores impulsive outliers",
+          "[digifil][rescale]") {
+    // Gaussian noise of sigma 2 around 50, with every 20th value a spike of
+    // +400 standing in for impulsive RFI.
+    std::uint64_t state = 12345;
+    const auto uniform  = [&state] {
+        state = (state * 6364136223846793005ULL) + 1442695040888963407ULL;
+        return (static_cast<double>(state >> 11U) + 0.5) / 9007199254740992.0;
+    };
+    std::vector<float> values(6000);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        const double gauss = std::sqrt(-2.0 * std::log(uniform())) *
+                             std::cos(6.283185307179586 * uniform());
+        values[i]          = static_cast<float>(50.0 + (2.0 * gauss) +
+                                                (i % 20U == 0U ? 400.0 : 0.0));
+    }
+    digifil::Rescaler plain(1, 2000, false);
+    digifil::Rescaler robust(1, 2000, false, 3.0);
+    for (std::size_t start = 0; start < values.size(); start += 1000U) {
+        std::vector<float> block(
+            values.begin() + static_cast<std::ptrdiff_t>(start),
+            values.begin() + static_cast<std::ptrdiff_t>(start + 1000U));
+        auto copy = block;
+        plain.process(block, 1000);
+        robust.process(copy, 1000);
+    }
+    // Plain statistics see the spikes: sigma near 87. Clipped ones see the
+    // noise: sigma near 2.
+    CHECK(1.0F / plain.scales()[0] > 50.0F);
+    CHECK(1.0F / robust.scales()[0] == Catch::Approx(2.0).epsilon(0.1));
+    CHECK(-robust.offsets()[0] == Catch::Approx(50.0).epsilon(0.01));
+
+    // A clip of zero is dspsr's rescaler.
+    digifil::Rescaler zero(1, 2000, false, 0.0);
+    digifil::Rescaler fresh(1, 2000, false);
+    auto a = values;
+    auto b = values;
+    zero.process(a, 6000);
+    fresh.process(b, 6000);
+    CHECK(a == b);
+
+    digifil::Config config;
+    config.rescale_clip = -1.0;
+    CHECK_THROWS_AS(config.validate(), psrio::ValidationError);
+    config.rescale_clip = std::numeric_limits<double>::quiet_NaN();
+    CHECK_THROWS_AS(config.validate(), psrio::ValidationError);
+}
