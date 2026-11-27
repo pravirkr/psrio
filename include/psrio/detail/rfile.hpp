@@ -163,6 +163,16 @@ public:
     void set_drop_cache(bool enable) noexcept { m_drop_cache = enable; }
     [[nodiscard]] bool drop_cache() const noexcept { return m_drop_cache; }
 
+    /// Hint to the OS / parallel filesystem that reads will run sequentially.
+    void advise_sequential() noexcept {
+        m_access = Access::kSequential;
+#ifdef POSIX_FADV_SEQUENTIAL
+        if (m_fd >= 0) {
+            (void)::posix_fadvise(m_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+        }
+#endif
+    }
+
     /// Tell the kernel that [@p offset, @p offset + @p nbytes) will not be
     /// read again. A no-op unless drop-cache is enabled.
     void release([[maybe_unused]] std::uint64_t offset,

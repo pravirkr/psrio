@@ -48,6 +48,7 @@ public:
           m_block(std::max<std::uint64_t>(block_bytes, 1U)),
           m_next((start / m_block) * m_block),
           m_position(start) {
+        m_file.advise_sequential();
         m_thread = std::thread([this] { work(); });
     }
 

@@ -76,9 +76,19 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     const auto block_mb =
         static_cast<double>(::psrio::detail::ReadAhead::kBlockBytes) /
         (1024.0 * 1024.0);
-    const auto read_ahead_blocks = std::max<std::size_t>(
+    const auto total_io_blocks = std::max<std::size_t>(
         1U,
         static_cast<std::size_t>(std::llround(opts.io_buffer_mb / block_mb)));
+    std::size_t prefetch_files    = 1U;
+    std::size_t read_ahead_blocks = total_io_blocks;
+    if (input_paths.size() > 1U) {
+        const std::size_t target_per_file = total_io_blocks >= 32U ? 8U : 4U;
+        prefetch_files                    = std::clamp<std::size_t>(
+            total_io_blocks / target_per_file, 1U,
+            std::min<std::size_t>(input_paths.size(), 16U));
+        read_ahead_blocks =
+            std::max<std::size_t>(1U, total_io_blocks / prefetch_files);
+    }
 
     config.drop_cache = ctx.drop_cache;
 
@@ -99,7 +109,8 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
         [&reporter](std::size_t done, std::size_t total) {
             reporter.update_scan(done, total);
         },
-        read_ahead_blocks, ctx.drop_cache, !ctx.force_contiguity, lazy_stream);
+        read_ahead_blocks, ctx.drop_cache, !ctx.force_contiguity, lazy_stream,
+        prefetch_files);
     reporter.finish_scan();
 
     const auto output =
@@ -166,13 +177,18 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
                   output.string(), nchans_out, config.nbits,
                   tsamp_in * static_cast<double>(tfac) * 1.0e6);
     }
+    const auto per_file_mib =
+        read_ahead_blocks * (::psrio::detail::ReadAhead::kBlockBytes >> 20U);
+    const auto io_desc = prefetch_files > 1U
+                             ? fmt::format("{} MiB ({} files x {} MiB)",
+                                           prefetch_files * per_file_mib,
+                                           prefetch_files, per_file_mib)
+                             : fmt::format("{} MiB", per_file_mib);
     ctx.debug("psrio digifil: rescale={}s (constant={}, clip={}), "
-              "scloffs={}, threads={}, io_buffer={} MiB, drop_cache={}, "
+              "scloffs={}, threads={}, io_buffer={}, drop_cache={}, "
               "cont={}",
               config.rescale_seconds, config.rescale_constant,
-              config.rescale_clip, config.scloffs, default_threads(),
-              read_ahead_blocks *
-                  (::psrio::detail::ReadAhead::kBlockBytes >> 20U),
+              config.rescale_clip, config.scloffs, default_threads(), io_desc,
               config.drop_cache, ctx.force_contiguity);
 
     const bool use_staging = !opts.no_atomic;

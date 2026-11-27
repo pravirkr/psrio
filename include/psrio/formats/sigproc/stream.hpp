@@ -135,6 +135,11 @@ public:
             }
         }
     }
+    /// Number of consecutive files kept prefetching concurrently to saturate
+    /// parallel filesystems (GPFS, BeeGFS, Lustre).
+    void set_prefetch_files(std::size_t count) noexcept {
+        m_prefetch_files = std::max<std::size_t>(count, 1U);
+    }
     /// Ask the OS to drop consumed pages from the page cache (Linux).
     void set_drop_cache(bool enable) noexcept {
         m_drop_cache = enable;
@@ -296,6 +301,7 @@ private:
     };
 
     void ensure_lazy_file(std::size_t idx);
+    void prefetch_window(std::size_t from_idx);
     void publish_progress(std::size_t idx) const noexcept;
     [[nodiscard]] std::size_t index_at(std::uint64_t sample) const;
 
@@ -316,6 +322,7 @@ private:
     std::size_t m_current_idx{0};
     std::size_t m_opened_files{0};
     std::size_t m_read_ahead_blocks{0};
+    std::size_t m_prefetch_files{2};
     BitOrder m_bit_order{BitOrder::kLsbFirst};
     bool m_fswap{false};
     bool m_drop_cache{false};
@@ -370,6 +377,16 @@ inline void FilterbankStream::ensure_lazy_file(std::size_t idx) {
         }
     }
     entry.reader.emplace(std::move(reader));
+}
+
+inline void FilterbankStream::prefetch_window(std::size_t from_idx) {
+    const auto end = std::min(from_idx + m_prefetch_files, m_files.size());
+    for (std::size_t k = from_idx; k < end; ++k) {
+        if (m_lazy) {
+            ensure_lazy_file(k);
+        }
+        m_files[k].open_reader().prefetch_start();
+    }
 }
 
 inline FilterbankStream::FilterbankStream(
@@ -568,8 +585,9 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
                 break;
             }
             const auto idx = m_current_idx;
-            auto& file     = m_files[idx];
-            auto& cur      = file.open_reader();
+            prefetch_window(idx);
+            auto& file = m_files[idx];
+            auto& cur  = file.open_reader();
             publish_progress(idx);
             const auto local = (m_sample + done) - file.first;
             const auto room  = file.count - local;
@@ -587,8 +605,7 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
                 m_bytes_before_current += file.bytes;
                 m_current_idx = idx + 1U;
                 if (m_current_idx < m_files.size()) {
-                    ensure_lazy_file(m_current_idx);
-                    m_files[m_current_idx].open_reader().prefetch_start();
+                    prefetch_window(m_current_idx);
                     publish_progress(m_current_idx);
                 } else if (m_progress) {
                     m_progress->file_index        = idx;
@@ -610,8 +627,9 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
     const auto to_read = std::min(count, m_nsamples - m_sample);
     std::uint64_t done = 0;
     while (done < to_read) {
-        const auto idx   = index_at(m_sample + done);
-        m_last_index     = idx;
+        const auto idx = index_at(m_sample + done);
+        m_last_index   = idx;
+        prefetch_window(idx);
         auto& file       = m_files[idx];
         auto& cur        = file.open_reader();
         const auto local = (m_sample + done) - file.first;
@@ -630,7 +648,7 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
             // read-ahead.
             cur.close_handle();
             if (idx + 1U < m_files.size()) {
-                m_files[idx + 1U].open_reader().prefetch_start();
+                prefetch_window(idx + 1U);
             }
         }
         done += got;

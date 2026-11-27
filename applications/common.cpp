@@ -214,7 +214,8 @@ Input::Input(std::span<const std::filesystem::path> paths,
              std::size_t read_ahead_blocks,
              bool drop_cache,
              bool check_contiguity,
-             bool lazy) {
+             bool lazy,
+             std::size_t prefetch_files) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
@@ -270,6 +271,9 @@ Input::Input(std::span<const std::filesystem::path> paths,
         if (read_ahead_blocks > 0U) {
             stream.set_read_ahead_blocks(read_ahead_blocks);
         }
+        if (prefetch_files > 0U) {
+            stream.set_prefetch_files(prefetch_files);
+        }
         stream.set_drop_cache(drop_cache);
         m_paths             = stream.paths();
         m_path              = m_paths.front();
@@ -305,6 +309,9 @@ Input::Input(std::span<const std::filesystem::path> paths,
                                      m_lazy_progress);
     if (read_ahead_blocks > 0U) {
         stream.set_read_ahead_blocks(read_ahead_blocks);
+    }
+    if (prefetch_files > 0U) {
+        stream.set_prefetch_files(prefetch_files);
     }
     stream.set_drop_cache(drop_cache);
     m_paths             = stream.paths();

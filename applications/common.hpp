@@ -106,7 +106,8 @@ public:
                    std::size_t read_ahead_blocks                 = 0,
                    bool drop_cache                               = false,
                    bool check_contiguity                         = true,
-                   bool lazy                                     = false);
+                   bool lazy                                     = false,
+                   std::size_t prefetch_files                    = 0);
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;
