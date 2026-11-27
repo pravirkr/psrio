@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fmt/format.h>
+#include <functional>
 #include <optional>
 #include <ostream>
 #include <psrio/block_source.hpp>
@@ -16,6 +17,7 @@
 #include <string>
 #include <string_view>
 #include <variant>
+#include <vector>
 
 namespace psrio::cli {
 
@@ -29,6 +31,7 @@ struct Context {
         err; // NOLINT(cppcoreguidelines-avoid-const-or-ref-data-members)
     int verbosity{0};
     bool quiet{false};
+    bool drop_cache{false};
 
     /// Progress and summary messages, suppressed by --quiet.
     template <typename... Args>
@@ -74,22 +77,44 @@ inline constexpr std::uint64_t kDefaultGulp = 65536;
 /// describes either one in SIGPROC form.
 class Input {
 public:
+    using OpenProgressCallback =
+        std::function<void(std::size_t done, std::size_t total)>;
+
     /// @p decode sets how search-mode PSRFITS DATA becomes samples; other
     /// formats ignore it.
     /// @throws psrio::Error if the file cannot be opened.
     explicit Input(const std::filesystem::path& path,
-                   const formats::psrfits::DecodeOptions& decode = {});
+                   const formats::psrfits::DecodeOptions& decode = {},
+                   std::size_t read_ahead_blocks                 = 0,
+                   bool drop_cache                               = false);
 
-    /// Open one file, or several filterbank or search-mode PSRFITS files in
-    /// the order given. The files must be one contiguous observation.
+    /// Open one file, or several filterbank or search-mode PSRFITS files.
+    /// Multiple files are automatically sorted into chronological order and
+    /// validated as one contiguous observation.
     /// @throws psrio::Error if a file cannot be opened or the files do not
     ///         join.
     explicit Input(std::span<const std::filesystem::path> paths,
-                   const formats::psrfits::DecodeOptions& decode = {});
+                   const formats::psrfits::DecodeOptions& decode = {},
+                   OpenProgressCallback on_open                  = {},
+                   std::size_t read_ahead_blocks                 = 0,
+                   bool drop_cache                               = false);
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;
     }
+    [[nodiscard]] std::size_t nfiles() const noexcept {
+        return m_paths.empty() ? 1U : m_paths.size();
+    }
+    [[nodiscard]] const std::vector<std::filesystem::path>&
+    paths() const noexcept {
+        return m_paths;
+    }
+    [[nodiscard]] std::uint64_t total_input_bytes() const noexcept {
+        return m_total_input_bytes;
+    }
+    [[nodiscard]] bool reordered() const noexcept { return m_reordered; }
+    /// Zero-based index of the file containing @p sample.
+    [[nodiscard]] std::size_t file_index_at(std::uint64_t sample) const;
     [[nodiscard]] const sigproc::FilterbankHeader& header() const noexcept {
         return m_header;
     }
@@ -149,6 +174,10 @@ public:
 
 private:
     std::filesystem::path m_path;
+    std::vector<std::filesystem::path> m_paths;
+    std::vector<std::uint64_t> m_file_ends;
+    std::uint64_t m_total_input_bytes{0};
+    bool m_reordered{false};
     sigproc::FilterbankHeader m_header;
     std::optional<BlockSource> m_block;
     std::optional<TimeSeriesReader> m_series;
@@ -168,7 +197,9 @@ private:
 class Output {
 public:
     /// @throws ValidationError if @p header does not fit the format.
-    Output(const std::filesystem::path& path, sigproc::FilterbankHeader header);
+    Output(const std::filesystem::path& path,
+           sigproc::FilterbankHeader header,
+           bool drop_cache = false);
 
     [[nodiscard]] bool is_series() const noexcept {
         return std::holds_alternative<TimeSeriesWriter>(m_writer);
@@ -186,6 +217,14 @@ public:
 private:
     std::variant<sigproc::FilterbankWriter, TimeSeriesWriter> m_writer;
 };
+
+/// Expand input file arguments supporting direct paths, quoted glob patterns
+/// (`"/dir/*.sf"`), `@filelist.txt` tokens, and an optional `--file-list` path.
+/// Verifies every resolved entry is an existing regular file.
+/// @throws ValidationError if no files resolve or a path/pattern is invalid.
+[[nodiscard]] std::vector<std::filesystem::path>
+expand_input_paths(std::span<const std::string> specs,
+                   const std::optional<std::filesystem::path>& file_list = {});
 
 /// @throws ValidationError if @p output names the same file as @p input.
 void require_distinct(const std::filesystem::path& input,

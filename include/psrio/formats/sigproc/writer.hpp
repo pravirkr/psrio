@@ -5,6 +5,7 @@
 #include "psrio/detail/exceptions.hpp"
 #include "psrio/detail/packed_bits.hpp"
 #include "psrio/detail/parallel.hpp"
+#include "psrio/detail/wfile.hpp"
 #include "psrio/formats/sigproc/header.hpp"
 
 #include <algorithm>
@@ -15,8 +16,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fmt/format.h>
-#include <fstream>
-#include <ios>
 #include <limits>
 #include <span>
 #include <utility>
@@ -90,6 +89,15 @@ public:
 
     [[nodiscard]] bool is_open() const noexcept { return m_out.is_open(); }
 
+    /// Overlap file writes with computation on a dedicated background thread.
+    void set_async(bool enable, std::size_t queue_depth = 3U) {
+        m_out.set_async(enable, queue_depth);
+    }
+
+    /// Evict written output pages from the OS page cache once flushed (Linux).
+    /// Off by default.
+    void set_drop_cache(bool enable) noexcept { m_out.set_drop_cache(enable); }
+
     /// Write @p count packed time samples from the front of @p data.
     /// @throws ValidationError if @p data holds fewer than
     ///         count * bytes_per_sample() bytes.
@@ -149,7 +157,7 @@ private:
     template <typename T>
     void encode(std::span<const T> values, BitOrder order);
 
-    std::ofstream m_out;
+    ::psrio::detail::WriteFile m_out;
     std::filesystem::path m_path;
     FilterbankHeader m_header;
     std::uint64_t m_stride{0};
@@ -216,16 +224,8 @@ inline FilterbankWriter::FilterbankWriter(std::filesystem::path path,
     m_header.data_bytes   = 0;
     m_header.file_bytes   = encoded.size();
 
-    m_out.open(m_path, std::ios::binary | std::ios::trunc);
-    if (!m_out) {
-        throw IoError(fmt::format("psrio: cannot create {}", m_path.string()));
-    }
-    m_out.write(reinterpret_cast<const char*>(encoded.data()),
-                static_cast<std::streamsize>(encoded.size()));
-    if (!m_out) {
-        throw IoError(fmt::format("psrio: failed to write header to {}",
-                                  m_path.string()));
-    }
+    m_out = ::psrio::detail::WriteFile(m_path);
+    m_out.write(encoded);
 }
 
 inline FilterbankWriter::~FilterbankWriter() noexcept {
@@ -253,12 +253,7 @@ FilterbankWriter::checked_bytes(std::uint64_t count) const {
 
 inline void FilterbankWriter::append(std::span<const std::byte> bytes,
                                      std::uint64_t nsamps) {
-    m_out.write(reinterpret_cast<const char*>(bytes.data()),
-                static_cast<std::streamsize>(bytes.size()));
-    if (!m_out) {
-        throw IoError(
-            fmt::format("psrio: failed to write data to {}", m_path.string()));
-    }
+    m_out.write(bytes);
     m_samples_written += nsamps;
     m_header.data_bytes += bytes.size();
     m_header.file_bytes += bytes.size();
@@ -397,10 +392,6 @@ inline void FilterbankWriter::encode(std::span<const T> values,
 inline void FilterbankWriter::flush() {
     require_open();
     m_out.flush();
-    if (!m_out) {
-        throw IoError(
-            fmt::format("psrio: failed to flush {}", m_path.string()));
-    }
 }
 
 inline void FilterbankWriter::close() {
@@ -408,10 +399,6 @@ inline void FilterbankWriter::close() {
         return;
     }
     m_out.close();
-    if (!m_out) {
-        throw IoError(
-            fmt::format("psrio: failed to close {}", m_path.string()));
-    }
 }
 
 } // namespace psrio::formats::sigproc

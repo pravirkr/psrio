@@ -214,6 +214,36 @@ struct PolPlan {
     return static_cast<int>(value);
 }
 
+/// Optional numeric card that ignores PSRFITS template unset placeholders
+/// (empty string or "*").
+[[nodiscard]] inline std::optional<double>
+find_optional_number(const Cards& cards, std::string_view key) {
+    const auto text = cards.find(key);
+    if (!text.has_value()) {
+        return std::nullopt;
+    }
+    const auto cleaned = trim(*text);
+    if (cleaned.empty() || cleaned == "*") {
+        return std::nullopt;
+    }
+    return cards.find_number(key);
+}
+
+/// Optional integer card that ignores PSRFITS template unset placeholders
+/// (empty string or "*").
+[[nodiscard]] inline std::optional<std::int64_t>
+find_optional_integer(const Cards& cards, std::string_view key) {
+    const auto text = cards.find(key);
+    if (!text.has_value()) {
+        return std::nullopt;
+    }
+    const auto cleaned = trim(*text);
+    if (cleaned.empty() || cleaned == "*") {
+        return std::nullopt;
+    }
+    return cards.find_integer(key);
+}
+
 } // namespace psrio::formats::psrfits::detail
 
 namespace psrio::formats::psrfits {
@@ -294,11 +324,27 @@ public:
 
     /// `NSUBOFFS` from the sub-integration header, or the primary header.
     [[nodiscard]] std::optional<std::int64_t> nsuboffs() const {
-        if (const auto value = m_table.subint.find_integer("NSUBOFFS")) {
+        if (const auto value =
+                detail::find_optional_integer(m_table.subint, "NSUBOFFS")) {
             return value;
         }
-        return m_table.primary.find_integer("NSUBOFFS");
+        return detail::find_optional_integer(m_table.primary, "NSUBOFFS");
     }
+
+    /// Exact split start time (`STT_IMJD`, `STT_SMJD`, `STT_OFFS`).
+    [[nodiscard]] std::int64_t stt_imjd() const noexcept { return m_stt_imjd; }
+    [[nodiscard]] double stt_smjd() const noexcept { return m_stt_smjd; }
+    [[nodiscard]] double stt_offs() const noexcept { return m_stt_offs; }
+
+    /// Path and size in bytes of this file on disk.
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return m_file.path();
+    }
+    [[nodiscard]] std::uint64_t file_size() const noexcept {
+        return m_file.size();
+    }
+    /// True while the underlying OS file descriptor is open.
+    [[nodiscard]] bool is_open() const noexcept { return m_file.is_open(); }
 
     [[nodiscard]] std::string_view pol_type() const noexcept {
         return m_pol_type;
@@ -360,17 +406,30 @@ public:
     void set_fswap(bool enable) noexcept { m_fswap = enable; }
     [[nodiscard]] bool fswap_enabled() const noexcept { return m_fswap; }
 
-    /// Drop cached file pages once their samples are read. Off by default,
-    /// or on when `PSRIO_DROP_CACHE=1` is set at open.
+    /// Drop cached file pages once their samples are read (Linux). Off by
+    /// default.
     void set_drop_cache(bool enable) noexcept { m_file.set_drop_cache(enable); }
 
     /// Once reads run forward, stream the rest of the DATA on a background
-    /// thread, kReadAheadBlocks blocks ahead of the caller. On by default.
+    /// thread, read_ahead_blocks() blocks ahead of the caller. On by default.
     void set_prefetch(bool enable);
+
+    /// Number of ReadAhead::kBlockBytes blocks buffered ahead of the caller.
+    void set_read_ahead_blocks(std::size_t blocks) noexcept {
+        m_read_ahead_blocks = std::max<std::size_t>(blocks, 1U);
+    }
+
+    /// Start streaming DATA from the beginning of this file on a background
+    /// thread before the first read_samples() call.
+    void prefetch_start();
 
     /// Free the staging buffers, for example once a stream has moved past
     /// this file. A later read allocates them again.
     void release_buffers();
+
+    /// Free staging and calibration buffers and close the OS file descriptor.
+    /// Metadata stays available, and a later read reopens the file on demand.
+    void close_handle();
 
     void seek(std::uint64_t sample);
     void rewind() { seek(0); }
@@ -443,7 +502,7 @@ private:
     void check_sample_request(std::uint64_t count,
                               std::size_t dest_values) const;
 
-    template <bool Signed, bool Sum>
+    template <bool Signed, bool Sum, bool Calibrated>
     void decode_u8(const std::byte* cell,
                    std::uint64_t isamp,
                    std::span<float> dest) const;
@@ -509,6 +568,9 @@ private:
     DecodeOptions m_options{};
     double m_tsamp{0.0};
     double m_tstart{0.0};
+    std::int64_t m_stt_imjd{0};
+    double m_stt_smjd{0.0};
+    double m_stt_offs{0.0};
     double m_fch1{0.0};
     double m_foff{0.0};
     double m_bandwidth{0.0};
@@ -516,6 +578,8 @@ private:
     double m_raj{0.0};
     double m_dej{0.0};
     double m_dm{0.0};
+    std::optional<double> m_az_start;
+    std::optional<double> m_za_start;
     std::string m_source;
     std::string m_telescope;
     std::string m_pol_type;
@@ -549,6 +613,7 @@ private:
     /// Destroyed before m_file.
     std::unique_ptr<::psrio::detail::ReadAhead> m_ahead;
     bool m_prefetch{true};
+    std::size_t m_read_ahead_blocks{kReadAheadBlocks};
 };
 
 inline SearchFile::SearchFile(const std::filesystem::path& path,
@@ -599,7 +664,7 @@ inline void SearchFile::load(const std::filesystem::path& path) {
             m_has_dej = false;
         }
     }
-    if (const auto beam = primary.find_integer("IBEAM")) {
+    if (const auto beam = detail::find_optional_integer(primary, "IBEAM")) {
         if (*beam < std::numeric_limits<int>::min() ||
             *beam > std::numeric_limits<int>::max()) {
             throw FormatError(
@@ -608,17 +673,21 @@ inline void SearchFile::load(const std::filesystem::path& path) {
         }
         m_beam = static_cast<int>(*beam);
     }
-    if (const auto dm = primary.find_number("CHAN_DM")) {
+    if (const auto dm = detail::find_optional_number(primary, "CHAN_DM")) {
         m_dm     = *dm;
         m_has_dm = true;
     }
-    const auto imjd = primary.integer("STT_IMJD");
-    const auto smjd = primary.number("STT_SMJD");
-    const auto offs = primary.number("STT_OFFS");
-    m_tstart        = static_cast<double>(imjd) + ((smjd + offs) / 86400.0);
+    m_stt_imjd = primary.integer("STT_IMJD");
+    m_stt_smjd = primary.number("STT_SMJD");
+    m_stt_offs = primary.number("STT_OFFS");
+    m_tstart =
+        static_cast<double>(m_stt_imjd) + ((m_stt_smjd + m_stt_offs) / 86400.0);
     load_geometry();
     load_frequencies();
     load_timing();
+    // Free per-row timing scratch once validation is done.
+    m_row_tsub = {};
+    m_row_offs = {};
 }
 
 inline void SearchFile::load_geometry() {
@@ -665,43 +734,59 @@ inline void SearchFile::load_geometry() {
             "psrio: polarisation product must be -1 or 0 .. {}, got {}",
             npol - 1, m_options.product));
     }
-    m_zero = m_options.scloffs
-                 ? static_cast<float>(sub.find_number("ZERO_OFF").value_or(0.0))
-                 : 0.0F;
-    m_signint        = sub.find_integer("SIGNINT").value_or(0) != 0;
-    m_data           = detail::require_column(m_table, "DATA");
-    m_scales_col     = detail::require_column(m_table, "DAT_SCL");
-    m_offsets_col    = detail::require_column(m_table, "DAT_OFFS");
-    m_weights_col    = detail::require_column(m_table, "DAT_WTS");
+    // dspsr flips negative ZERO_OFF to positive before subtracting it.
+    m_zero =
+        m_options.scloffs
+            ? static_cast<float>(std::abs(
+                  detail::find_optional_number(sub, "ZERO_OFF").value_or(0.0)))
+            : 0.0F;
+    m_signint = detail::find_optional_integer(sub, "SIGNINT").value_or(0) != 0;
+    m_data    = detail::require_column(m_table, "DATA");
     const auto count = m_npol * m_nchan;
-    if ((!m_scales_col.heap && m_scales_col.repeat < count) ||
-        (!m_offsets_col.heap && m_offsets_col.repeat < count)) {
-        throw FormatError("psrio: DAT_SCL and DAT_OFFS must cover every "
-                          "polarisation and channel");
+    if (m_options.scloffs) {
+        m_scales_col  = detail::require_column(m_table, "DAT_SCL");
+        m_offsets_col = detail::require_column(m_table, "DAT_OFFS");
+        if ((!m_scales_col.heap && m_scales_col.repeat < count) ||
+            (!m_offsets_col.heap && m_offsets_col.repeat < count)) {
+            throw FormatError("psrio: DAT_SCL and DAT_OFFS must cover every "
+                              "polarisation and channel");
+        }
     }
-    if (!m_weights_col.heap && m_weights_col.repeat < m_nchan) {
-        throw FormatError("psrio: DAT_WTS must cover every channel");
+    if (m_options.weights) {
+        m_weights_col = detail::require_column(m_table, "DAT_WTS");
+        if (!m_weights_col.heap && m_weights_col.repeat < m_nchan) {
+            throw FormatError("psrio: DAT_WTS must cover every channel");
+        }
     }
-    // The span of a row holding its fixed-width metadata columns. It is read
-    // in one request when it is small, which is the usual layout with DATA
-    // last.
+    // The span of a row holding the fixed-width metadata columns this reader
+    // actually touches. Skipping unused DAT_SCL/DAT_OFFS/DAT_WTS avoids
+    // reading hundreds of KiB per row when scloffs and weights are off.
     {
-        std::uint64_t first = std::numeric_limits<std::uint64_t>::max();
-        std::uint64_t last  = 0;
-        for (const auto* name : {
-                 "TSUBINT",
-                 "OFFS_SUB",
-                 "DAT_FREQ",
-                 "DAT_WTS",
-                 "DAT_OFFS",
-                 "DAT_SCL",
-             }) {
+        std::uint64_t first    = std::numeric_limits<std::uint64_t>::max();
+        std::uint64_t last     = 0;
+        const auto include_col = [&](std::string_view name) {
             const auto* column = detail::find_column(m_table, name);
             if (column == nullptr || column->heap) {
-                continue;
+                return;
             }
             first = std::min(first, column->offset);
             last  = std::max(last, column->offset + column->nbytes);
+        };
+        for (const auto* name : {
+                 "TSUBINT",
+                 "OFFS_SUB",
+                 "TEL_AZ",
+                 "TEL_ZEN",
+                 "DAT_FREQ",
+             }) {
+            include_col(name);
+        }
+        if (m_options.weights) {
+            include_col("DAT_WTS");
+        }
+        if (m_options.scloffs) {
+            include_col("DAT_OFFS");
+            include_col("DAT_SCL");
         }
         constexpr std::uint64_t kMetaMaxBytes = std::uint64_t{8} << 20U;
         if (last > first && last - first <= kMetaMaxBytes &&
@@ -720,12 +805,6 @@ inline void SearchFile::load_geometry() {
     m_layout =
         detail::make_layout(sub, m_data, field, nchan, npol, nbits, nsblk);
     m_bytes_per_sample = detail::checked_mul(m_nchan, 4U, "float sample");
-    m_scale_raw.resize(static_cast<std::size_t>(count));
-    m_offset_raw.resize(static_cast<std::size_t>(count));
-    m_weight_raw.resize(static_cast<std::size_t>(m_nchan));
-    m_scales.resize(static_cast<std::size_t>(count));
-    m_offsets.resize(static_cast<std::size_t>(count));
-    m_weights.resize(static_cast<std::size_t>(m_nchan));
 }
 
 inline void SearchFile::load_frequencies() {
@@ -739,6 +818,8 @@ inline void SearchFile::load_frequencies() {
     // load_timing(), so each row's metadata is read once.
     const auto* durations = detail::find_column(m_table, "TSUBINT");
     const auto* centres   = detail::find_column(m_table, "OFFS_SUB");
+    const auto* az_col    = detail::find_column(m_table, "TEL_AZ");
+    const auto* zen_col   = detail::find_column(m_table, "TEL_ZEN");
     m_row_tsub.assign(durations != nullptr ? m_table.nrows : 0U, 0.0);
     // OFFS_SUB is only checked between rows.
     m_row_offs.assign(
@@ -751,6 +832,22 @@ inline void SearchFile::load_frequencies() {
         if (!m_row_offs.empty()) {
             m_row_offs[static_cast<std::size_t>(isub)] =
                 scalar_at(isub, *centres);
+        }
+        if (isub == 0U) {
+            if (az_col != nullptr) {
+                try {
+                    m_az_start = scalar_at(0U, *az_col);
+                } catch (const FormatError&) {
+                    m_az_start.reset();
+                }
+            }
+            if (zen_col != nullptr) {
+                try {
+                    m_za_start = scalar_at(0U, *zen_col);
+                } catch (const FormatError&) {
+                    m_za_start.reset();
+                }
+            }
         }
         detail::load_reals(meta_cell(isub, freq_col), freq_col, row);
         if (isub == 0U) {
@@ -802,6 +899,7 @@ inline double SearchFile::scalar_at(std::uint64_t row,
 
 inline std::span<const std::byte>
 SearchFile::meta_cell(std::uint64_t row, const detail::Column& column) {
+    m_file.ensure_open();
     const bool together =
         !column.heap && m_meta_bytes > 0U && column.offset >= m_meta_first &&
         column.offset + column.nbytes <= m_meta_first + m_meta_bytes &&
@@ -886,18 +984,24 @@ inline void SearchFile::load_timing() {
     }
     const auto capacity =
         detail::checked_mul(m_nsblk, m_table.nrows, "sample count");
-    if (const auto nstot = m_table.subint.find_integer("NSTOT")) {
+    if (const auto nstot =
+            detail::find_optional_integer(m_table.subint, "NSTOT")) {
         if (*nstot < 0 ||
             std::cmp_greater(static_cast<std::uint64_t>(*nstot), capacity)) {
             throw FormatError(fmt::format("psrio: NSTOT {} is outside 0..{}",
                                           *nstot, capacity));
         }
-        if (std::cmp_greater(static_cast<std::uint64_t>(*nstot), trimmed)) {
-            throw FormatError(fmt::format(
-                "psrio: NSTOT {} extends past the last sub-integration",
-                *nstot));
+        // NSTOT == 0 is a common "unset" sentinel in PSRFITS templates.
+        if (*nstot > 0) {
+            if (std::cmp_greater(static_cast<std::uint64_t>(*nstot), trimmed)) {
+                throw FormatError(fmt::format(
+                    "psrio: NSTOT {} extends past the last sub-integration",
+                    *nstot));
+            }
+            m_nsamples = static_cast<std::uint64_t>(*nstot);
+        } else {
+            m_nsamples = trimmed;
         }
-        m_nsamples = static_cast<std::uint64_t>(*nstot);
     } else {
         m_nsamples = trimmed;
     }
@@ -919,11 +1023,21 @@ inline sigproc::FilterbankHeader SearchFile::sigproc_header() const {
     if (!m_source.empty()) {
         header.source_name = m_source;
     }
+    if (const auto filename = m_file.path().filename().string();
+        !filename.empty()) {
+        header.rawdatafile = filename;
+    }
     if (m_has_raj) {
         header.src_raj = m_raj;
     }
     if (m_has_dej) {
         header.src_dej = m_dej;
+    }
+    if (m_az_start.has_value()) {
+        header.az_start = m_az_start;
+    }
+    if (m_za_start.has_value()) {
+        header.za_start = m_za_start;
     }
     if (m_has_dm) {
         header.refdm = m_dm;
@@ -931,6 +1045,9 @@ inline sigproc::FilterbankHeader SearchFile::sigproc_header() const {
     header.ibeam = m_beam;
     if (const auto id = sigproc::telescope_id_from_name(m_telescope)) {
         header.telescope_id = id;
+    }
+    if (const auto id = sigproc::machine_id_from_name(m_backend)) {
+        header.machine_id = id;
     }
     if (m_uniform) {
         header.foff = m_foff;
@@ -972,20 +1089,39 @@ inline void SearchFile::load_calibration(std::uint64_t row) {
     if (m_cal_row == row) {
         return;
     }
-    detail::load_reals(meta_cell(row, m_scales_col), m_scales_col, m_scale_raw);
-    detail::load_reals(meta_cell(row, m_offsets_col), m_offsets_col,
-                       m_offset_raw);
-    detail::load_reals(meta_cell(row, m_weights_col), m_weights_col,
-                       m_weight_raw);
-    for (std::size_t index = 0; index < m_scales.size(); ++index) {
-        m_scales[index] =
-            m_options.scloffs ? static_cast<float>(m_scale_raw[index]) : 1.0F;
-        m_offsets[index] =
-            m_options.scloffs ? static_cast<float>(m_offset_raw[index]) : 0.0F;
+    if (!m_options.scloffs && !m_options.weights) {
+        m_cal_row = row;
+        return;
     }
-    for (std::size_t index = 0; index < m_weights.size(); ++index) {
-        m_weights[index] =
-            m_options.weights ? static_cast<float>(m_weight_raw[index]) : 1.0F;
+    const auto count = static_cast<std::size_t>(m_npol * m_nchan);
+    const auto nchan = static_cast<std::size_t>(m_nchan);
+    m_scales.resize(count);
+    m_offsets.resize(count);
+    m_weights.resize(nchan);
+    if (m_options.scloffs) {
+        m_scale_raw.resize(count);
+        m_offset_raw.resize(count);
+        detail::load_reals(meta_cell(row, m_scales_col), m_scales_col,
+                           m_scale_raw);
+        detail::load_reals(meta_cell(row, m_offsets_col), m_offsets_col,
+                           m_offset_raw);
+        for (std::size_t index = 0; index < count; ++index) {
+            m_scales[index]  = static_cast<float>(m_scale_raw[index]);
+            m_offsets[index] = static_cast<float>(m_offset_raw[index]);
+        }
+    } else {
+        std::ranges::fill(m_scales, 1.0F);
+        std::ranges::fill(m_offsets, 0.0F);
+    }
+    if (m_options.weights) {
+        m_weight_raw.resize(nchan);
+        detail::load_reals(meta_cell(row, m_weights_col), m_weights_col,
+                           m_weight_raw);
+        for (std::size_t index = 0; index < nchan; ++index) {
+            m_weights[index] = static_cast<float>(m_weight_raw[index]);
+        }
+    } else {
+        std::ranges::fill(m_weights, 1.0F);
     }
     m_cal_row = row;
 }
@@ -1025,7 +1161,7 @@ inline std::uint8_t SearchFile::packed_byte(const std::byte* cell,
     return static_cast<std::uint8_t>(cell[linear]);
 }
 
-template <bool Signed, bool Sum>
+template <bool Signed, bool Sum, bool Calibrated>
 inline void SearchFile::decode_u8(const std::byte* cell,
                                   std::uint64_t isamp,
                                   std::span<float> dest) const {
@@ -1035,13 +1171,7 @@ inline void SearchFile::decode_u8(const std::byte* cell,
     const auto* raw0 = reinterpret_cast<const std::uint8_t*>(
         cell + (((isamp * m_npol) + m_pol0) * m_nchan));
     const auto* raw1    = raw0 + nchan;
-    const float* scl0   = m_scales.data() + (pol0 * nchan);
-    const float* off0   = m_offsets.data() + (pol0 * nchan);
-    const float* scl1   = scl0 + nchan;
-    const float* off1   = off0 + nchan;
-    const float* wts    = m_weights.data();
     float* out          = dest.data();
-    const float zero    = m_zero;
     const auto as_float = [](std::uint8_t raw) {
         if constexpr (Signed) {
             return static_cast<float>(static_cast<std::int8_t>(raw));
@@ -1049,6 +1179,23 @@ inline void SearchFile::decode_u8(const std::byte* cell,
             return static_cast<float>(raw);
         }
     };
+    if constexpr (!Calibrated) {
+        for (std::size_t chan = 0; chan < nchan; ++chan) {
+            // NOLINTNEXTLINE(misc-const-correctness): summed when Sum
+            float value = as_float(raw0[chan]);
+            if constexpr (Sum) {
+                value += as_float(raw1[chan]);
+            }
+            out[chan] = value;
+        }
+        return;
+    }
+    const float* scl0 = m_scales.data() + (pol0 * nchan);
+    const float* off0 = m_offsets.data() + (pol0 * nchan);
+    const float* scl1 = scl0 + nchan;
+    const float* off1 = off0 + nchan;
+    const float* wts  = m_weights.data();
+    const float zero  = m_zero;
     PSRIO_OMP(omp simd)
     for (std::size_t chan = 0; chan < nchan; ++chan) {
         // NOLINTNEXTLINE(misc-const-correctness): summed when Sum
@@ -1068,12 +1215,26 @@ inline void SearchFile::decode_i16(const std::byte* cell,
     const auto pol0   = static_cast<std::size_t>(m_pol0);
     const auto* base0 = cell + ((((isamp * m_npol) + m_pol0) * m_nchan) * 2U);
     const auto* base1 = base0 + (nchan * 2U);
+    const bool calibrated = m_options.scloffs || m_options.weights;
+    float* out            = dest.data();
+    if (!calibrated) {
+        for (std::size_t chan = 0; chan < nchan; ++chan) {
+            // NOLINTNEXTLINE(misc-const-correctness): summed when Sum
+            auto value = static_cast<float>(
+                detail::load_be<std::int16_t>(base0 + (chan * 2U)));
+            if constexpr (Sum) {
+                value += static_cast<float>(
+                    detail::load_be<std::int16_t>(base1 + (chan * 2U)));
+            }
+            out[chan] = value;
+        }
+        return;
+    }
     const float* scl0 = m_scales.data() + (pol0 * nchan);
     const float* off0 = m_offsets.data() + (pol0 * nchan);
     const float* scl1 = scl0 + nchan;
     const float* off1 = off0 + nchan;
     const float* wts  = m_weights.data();
-    float* out        = dest.data();
     for (std::size_t chan = 0; chan < nchan; ++chan) {
         const auto first = static_cast<float>(
             detail::load_be<std::int16_t>(base0 + (chan * 2U)));
@@ -1112,18 +1273,25 @@ inline void SearchFile::decode_packed(const std::byte* cell,
         }
         return raw;
     };
-    const auto first0 = m_pol0 * m_nchan;
-    const auto first1 = first0 + m_nchan;
+    const bool calibrated = m_options.scloffs || m_options.weights;
+    const auto first0     = m_pol0 * m_nchan;
+    const auto first1     = first0 + m_nchan;
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
         float value = value_of(pol0, chan);
-        value = (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
+        if (calibrated) {
+            value =
+                (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
+        }
         if constexpr (Sum) {
             float second = value_of(pol0 + 1, chan);
-            second =
-                (second * m_scales[first1 + chan]) + m_offsets[first1 + chan];
+            if (calibrated) {
+                second = (second * m_scales[first1 + chan]) +
+                         m_offsets[first1 + chan];
+            }
             value += second;
         }
-        dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
+        dest[static_cast<std::size_t>(chan)] =
+            calibrated ? (value * m_weights[chan]) : value;
     }
 }
 
@@ -1144,23 +1312,31 @@ inline void SearchFile::decode_indexed(const std::byte* cell,
                                 : static_cast<float>(byte);
         return value - m_zero;
     };
-    const auto pol0   = static_cast<int>(m_pol0);
-    const auto first0 = m_pol0 * m_nchan;
-    const auto first1 = first0 + m_nchan;
+    const bool calibrated = m_options.scloffs || m_options.weights;
+    const auto pol0       = static_cast<int>(m_pol0);
+    const auto first0     = m_pol0 * m_nchan;
+    const auto first1     = first0 + m_nchan;
     for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
         float value = raw_at(pol0, chan);
-        value = (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
+        if (calibrated) {
+            value =
+                (value * m_scales[first0 + chan]) + m_offsets[first0 + chan];
+        }
         if constexpr (Sum) {
             float second = raw_at(pol0 + 1, chan);
-            second =
-                (second * m_scales[first1 + chan]) + m_offsets[first1 + chan];
+            if (calibrated) {
+                second = (second * m_scales[first1 + chan]) +
+                         m_offsets[first1 + chan];
+            }
             value += second;
         }
-        dest[static_cast<std::size_t>(chan)] = value * m_weights[chan];
+        dest[static_cast<std::size_t>(chan)] =
+            calibrated ? (value * m_weights[chan]) : value;
     }
 }
 
 inline detail::CellRange SearchFile::data_range(std::uint64_t isub) {
+    m_file.ensure_open();
     const auto range = detail::locate_cell(source(), m_table, isub, m_data);
     if (range.nbytes != m_data_bytes) {
         throw FormatError(
@@ -1179,6 +1355,7 @@ inline SearchFile::Staged SearchFile::stage(std::uint64_t isub,
             .last  = m_stage_last,
         };
     }
+    m_file.ensure_open();
     // A read that starts where the staged run ends is part of a forward
     // stream; only then does the rest of the file stream ahead.
     const bool forward =
@@ -1230,10 +1407,20 @@ inline SearchFile::Staged SearchFile::stage(std::uint64_t isub,
 }
 
 inline void SearchFile::start_read_ahead(std::uint64_t offset) {
+    m_file.ensure_open();
     const auto last = data_range(m_table.nrows - 1U);
     m_ahead         = std::make_unique<::psrio::detail::ReadAhead>(
         m_file.duplicate(), offset, last.offset + last.nbytes,
-        kReadAheadBlocks);
+        m_read_ahead_blocks);
+}
+
+inline void SearchFile::prefetch_start() {
+    if (!m_prefetch || !m_layout.fast || m_data.heap || m_ahead != nullptr ||
+        m_table.nrows == 0U) {
+        return;
+    }
+    const auto first = data_range(0U);
+    start_read_ahead(first.offset);
 }
 
 inline void SearchFile::set_prefetch(bool enable) {
@@ -1257,6 +1444,19 @@ inline void SearchFile::release_buffers() {
     m_stage_range = {};
 }
 
+inline void SearchFile::close_handle() {
+    release_buffers();
+    m_scale_raw  = {};
+    m_offset_raw = {};
+    m_weight_raw = {};
+    m_scales     = {};
+    m_offsets    = {};
+    m_weights    = {};
+    m_cal_row    = std::numeric_limits<std::uint64_t>::max();
+    m_data_row   = std::numeric_limits<std::uint64_t>::max();
+    m_file.close_fd();
+}
+
 inline void SearchFile::decode_run(const std::byte* cell,
                                    std::uint64_t isamp,
                                    std::uint64_t count,
@@ -1275,28 +1475,30 @@ inline void SearchFile::decode_run(const std::byte* cell,
         }
     };
     if (m_input_nbits == 8 && m_layout.fast) {
-        if (m_sum) {
-            if (m_signint) {
+        const bool calibrated = m_options.scloffs || m_options.weights;
+        const auto run_u8     = [&]<bool Signed, bool Sum> {
+            if (calibrated) {
                 run([this](const std::byte* bytes, std::uint64_t sample,
                            std::span<float> out) {
-                    decode_u8<true, true>(bytes, sample, out);
+                    decode_u8<Signed, Sum, true>(bytes, sample, out);
                 });
             } else {
                 run([this](const std::byte* bytes, std::uint64_t sample,
                            std::span<float> out) {
-                    decode_u8<false, true>(bytes, sample, out);
+                    decode_u8<Signed, Sum, false>(bytes, sample, out);
                 });
             }
+        };
+        if (m_sum) {
+            if (m_signint) {
+                run_u8.template operator()<true, true>();
+            } else {
+                run_u8.template operator()<false, true>();
+            }
         } else if (m_signint) {
-            run([this](const std::byte* bytes, std::uint64_t sample,
-                       std::span<float> out) {
-                decode_u8<true, false>(bytes, sample, out);
-            });
+            run_u8.template operator()<true, false>();
         } else {
-            run([this](const std::byte* bytes, std::uint64_t sample,
-                       std::span<float> out) {
-                decode_u8<false, false>(bytes, sample, out);
-            });
+            run_u8.template operator()<false, false>();
         }
         return;
     }

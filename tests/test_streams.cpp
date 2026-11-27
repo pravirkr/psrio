@@ -7,10 +7,13 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_string.hpp>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
+#include <fmt/format.h>
 #include <optional>
 #include <span>
 #include <string>
@@ -238,8 +241,15 @@ TEST_CASE("FilterbankStream rejects a gap or a different header",
     write_fil(second.path(), mjd_after(50000.0, 2, 1.0), kSamples);
     const std::array<std::filesystem::path, 2> reversed = {second.path(),
                                                            first.path()};
-    CHECK_THROWS_WITH(FilterbankStream(reversed),
-                      ContainsSubstring("not contiguous"));
+    FilterbankStream sorted(reversed);
+    CHECK(sorted.reordered());
+    CHECK(sorted.nsamples() == 4U);
+    CHECK(sorted.tstart() == 50000.0);
+
+    const std::array<std::filesystem::path, 2> duplicate = {first.path(),
+                                                            first.path()};
+    CHECK_THROWS_WITH(FilterbankStream(duplicate),
+                      ContainsSubstring("duplicate"));
 }
 
 TEST_CASE("SearchStream reads across the file boundary", "[psrfits][stream]") {
@@ -307,4 +317,145 @@ TEST_CASE("SearchStream rejects a gap, a header change, and a bad NSUBOFFS",
     write_search(second.path(), 2.0, std::nullopt, "Join", kData);
     SearchStream open{std::span<const std::filesystem::path>(renamed)};
     CHECK(open.nsamples() == 4U);
+}
+
+TEST_CASE("SearchStream sorts unpadded files by start time and closes idle FDs",
+          "[psrfits][stream]") {
+    constexpr std::size_t kFiles = 24;
+    std::deque<TempPath> temps;
+    std::vector<std::filesystem::path> paths;
+    paths.reserve(kFiles);
+    for (std::size_t i = 0; i < kFiles; ++i) {
+        temps.emplace_back("chunk_" + std::to_string(i + 1U) + ".sf");
+        const auto base = static_cast<std::uint8_t>((i * 4U) % 200U);
+        const std::array<std::uint8_t, 4> data{
+            base, static_cast<std::uint8_t>(base + 1U),
+            static_cast<std::uint8_t>(base + 2U),
+            static_cast<std::uint8_t>(base + 3U)};
+        write_search(temps.back().path(), static_cast<double>(i) * 2.0,
+                     static_cast<std::int64_t>(i), "SortTest", data);
+        paths.push_back(temps.back().path());
+    }
+    // Deliberately pass paths in lexicographical order (chunk_1, chunk_10,
+    // ...).
+    std::ranges::sort(paths, [](const auto& a, const auto& b) {
+        return a.filename().string() < b.filename().string();
+    });
+
+    std::size_t scan_calls = 0;
+    SearchStream stream(paths, psrio::formats::psrfits::DecodeOptions{},
+                        [&](std::size_t done, std::size_t total) {
+                            CHECK(total == kFiles);
+                            CHECK(done <= total);
+                            ++scan_calls;
+                        });
+    CHECK(scan_calls == kFiles);
+    CHECK(stream.reordered());
+    CHECK(stream.nfiles() == kFiles);
+    CHECK(stream.nsamples() == kFiles * 2U);
+    // All FDs must be closed after header parsing.
+    for (std::size_t i = 0; i < kFiles; ++i) {
+        CHECK_FALSE(stream.file(i).is_open());
+    }
+
+    const auto all = stream.read_samples<float>(stream.nsamples());
+    REQUIRE(all.size() == kFiles * 4U);
+    for (std::size_t i = 0; i < kFiles; ++i) {
+        const auto base = static_cast<float>((i * 4U) % 200U);
+        CHECK(all[(i * 4U) + 0U] == base);
+        CHECK(all[(i * 4U) + 3U] == base + 3.0F);
+        // Finished files close their FDs.
+        CHECK_FALSE(stream.file(i).is_open());
+    }
+}
+
+TEST_CASE("SearchStream handles fine tsamp split-MJD, zero NSUBOFFS, and "
+          "duplicate rejection",
+          "[psrfits][stream]") {
+    const auto write_fine = [](const std::filesystem::path& path,
+                               std::int64_t imjd, std::int64_t smjd,
+                               double offs, std::string_view ra, double f0) {
+        FitsFileBytes file;
+        file.begin_hdu();
+        file.key("SIMPLE", "T");
+        file.key("BITPIX", "8");
+        file.key("NAXIS", "0");
+        file.key("EXTEND", "T");
+        file.key("FITSTYPE", "'PSRFITS'");
+        file.key("OBS_MODE", "'SEARCH'");
+        file.key("TELESCOP", "'Parkes'");
+        file.key("SRC_NAME", "'FineTsamp'");
+        file.key("RA", std::string("'") + std::string(ra) + "'");
+        file.key("DEC", "'+00:00:00.0'");
+        file.key("STT_IMJD", std::to_string(imjd));
+        file.key("STT_SMJD", std::to_string(smjd));
+        file.key("STT_OFFS", fmt::format("{:.15f}", offs));
+        file.end_header();
+
+        file.begin_hdu();
+        file.key("XTENSION", "'BINTABLE'");
+        file.key("BITPIX", "8");
+        file.key("NAXIS", "2");
+        file.key("NAXIS1", "60");
+        file.key("NAXIS2", "1");
+        file.key("PCOUNT", "0");
+        file.key("GCOUNT", "1");
+        file.key("TFIELDS", "7");
+        file.key("EXTNAME", "'SUBINT'");
+        file.key("TTYPE1", "'TSUBINT'");
+        file.key("TFORM1", "'1D'");
+        file.key("TTYPE2", "'OFFS_SUB'");
+        file.key("TFORM2", "'1D'");
+        file.key("TTYPE3", "'DAT_FREQ'");
+        file.key("TFORM3", "'2D'");
+        file.key("TTYPE4", "'DAT_WTS'");
+        file.key("TFORM4", "'2E'");
+        file.key("TTYPE5", "'DAT_OFFS'");
+        file.key("TFORM5", "'2E'");
+        file.key("TTYPE6", "'DAT_SCL'");
+        file.key("TFORM6", "'2E'");
+        file.key("TTYPE7", "'DATA'");
+        file.key("TFORM7", "'4B'");
+        file.key("NPOL", "1");
+        file.key("NCHAN", "2");
+        file.key("NBITS", "8");
+        file.key("NSBLK", "2");
+        file.key("TBIN", "1.0e-5");
+        file.key("POL_TYPE", "'INTEN'");
+        file.key("NSUBOFFS", "0");
+        file.end_header();
+
+        std::vector<std::byte> row;
+        append_be(row, 2.0e-5);
+        append_be(row, 1.0e-5);
+        append_be(row, f0);
+        append_be(row, f0 - 1.0);
+        append_be(row, 1.0F);
+        append_be(row, 1.0F);
+        append_be(row, 0.0F);
+        append_be(row, 0.0F);
+        append_be(row, 1.0F);
+        append_be(row, 1.0F);
+        for (const std::uint8_t value : {1, 2, 3, 4}) {
+            append_be(row, value);
+        }
+        file.raw(row);
+        file.pad_data();
+        file.write(path);
+    };
+
+    const TempPath a("fine_a.sf");
+    const TempPath b("fine_b.sf");
+    // 10 us sampling at MJD 60000: double MJD loses ~0.63 us/ULP, while split
+    // MJD stays exact. Also exercise slight RA drift, 1e-6 MHz freq tolerance,
+    // and NSUBOFFS=0 in every split file.
+    write_fine(a.path(), 60000, 12345, 0.0, "05:08:03.508", 1400.0);
+    write_fine(b.path(), 60000, 12345, 2.0e-5, "05:08:03.509", 1400.000001);
+
+    const std::array<std::filesystem::path, 2> pair = {a.path(), b.path()};
+    SearchStream stream(pair);
+    CHECK(stream.nsamples() == 4U);
+
+    const std::array<std::filesystem::path, 2> dup = {a.path(), a.path()};
+    CHECK_THROWS_WITH(SearchStream(dup), ContainsSubstring("duplicate"));
 }

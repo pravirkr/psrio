@@ -64,7 +64,7 @@ sigproc::FilterbankHeader decimated_header(const sigproc::FilterbankHeader& in,
 
 void run_decimate(const DecimateOptions& opts, const Context& ctx) {
     require_distinct(opts.inputs, opts.output);
-    Input input(opts.inputs);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
     const auto nchans = input.nchans();
     const auto nifs   = input.nifs();
     const auto tfac   = opts.time_factor;
@@ -79,7 +79,8 @@ void run_decimate(const DecimateOptions& opts, const Context& ctx) {
         identity && !is_series_path(opts.output) ? input.nbits() : 32);
 
     Output output(opts.output,
-                  decimated_header(input.header(), tfac, cfac, nbits));
+                  decimated_header(input.header(), tfac, cfac, nbits),
+                  ctx.drop_cache);
 
     const auto gulp       = std::max<std::uint64_t>(opts.gulp, 1U);
     const auto nchans_out = nchans / cfac;

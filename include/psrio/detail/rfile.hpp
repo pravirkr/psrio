@@ -6,29 +6,18 @@
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
 #include <filesystem>
 #include <fmt/format.h>
 #include <limits>
 #include <span>
-#include <string_view>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
 #include <utility>
 
 namespace psrio::detail {
-
-/// True when the environment asks readers to drop file pages from the page
-/// cache once they are read (`PSRIO_DROP_CACHE` set to anything but "0").
-[[nodiscard]] inline bool drop_cache_requested() noexcept {
-    // NOLINTNEXTLINE(concurrency-mt-unsafe): read once at open
-    const char* value = std::getenv("PSRIO_DROP_CACHE");
-    return value != nullptr && value[0] != '\0' &&
-           std::string_view(value) != "0";
-}
 
 /// Access pattern hint given to the kernel when a file is opened.
 enum class Access : std::uint8_t {
@@ -46,42 +35,20 @@ enum class Access : std::uint8_t {
 /// caller's buffers. The file is opened with a sequential access hint
 /// unless Access::kNormal is asked for.
 ///
-/// With drop-cache enabled (set_drop_cache(), or `PSRIO_DROP_CACHE=1` in the
-/// environment at open), release() asks the kernel to drop the cached pages
-/// of a range that has been consumed, for jobs whose memory limit counts the
-/// page cache.
+/// With drop-cache enabled via set_drop_cache(true), release() asks the kernel
+/// to drop the cached pages of a range that has been consumed, for jobs whose
+/// memory limit counts the page cache (Linux).
 class ReadFile {
 public:
     ReadFile() noexcept = default;
 
     /// @throws psrio::IoError if @p path cannot be opened or is not a regular
     ///         file.
-    explicit ReadFile(const std::filesystem::path& path,
-                      [[maybe_unused]] Access access = Access::kSequential)
-        : m_drop_cache(drop_cache_requested()) {
-        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
-        m_fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (m_fd < 0) {
-            error_check::throw_errno_io("open", path);
-        }
-        struct stat file_stat{};
-        if (::fstat(m_fd, &file_stat) != 0) {
-            const int saved = errno;
-            reset();
-            error_check::throw_errno_io(saved, "fstat", path);
-        }
-        if (!S_ISREG(file_stat.st_mode) || file_stat.st_size < 0) {
-            reset();
-            throw IoError(fmt::format("psrio: '{}' is not a regular file",
-                                      path.string()));
-        }
-        m_size = static_cast<std::uint64_t>(file_stat.st_size);
-        m_path = path;
-#ifdef POSIX_FADV_SEQUENTIAL
-        if (access == Access::kSequential) {
-            (void)::posix_fadvise(m_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
-        }
-#endif
+    explicit ReadFile(std::filesystem::path path,
+                      Access access = Access::kSequential)
+        : m_access(access),
+          m_path(std::move(path)) {
+        open_fd(true);
     }
 
     ~ReadFile() noexcept { reset(); }
@@ -93,6 +60,7 @@ public:
         : m_fd{std::exchange(other.m_fd, -1)},
           m_size{std::exchange(other.m_size, 0)},
           m_drop_cache{other.m_drop_cache},
+          m_access{other.m_access},
           m_path{std::move(other.m_path)} {}
 
     ReadFile& operator=(ReadFile&& other) noexcept {
@@ -101,12 +69,34 @@ public:
             m_fd         = std::exchange(other.m_fd, -1);
             m_size       = std::exchange(other.m_size, 0);
             m_drop_cache = other.m_drop_cache;
+            m_access     = other.m_access;
             m_path       = std::move(other.m_path);
         }
         return *this;
     }
 
     [[nodiscard]] bool is_open() const noexcept { return m_fd >= 0; }
+
+    /// Close the OS file descriptor while retaining path, size, and options
+    /// so ensure_open() can reopen it on demand.
+    void close_fd() noexcept {
+        if (m_fd >= 0) {
+            (void)::close(m_fd);
+            m_fd = -1;
+        }
+    }
+
+    /// Reopen the file descriptor if it was closed via close_fd().
+    /// @throws psrio::IoError if the file cannot be reopened or changed size.
+    void ensure_open() {
+        if (m_fd >= 0) {
+            return;
+        }
+        if (m_path.empty()) {
+            throw IoError("psrio: cannot reopen an uninitialized ReadFile");
+        }
+        open_fd(false);
+    }
 
     /// A second descriptor for the same file, so another thread can read it
     /// while this one is moved or closed.
@@ -120,6 +110,7 @@ public:
         }
         copy.m_size       = m_size;
         copy.m_drop_cache = m_drop_cache;
+        copy.m_access     = m_access;
         copy.m_path       = m_path;
         return copy;
     }
@@ -194,12 +185,46 @@ public:
     }
 
 private:
+    void open_fd(bool initial) {
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-vararg)
+        m_fd = ::open(m_path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (m_fd < 0) {
+            error_check::throw_errno_io("open", m_path);
+        }
+        struct stat file_stat{};
+        if (::fstat(m_fd, &file_stat) != 0) {
+            const int saved = errno;
+            close_fd();
+            error_check::throw_errno_io(saved, "fstat", m_path);
+        }
+        if (!S_ISREG(file_stat.st_mode) || file_stat.st_size < 0) {
+            close_fd();
+            throw IoError(fmt::format("psrio: '{}' is not a regular file",
+                                      m_path.string()));
+        }
+        const auto current_size = static_cast<std::uint64_t>(file_stat.st_size);
+        if (initial) {
+            m_size = current_size;
+        } else if (current_size < m_size) {
+            close_fd();
+            throw IoError(fmt::format(
+                "psrio: '{}' shrank from {} to {} bytes before reopening",
+                m_path.string(), m_size, current_size));
+        }
+#ifdef POSIX_FADV_SEQUENTIAL
+        if (m_access == Access::kSequential) {
+            (void)::posix_fadvise(m_fd, 0, 0, POSIX_FADV_SEQUENTIAL);
+        }
+#endif
+    }
+
     /// Linux returns at most about 2 GiB from one read.
     static constexpr std::size_t kMaxRequestBytes = std::size_t{1} << 30U;
 
     int m_fd{-1};
     std::uint64_t m_size{0};
     bool m_drop_cache{false};
+    Access m_access{Access::kSequential};
     std::filesystem::path m_path;
 };
 

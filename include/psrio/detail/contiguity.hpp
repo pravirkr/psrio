@@ -46,4 +46,40 @@ inline void require_sample_gap(double tstart,
     }
 }
 
+/// Exact split-MJD contiguity check for PSRFITS (`STT_IMJD`, `STT_SMJD`,
+/// `STT_OFFS`). Avoids catastrophic cancellation from subtracting two ~60000
+/// MJD doubles (~0.63 us ULP), preserving sub-nanosecond precision even for
+/// microsecond sampling intervals.
+/// @throws FormatError when times are not finite or the gap does not match one
+///         sample.
+inline void require_split_mjd_gap(std::int64_t imjd1,
+                                  double smjd1,
+                                  double offs1,
+                                  std::uint64_t nsamples,
+                                  double tsamp,
+                                  std::int64_t imjd2,
+                                  double smjd2,
+                                  double offs2,
+                                  std::string_view path) {
+    if (!(tsamp > 0.0) || !std::isfinite(tsamp) || !std::isfinite(smjd1) ||
+        !std::isfinite(offs1) || !std::isfinite(smjd2) ||
+        !std::isfinite(offs2)) {
+        throw FormatError(fmt::format(
+            "psrio: {} needs finite start time and tsamp to continue a stream",
+            path));
+    }
+    const double delta = (static_cast<double>(imjd2 - imjd1) * 86400.0) +
+                         (smjd2 - smjd1) + (offs2 - offs1);
+    const double span  = static_cast<double>(nsamples) * tsamp;
+    const double error = delta - span;
+    const double limit =
+        kSampleGapAbsolute + (kSampleGapTolerance * std::abs(tsamp));
+    if (!(std::abs(error) <= limit)) {
+        throw FormatError(fmt::format(
+            "psrio: {} is not contiguous; the gap is {} s and one sample is "
+            "{} s",
+            path, error + tsamp, tsamp));
+    }
+}
+
 } // namespace psrio::detail

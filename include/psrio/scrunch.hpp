@@ -1,6 +1,7 @@
 #pragma once
 
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/detail/parallel.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -9,6 +10,55 @@
 #include <vector>
 
 namespace psrio {
+
+/// Sum consecutive groups of @p factor channels from @p src into @p dst.
+///
+/// Parallelised over rows with OpenMP when worthwhile; each output channel
+/// sums its input group in channel order in float, matching fscrunch_inplace()
+/// bit for bit regardless of thread count.
+/// @throws ValidationError if @p factor is 0 or does not divide @p nchans, or
+///         if either span is too small.
+inline std::span<float> fscrunch_into(std::span<const float> src,
+                                      std::span<float> dst,
+                                      std::uint64_t nrows,
+                                      std::uint64_t nchans,
+                                      std::uint64_t factor) {
+    if (factor == 0U || nchans % factor != 0U) {
+        throw ValidationError(
+            "psrio: fscrunch factor must be positive and divide nchans");
+    }
+    if (src.size() / std::max<std::uint64_t>(nchans, 1U) < nrows) {
+        throw ValidationError(
+            "psrio: fscrunch input buffer is smaller than its rows");
+    }
+    const auto nout = static_cast<std::size_t>(nchans / factor);
+    const auto rows = static_cast<std::size_t>(nrows);
+    if (dst.size() / std::max<std::size_t>(nout, 1U) < rows) {
+        throw ValidationError(
+            "psrio: fscrunch output buffer is smaller than its rows");
+    }
+    const auto width     = static_cast<std::size_t>(nchans);
+    const auto group     = static_cast<std::size_t>(factor);
+    const float* in_base = src.data();
+    float* out_base      = dst.data();
+    [[maybe_unused]] const bool wide =
+        ::psrio::detail::parallel_worthwhile(nrows * nchans);
+    PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                  shared(rows, width, nout, group, in_base, out_base))
+    for (std::size_t row = 0; row < rows; ++row) {
+        const float* in = in_base + (row * width);
+        float* out      = out_base + (row * nout);
+        for (std::size_t ochan = 0; ochan < nout; ++ochan) {
+            const float* group_src = in + (ochan * group);
+            float acc              = group_src[0];
+            for (std::size_t k = 1; k < group; ++k) {
+                acc += group_src[k];
+            }
+            out[ochan] = acc;
+        }
+    }
+    return dst.first(rows * nout);
+}
 
 /// Sum consecutive groups of @p factor channels, in place.
 ///
@@ -119,15 +169,32 @@ public:
             produced = 1;
         }
 
-        for (; produced < nout; ++produced) {
-            const std::span<float> out(m_out.data() + (produced * m_row_len),
-                                       m_row_len);
-            std::ranges::copy(data.first(m_row_len), out.begin());
-            for (std::size_t r = 1; r < m_factor; ++r) {
-                add_row(out, data.subspan(r * m_row_len, m_row_len));
+        const std::size_t body_count = nout - produced;
+        if (body_count > 0U) {
+            const std::size_t row_len = m_row_len;
+            const std::size_t factor  = m_factor;
+            const float* in_base      = data.data();
+            float* out_base           = m_out.data() + (produced * row_len);
+            [[maybe_unused]] const bool wide =
+                ::psrio::detail::parallel_worthwhile(
+                    static_cast<std::uint64_t>(body_count) * factor * row_len);
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                          shared(body_count, row_len, factor, in_base, out_base))
+            for (std::size_t idx = 0; idx < body_count; ++idx) {
+                const float* src = in_base + (idx * factor * row_len);
+                float* dst       = out_base + (idx * row_len);
+                std::copy_n(src, row_len, dst);
+                for (std::size_t r = 1; r < factor; ++r) {
+                    const float* row_src = src + (r * row_len);
+                    PSRIO_OMP(omp simd)
+                    for (std::size_t i = 0; i < row_len; ++i) {
+                        dst[i] += row_src[i];
+                    }
+                }
             }
-            data = data.subspan(m_factor * m_row_len);
-            rows -= m_factor;
+            const auto consumed = body_count * factor;
+            data                = data.subspan(consumed * row_len);
+            rows -= consumed;
         }
         m_carry.assign(data.begin(), data.end());
         return std::span<float>(m_out).first(nout * m_row_len);

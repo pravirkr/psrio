@@ -459,4 +459,48 @@ TEST_CASE("digifil Rescaler clipping ignores impulsive outliers",
     CHECK_THROWS_AS(config.validate(), psrio::ValidationError);
     config.rescale_clip = std::numeric_limits<double>::quiet_NaN();
     CHECK_THROWS_AS(config.validate(), psrio::ValidationError);
+
+    // NaN values do not poison clipped rescaler sums.
+    digifil::Rescaler nan_safe(1, 4, false, 3.0);
+    std::vector<float> with_nan{10.0F, 12.0F,
+                                std::numeric_limits<float>::quiet_NaN(), 14.0F};
+    nan_safe.process(with_nan, 4);
+    CHECK(std::isfinite(nan_safe.offsets()[0]));
+    CHECK(std::isfinite(nan_safe.scales()[0]));
+    CHECK(-nan_safe.offsets()[0] == Catch::Approx(12.0F));
+}
+
+TEST_CASE("digifil Pipeline pscrunch and run progress callback",
+          "[digifil][pipeline][progress]") {
+    digifil::Config config;
+    config.rescale_seconds = 0.0;
+    config.pscrunch        = true;
+    digifil::Pipeline pipeline(config, layout(2, 2));
+    REQUIRE(pipeline.nifs_out() == 1U);
+    std::vector<float> block{1, 2, 30, 40, 5, 6, 70, 80};
+    const auto out = pipeline.push(block, 2);
+    REQUIRE(out.size() == 4U);
+    CHECK(std::to_integer<int>(out[0]) == 31);
+    CHECK(std::to_integer<int>(out[1]) == 42);
+    CHECK(std::to_integer<int>(out[2]) == 75);
+    CHECK(std::to_integer<int>(out[3]) == 86);
+
+    FilterbankReader reader(kDataDir / "tutorial.fil");
+    const auto header = reader.header();
+    psrio::BlockSource source(std::move(reader));
+    digifil::Config run_cfg;
+    run_cfg.gulp          = 20000U;
+    std::uint64_t prev_in = 0;
+    std::size_t callbacks = 0;
+    const TempPath out_path;
+    const auto summary =
+        digifil::run(source, header, out_path.path(), run_cfg, 0, std::nullopt,
+                     [&](const digifil::Progress& prog) {
+                         CHECK(prog.samples_in_done >= prev_in);
+                         CHECK(prog.samples_in_done <= prog.samples_in_total);
+                         prev_in = prog.samples_in_done;
+                         ++callbacks;
+                     });
+    CHECK(callbacks > 1U);
+    CHECK(prev_in == summary.nsamples_in);
 }
