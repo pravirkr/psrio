@@ -2,7 +2,7 @@
 
 A high-performance, header-only C++20 library for reading, parsing, and streaming time-domain radio astronomy data (pulsar baseband, filterbank, and single-channel time series).
 
-`psrio` provides zero-overhead, type-safe ingestion and writing of observational data formats (SIGPROC `.fil` / `.tim`, search-mode PSRFITS `.sf` / `.fits`, PRESTO `.dat` / `.inf`, GUPPI RAW, and DADA files), plus an optional `psrio` CLI (`inspect`, `slice`, `splice`, `decimate`, `convert`, `digifil`, `dedisperse`). Intensity formats share one block-streaming front. Baseband formats share another.
+`psrio` provides zero-overhead, type-safe ingestion and writing of observational data formats (SIGPROC `.fil` / `.tim`, search-mode PSRFITS `.sf` / `.fits`, PRESTO `.dat` / `.inf`, GUPPI RAW, and DADA files), plus an optional `psrio` CLI (`inspect`, `slice`, `splice`, `decimate`, `convert`, `digifil`, `dedisperse`, `cutout`). Intensity formats share one block-streaming front. Baseband formats share another.
 
 ## Key Features
 
@@ -344,6 +344,13 @@ Built with `-DPSRIO_BUILD_APPLICATIONS=ON`. Every command takes one or more `.fi
 | `stats`, `bandpass` | `spp_stats`, `spp_bandpass` |
 | `clean rfi/zap-channels/zap-times/zerodm` | `spp_clean` |
 | `dedisperse` (`--device cpu\|cuda[:N]`, needs dmt) | `spp_dedisperse` |
+| `cutout` (`--toa`/`-S`, `-T`, `-b`, `-D`, `-K`, `--scloffs`) | dspsr `-s -c T -T T -b -D [-K] -scloffs` (one burst-centred PSRCHIVE archive) |
+
+`cutout` writes one fold-mode PSRFITS archive (one sub-integration, period = window length) from search-mode PSRFITS, with the burst in the middle bin, so PSRCHIVE tools and calibration apply as to a dspsr single-pulse archive. Data and metadata follow dspsr's rules (8-bit unpacking with `fmaf`, delays with `DM/2.41e-4` referenced to `OBSFREQ`, weights 1, psrchive's int16 quantiser, dspsr's `OFFS_SUB`), and `scripts/compare_dspsr_cutout.py` checks a window on dspsr's sub-integration grid against dspsr byte for byte. `--toa MJD --toa-freq top|centre|bottom|inf|<MHz>` centres the window; without `-K` the default `-T` is twice the in-band sweep plus 10%.
+
+```bash
+psrio cutout uwl_*.sf -D 413 -K -b 1024 -T 0.5 --scloffs --toa 59630.4037 -O burst.ar
+```
 
 CLI build options: `PSRIO_CLI_CPU_ARCH` (`-march`, default `native`; use e.g. `x86-64-v3` for binaries that move between machines), `PSRIO_CLI_WITH_DMT` (dedisperse), and `PSRIO_DMT_GPU` (`AUTO`, `CUDA`, `HIP`, `OFF`: dmt's GPU backend for `dedisperse --device`). When building without a visible GPU, also pass `-DDMT_CUDA_ARCHITECTURES=<compute capability>` (e.g. `89` for an L40); dmt's default `native` falls back to sm_52.
 

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+- **CLI**: `psrio cutout` cuts a burst out of search-mode PSRFITS into one fold-mode PSRCHIVE archive, replacing `dspsr -s -c T -T T -b -D [-K] -scloffs`. On a Parkes UWL file a window on dspsr's sub-integration grid matches dspsr byte for byte (DATA, DAT_SCL, DAT_OFFS, DAT_WTS, DAT_FREQ, TSUBINT, OFFS_SUB, PERIOD, header values), with and without `-K`.
+- **Library**:
+  - `SearchFile`/`SearchStream::read_products()` unpack every stored product as dspsr's FITSUnpacker (`fma`, unsigned bytes, no weights); 8-bit only. `table()` and `path()` expose the parsed headers.
+  - `psrfits/fits_writer.hpp` (FITS cards, binary tables, `FitsWriter`), `psrfits/archive.hpp` (`quantise_profile`, `write_fold_archive`), `psrfits/extract.hpp` (dspsr delays, windows, `fold_window`), and `detail/mjd.hpp` (psrchive `MJD` arithmetic).
+
 ## [0.6.0] - 2026-11-16
 
 - **Behaviour changes**:

@@ -1,4 +1,5 @@
 #include "cli.hpp"
+#include "cutout_fixture.hpp"
 #include "psrfits_bytes.hpp"
 
 #ifdef PSRIO_CLI_HAS_DMT
@@ -20,7 +21,9 @@
 #include <initializer_list>
 #include <ios>
 #include <psrio/block_source.hpp>
+#include <psrio/detail/rfile.hpp>
 #include <psrio/digifil.hpp>
+#include <psrio/formats/psrfits/table.hpp>
 #include <psrio/formats/sigproc.hpp>
 #include <psrio/timeseries.hpp>
 #include <span>
@@ -849,4 +852,45 @@ TEST_CASE("psrio joins contiguous filterbanks in time", "[cli][stream]") {
     CHECK(psrio_run(
               {"inspect", first.string(), gapped.string(), "-k", "nsamples"})
               .code == 1);
+}
+
+TEST_CASE("psrio cutout writes one burst-centred archive", "[cli][cutout]") {
+    const TempDir dir;
+    const psrio::test::BurstFixture fixture;
+    const auto input = dir.path() / "burst.sf";
+    fixture.write(input, 0, fixture.nrows);
+    // Pulse at output sample 512 at the band centre: MJD 59630 + 3600.5 s
+    // + 0.512 s.
+    const std::string toa = "59630.041678379629630";
+
+    const auto dedispersed = dir / "k.ar";
+    require_ok(psrio_run({"cutout", input.string(), "-D", "50", "-K", "-b",
+                          "32", "-T", "0.128", "--scloffs", "--toa", toa,
+                          "--toa-freq", "centre", "-O", dedispersed}));
+    {
+        const psrio::detail::ReadFile file(dedispersed);
+        const auto table = psrio::formats::psrfits::detail::parse_search(
+            psrio::formats::psrfits::detail::Source(file), dedispersed);
+        CHECK(table.primary.value("OBS_MODE") == "PSR");
+        CHECK(table.subint.integer("NBIN") == 32);
+        CHECK(table.subint.number("DM") == 50.0);
+        CHECK(table.nrows == 1U);
+    }
+
+    // Without -K the window defaults to twice the sweep plus 10%.
+    const auto swept = dir / "nok.ar";
+    const auto result =
+        psrio_run({"-v", "cutout", input.string(), "-D", "50", "-b", "16",
+                   "--toa", toa, "--toa-freq", "centre", "-O", swept});
+    require_ok(result);
+    CHECK(fs::exists(swept));
+    CHECK(result.err.find("per bin") != std::string::npos);
+
+    const auto both = psrio_run({"cutout", input.string(), "-D", "50", "-b",
+                                 "16", "--toa", toa, "-S", "0.1"});
+    CHECK(both.code != 0);
+    const auto no_length = psrio_run(
+        {"cutout", input.string(), "-D", "50", "-K", "-b", "16", "-S", "0.1"});
+    CHECK(no_length.code != 0);
+    CHECK(no_length.err.find("-T") != std::string::npos);
 }

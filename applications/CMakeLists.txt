@@ -63,6 +63,7 @@ add_library(
   cmd_decimate.cpp
   cmd_convert.cpp
   cmd_digifil.cpp
+  cmd_cutout.cpp
   cmd_stats.cpp
   cmd_clean.cpp
   header_edit.cpp

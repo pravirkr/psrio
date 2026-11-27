@@ -186,6 +186,21 @@ public:
                                       std::span<std::uint16_t> dest);
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
 
+    /// Every stored product, `[time][pol][chan]`, across files
+    /// (see SearchFile::read_products).
+    std::uint64_t read_products(std::uint64_t count, std::span<float> dest) {
+        return read_across(
+            count, dest, m_npol * m_nchan,
+            [](SearchFile& reader, std::uint64_t take, std::span<float> piece) {
+                return reader.read_products(take, piece);
+            });
+    }
+
+    /// Floats per sample from read_products(): NPOL * NCHAN.
+    [[nodiscard]] std::uint64_t product_values() const noexcept {
+        return m_npol * m_nchan;
+    }
+
     template <typename T>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>

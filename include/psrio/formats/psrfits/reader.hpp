@@ -384,6 +384,37 @@ public:
                                       std::span<std::uint16_t> dest);
     std::uint64_t read_bytes(std::uint64_t nbytes, std::span<std::byte> dest);
 
+    /**
+     * @brief Read every stored polarisation product, unpacked as dspsr does.
+     *
+     * Fills @p dest with `count * NPOL * NCHAN` floats ordered
+     * `[time][pol][chan]`. Each 8-bit value is
+     * `fma(float(raw) - ZERO_OFF, DAT_SCL, DAT_OFFS)` with
+     * DecodeOptions::scloffs, or `float(raw)` without. As in dspsr's
+     * FITSUnpacker, bytes are unsigned whatever SIGNINT says, and DAT_WTS and
+     * DecodeOptions::product are ignored. Only 8-bit DATA is supported.
+     *
+     * @return Samples read, fewer than @p count at the end of the file.
+     * @throws ValidationError if @p dest is the wrong size.
+     * @throws FormatError if NBITS is not 8.
+     */
+    std::uint64_t read_products(std::uint64_t count, std::span<float> dest);
+
+    /// Floats per sample from read_products(): NPOL * NCHAN.
+    [[nodiscard]] std::uint64_t product_values() const noexcept {
+        return m_npol * m_nchan;
+    }
+
+    /// Parsed primary and SUBINT headers, and the SUBINT column layout.
+    [[nodiscard]] const detail::ParsedTable& table() const noexcept {
+        return m_table;
+    }
+
+    /// The path this file was opened from.
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return m_path;
+    }
+
     template <typename T>
         requires std::same_as<T, float> || std::same_as<T, std::uint8_t> ||
                  std::same_as<T, std::uint16_t>
@@ -479,7 +510,14 @@ private:
     [[nodiscard]] std::span<const std::byte>
     meta_cell(std::uint64_t row, const detail::Column& column);
 
+    /// Unpack all products of @p count samples from @p cell (dspsr rule).
+    void decode_products(const std::byte* cell,
+                         std::uint64_t isamp,
+                         std::uint64_t count,
+                         std::span<float> dest) const;
+
     ::psrio::detail::ReadFile m_file;
+    std::filesystem::path m_path;
     detail::ParsedTable m_table{};
     detail::Column m_data{};
     detail::Column m_scales_col{};
@@ -558,6 +596,7 @@ inline SearchFile::SearchFile(const std::filesystem::path& path,
 }
 
 inline void SearchFile::load(const std::filesystem::path& path) {
+    m_path = path;
     try {
         // Opening reads a little metadata from every row, so no sequential
         // read-ahead; DATA is read in large requests regardless.
@@ -1362,6 +1401,84 @@ inline std::uint64_t SearchFile::read_samples(std::uint64_t count,
         reverse_unpacked_channels(
             dest.first(static_cast<std::size_t>(to_read * m_nchan)), to_read,
             m_nchan, 1U);
+    }
+    m_sample += to_read;
+    return to_read;
+}
+
+inline void SearchFile::decode_products(const std::byte* cell,
+                                        std::uint64_t isamp,
+                                        std::uint64_t count,
+                                        std::span<float> dest) const {
+    const auto nchan  = static_cast<std::size_t>(m_nchan);
+    const auto npol   = static_cast<std::size_t>(m_npol);
+    const auto values = nchan * npol;
+    const float zero  = m_zero;
+    const float* scl  = m_scales.data();
+    const float* off  = m_offsets.data();
+    for (std::uint64_t index = 0; index < count; ++index) {
+        float* out = dest.data() + (static_cast<std::size_t>(index) * values);
+        if (m_layout.fast) {
+            // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+            const auto* raw = reinterpret_cast<const std::uint8_t*>(
+                cell + ((isamp + index) * values));
+            PSRIO_OMP(omp simd)
+            for (std::size_t value = 0; value < values; ++value) {
+                out[value] = std::fma(static_cast<float>(raw[value]) - zero,
+                                      scl[value], off[value]);
+            }
+            continue;
+        }
+        for (std::size_t pol = 0; pol < npol; ++pol) {
+            for (std::size_t chan = 0; chan < nchan; ++chan) {
+                const auto linear =
+                    element_index(isamp + index, static_cast<int>(pol),
+                                  static_cast<int>(chan));
+                const auto raw = static_cast<std::uint8_t>(cell[linear]);
+                const auto at  = (pol * nchan) + chan;
+                out[at] =
+                    std::fma(static_cast<float>(raw) - zero, scl[at], off[at]);
+            }
+        }
+    }
+}
+
+inline std::uint64_t SearchFile::read_products(std::uint64_t count,
+                                               std::span<float> dest) {
+    if (m_input_nbits != 8) {
+        throw FormatError(fmt::format(
+            "psrio: reading every polarisation product supports 8-bit DATA "
+            "only, not {}-bit",
+            m_input_nbits));
+    }
+    const auto per_sample = product_values();
+    if (count > 0U &&
+        per_sample > (std::numeric_limits<std::uint64_t>::max() / count)) {
+        throw ValidationError("psrio: requested sample block is too large");
+    }
+    if (dest.size() != static_cast<std::size_t>(count * per_sample)) {
+        throw ValidationError(fmt::format(
+            "psrio: destination has {} values but the request needs {}",
+            dest.size(), count * per_sample));
+    }
+    if (m_sample > m_nsamples) {
+        throw ValidationError(
+            "psrio: reader cursor is past the readable samples");
+    }
+    const auto to_read  = std::min(count, m_nsamples - m_sample);
+    std::uint64_t index = 0;
+    while (index < to_read) {
+        const auto global = m_sample + index;
+        const auto isub   = global / m_nsblk;
+        const auto isamp  = global % m_nsblk;
+        load_calibration(isub);
+        const auto staged = stage(isub, isamp);
+        const auto run    = std::min(to_read - index, staged.last - isamp);
+        decode_products(
+            staged.cell, isamp - staged.first, run,
+            dest.subspan(static_cast<std::size_t>(index * per_sample),
+                         static_cast<std::size_t>(run * per_sample)));
+        index += run;
     }
     m_sample += to_read;
     return to_read;
