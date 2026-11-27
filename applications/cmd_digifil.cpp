@@ -73,21 +73,40 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     }
     config.validate();
 
-    const auto block_mb =
-        static_cast<double>(::psrio::detail::ReadAhead::kBlockBytes) /
-        (1024.0 * 1024.0);
+    const auto block_bytes = ::psrio::detail::ReadAhead::kBlockBytes;
+    const auto block_mb = static_cast<double>(block_bytes) / (1024.0 * 1024.0);
     const auto total_io_blocks = std::max<std::size_t>(
         1U,
         static_cast<std::size_t>(std::llround(opts.io_buffer_mb / block_mb)));
     std::size_t prefetch_files    = 1U;
     std::size_t read_ahead_blocks = total_io_blocks;
     if (input_paths.size() > 1U) {
-        const std::size_t target_per_file = total_io_blocks >= 32U ? 8U : 4U;
-        prefetch_files                    = std::clamp<std::size_t>(
-            total_io_blocks / target_per_file, 1U,
-            std::min<std::size_t>(input_paths.size(), 16U));
-        read_ahead_blocks =
-            std::max<std::size_t>(1U, total_io_blocks / prefetch_files);
+        std::error_code sz_ec;
+        const auto file0_bytes =
+            std::filesystem::file_size(input_paths.front(), sz_ec);
+        const std::size_t whole_file_blocks =
+            (!sz_ec && file0_bytes > 0U)
+                ? static_cast<std::size_t>((file0_bytes + block_bytes - 1U) /
+                                           block_bytes)
+                : 0U;
+        if (whole_file_blocks > 0U &&
+            total_io_blocks >= whole_file_blocks * 2U) {
+            // Fit as many complete files as possible inside --io-buffer-mb so
+            // parallel-FS prefetch threads stream each file to EOF without
+            // stalling mid-file.
+            prefetch_files = std::clamp<std::size_t>(
+                total_io_blocks / whole_file_blocks, 1U,
+                std::min<std::size_t>(input_paths.size(), 16U));
+            read_ahead_blocks = whole_file_blocks;
+        } else {
+            const std::size_t target_per_file =
+                total_io_blocks >= 32U ? 8U : 4U;
+            prefetch_files = std::clamp<std::size_t>(
+                total_io_blocks / target_per_file, 1U,
+                std::min<std::size_t>(input_paths.size(), 16U));
+            read_ahead_blocks =
+                std::max<std::size_t>(1U, total_io_blocks / prefetch_files);
+        }
     }
 
     config.drop_cache = ctx.drop_cache;
