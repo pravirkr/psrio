@@ -59,7 +59,7 @@ std::filesystem::path output_path(const CleanOptions& opts,
 }
 
 Input open_filterbank(const CleanOptions& opts, const Context& ctx) {
-    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache, !ctx.force_contiguity);
     if (input.is_series()) {
         throw ValidationError(
             "psrio: clean needs a filterbank, not a time series");

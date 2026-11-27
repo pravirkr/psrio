@@ -164,12 +164,16 @@ public:
         std::function<void(std::size_t done, std::size_t total)>;
 
     explicit SearchStream(std::span<const std::filesystem::path> paths)
-        : SearchStream(paths, DecodeOptions{}, {}) {}
+        : SearchStream(paths, DecodeOptions{}, {}, true) {}
 
-    /// Every file is decoded with @p options (see SearchFile).
+    /// Every file is decoded with @p options (see SearchFile). When
+    /// @p check_contiguity is false (as dspsr's `-cont`), files are kept in
+    /// the given order and timestamp / NSUBOFFS gap checks are skipped while
+    /// observing-setup compatibility is still verified.
     SearchStream(std::span<const std::filesystem::path> paths,
                  DecodeOptions options,
-                 OpenProgressCallback on_open = {});
+                 OpenProgressCallback on_open = {},
+                 bool check_contiguity        = true);
 
     SearchStream(const SearchStream&)                = delete;
     SearchStream& operator=(const SearchStream&)     = delete;
@@ -371,7 +375,8 @@ private:
 
 inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
                                   DecodeOptions options,
-                                  OpenProgressCallback on_open) {
+                                  OpenProgressCallback on_open,
+                                  bool check_contiguity) {
     if (paths.empty()) {
         throw ValidationError("psrio: a PSRFITS stream needs a file");
     }
@@ -463,14 +468,18 @@ inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
     }
 
     // Sort files chronologically by exact split MJD (matching dspsr
-    // SerialFiles) so unpadded shell globs work cleanly.
-    std::ranges::stable_sort(m_files, [](const File& left, const File& right) {
-        return stream_detail::earlier_start(left.reader, right.reader);
-    });
-    for (std::size_t index = 0; index < m_files.size(); ++index) {
-        if (m_files[index].input_index != index) {
-            m_reordered = true;
-            break;
+    // SerialFiles) so unpadded shell globs work cleanly. When contiguity
+    // checking is disabled (--cont), preserve the caller's order.
+    if (check_contiguity) {
+        std::ranges::stable_sort(
+            m_files, [](const File& left, const File& right) {
+                return stream_detail::earlier_start(left.reader, right.reader);
+            });
+        for (std::size_t index = 0; index < m_files.size(); ++index) {
+            if (m_files[index].input_index != index) {
+                m_reordered = true;
+                break;
+            }
         }
     }
 
@@ -509,22 +518,25 @@ inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
         }
         if (index > 0U) {
             const auto& prev = m_files[index - 1U];
-            if (prev.reader.stt_imjd() == file.reader.stt_imjd() &&
-                prev.reader.stt_smjd() == file.reader.stt_smjd() &&
-                prev.reader.stt_offs() == file.reader.stt_offs()) {
-                throw FormatError(fmt::format(
-                    "psrio: {} has the same start time as {} (duplicate file?)",
-                    file.path.string(), prev.path.string()));
-            }
             stream_detail::match_search(first, file.reader, file.path.string());
-            stream_detail::require_nsuboffs(prev.reader, file.reader,
-                                            file.path.string(),
-                                            all_zero_nsuboffs);
-            ::psrio::detail::require_split_mjd_gap(
-                prev.reader.stt_imjd(), prev.reader.stt_smjd(),
-                prev.reader.stt_offs(), prev.count, prev.reader.tsamp(),
-                file.reader.stt_imjd(), file.reader.stt_smjd(),
-                file.reader.stt_offs(), file.path.string());
+            if (check_contiguity) {
+                if (prev.reader.stt_imjd() == file.reader.stt_imjd() &&
+                    prev.reader.stt_smjd() == file.reader.stt_smjd() &&
+                    prev.reader.stt_offs() == file.reader.stt_offs()) {
+                    throw FormatError(fmt::format(
+                        "psrio: {} has the same start time as {} (duplicate "
+                        "file?)",
+                        file.path.string(), prev.path.string()));
+                }
+                stream_detail::require_nsuboffs(prev.reader, file.reader,
+                                                file.path.string(),
+                                                all_zero_nsuboffs);
+                ::psrio::detail::require_split_mjd_gap(
+                    prev.reader.stt_imjd(), prev.reader.stt_smjd(),
+                    prev.reader.stt_offs(), prev.count, prev.reader.tsamp(),
+                    file.reader.stt_imjd(), file.reader.stt_smjd(),
+                    file.reader.stt_offs(), file.path.string());
+            }
         }
         cursor += file.count;
     }

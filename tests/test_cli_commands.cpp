@@ -923,6 +923,33 @@ TEST_CASE("psrio digifil supports globs, file lists, verbose progress, and "
     CHECK(res_drop.err.find("drop_cache=true") != std::string::npos);
     CHECK(read_payload(glob_out) == read_payload(drop_out));
 
+    // --cont joins files with a timestamp gap in the given order (as dspsr
+    // -cont), whereas without --cont the gap is rejected.
+    const auto gap_a = dir.path() / "gap_a.fil";
+    const auto gap_b = dir.path() / "gap_b.fil";
+    write_chunk(gap_a, 50000.0, 10);
+    write_chunk(gap_b, 50000.5, 90);
+    const auto gap_fail =
+        psrio_run({"digifil", gap_a.string(), gap_b.string(), "-o",
+                   dir / "gap_fail.fil", "-I", "0", "--progress", "none"});
+    CHECK(gap_fail.code != 0);
+    CHECK(gap_fail.err.find("not contiguous") != std::string::npos);
+
+    const auto cont_out = dir / "from_cont.fil";
+    const auto res_cont =
+        psrio_run({"-v", "digifil", "--cont", gap_b.string(), gap_a.string(),
+                   "-o", cont_out, "-I", "0", "--progress", "none"});
+    require_ok(res_cont);
+    CHECK(res_cont.err.find("forced contiguous") != std::string::npos);
+    CHECK(res_cont.err.find("cont=true") != std::string::npos);
+    const FilterbankReader got_cont(cont_out);
+    CHECK(got_cont.nsamples() == 80U);
+    const auto cont_bytes = read_payload(cont_out);
+    REQUIRE(cont_bytes.size() == std::size_t{80} * std::size_t{4});
+    // gap_b (base 90) comes first because --cont preserves caller order.
+    CHECK(cont_bytes[0] == std::byte{90});
+    CHECK(cont_bytes[std::size_t{40} * std::size_t{4}] == std::byte{10});
+
     // Non-matching glob fails with a clear message.
     const auto bad_glob = psrio_run(
         {"digifil", (dir.path() / "nope_*.sf").string(), "-o", dir / "x.fil"});

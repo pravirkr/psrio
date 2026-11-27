@@ -44,7 +44,7 @@ void copy_floats(Input& input, Output& output, std::uint64_t gulp) {
 
 void run_convert(const ConvertOptions& opts, const Context& ctx) {
     require_distinct(opts.inputs, opts.output);
-    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache, !ctx.force_contiguity);
     const bool to_series = is_series_path(opts.output);
     const int in_bits    = input.nbits();
     const int bits       = opts.nbits.value_or(to_series ? 32 : in_bits);

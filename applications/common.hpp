@@ -32,6 +32,7 @@ struct Context {
     int verbosity{0};
     bool quiet{false};
     bool drop_cache{false};
+    bool force_contiguity{false};
 
     /// Progress and summary messages, suppressed by --quiet.
     template <typename... Args>
@@ -90,14 +91,17 @@ public:
 
     /// Open one file, or several filterbank or search-mode PSRFITS files.
     /// Multiple files are automatically sorted into chronological order and
-    /// validated as one contiguous observation.
+    /// validated as one contiguous observation unless @p check_contiguity is
+    /// false (in which case caller order is preserved and timestamp gap checks
+    /// are skipped).
     /// @throws psrio::Error if a file cannot be opened or the files do not
     ///         join.
     explicit Input(std::span<const std::filesystem::path> paths,
                    const formats::psrfits::DecodeOptions& decode = {},
                    OpenProgressCallback on_open                  = {},
                    std::size_t read_ahead_blocks                 = 0,
-                   bool drop_cache                               = false);
+                   bool drop_cache                               = false,
+                   bool check_contiguity                         = true);
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;

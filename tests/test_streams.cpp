@@ -1,5 +1,6 @@
 #include "psrfits_bytes.hpp"
 #include "psrio/block_source.hpp"
+#include "psrio/common/types.hpp"
 #include "psrio/formats/psrfits.hpp"
 #include "psrio/formats/sigproc.hpp"
 #include "psrio/open.hpp"
@@ -458,4 +459,69 @@ TEST_CASE("SearchStream handles fine tsamp split-MJD, zero NSUBOFFS, and "
 
     const std::array<std::filesystem::path, 2> dup = {a.path(), a.path()};
     CHECK_THROWS_WITH(SearchStream(dup), ContainsSubstring("duplicate"));
+}
+
+TEST_CASE("Streams support check_contiguity=false (--cont) while checking "
+          "observing setup",
+          "[psrfits][sigproc][stream]") {
+    const TempPath first("cont_a.sf");
+    const TempPath second("cont_b.sf");
+    const std::array<std::uint8_t, 4> data_a{10, 11, 12, 13};
+    const std::array<std::uint8_t, 4> data_b{20, 21, 22, 23};
+    // Deliberate 10-second gap and mismatched NSUBOFFS.
+    write_search(first.path(), 0.0, 0, "Cont", data_a);
+    write_search(second.path(), 12.0, 99, "Cont", data_b);
+
+    // Order is preserved when check_contiguity is false (second then first).
+    const std::array<std::filesystem::path, 2> rev = {second.path(),
+                                                      first.path()};
+    CHECK_THROWS_WITH(SearchStream(rev), ContainsSubstring("NSUBOFFS"));
+
+    SearchStream forced(rev, psrio::formats::psrfits::DecodeOptions{}, {},
+                        false);
+    CHECK_FALSE(forced.reordered());
+    CHECK(forced.nsamples() == 4U);
+    const auto vals = forced.read_samples<float>(4U);
+    REQUIRE(vals.size() == 8U);
+    CHECK(vals[0] == 20.0F);
+    CHECK(vals[4] == 10.0F);
+
+    // Observing setup mismatch is still rejected even with --cont.
+    const TempPath other("cont_other.sf");
+    write_search(other.path(), 12.0, 99, "DifferentSource", data_b);
+    const std::array<std::filesystem::path, 2> mismatched = {first.path(),
+                                                             other.path()};
+    CHECK_THROWS_WITH(SearchStream(mismatched,
+                                   psrio::formats::psrfits::DecodeOptions{}, {},
+                                   false),
+                      ContainsSubstring("observing setup"));
+
+    // FilterbankStream also honours check_contiguity=false in caller order.
+    const TempPath fil_a("cont_a.fil");
+    const TempPath fil_b("cont_b.fil");
+    auto hdr = fil_header(50000.0);
+    {
+        FilterbankWriter wa(fil_a.path(), hdr);
+        const std::array<std::byte, 4> ba{std::byte{1}, std::byte{2},
+                                          std::byte{3}, std::byte{4}};
+        wa.write_block(2, ba);
+        wa.close();
+        hdr.tstart = 50001.0; // 1-day gap
+        FilterbankWriter wb(fil_b.path(), hdr);
+        const std::array<std::byte, 4> bb{std::byte{5}, std::byte{6},
+                                          std::byte{7}, std::byte{8}};
+        wb.write_block(2, bb);
+        wb.close();
+    }
+    const std::array<std::filesystem::path, 2> fil_rev = {fil_b.path(),
+                                                          fil_a.path()};
+    CHECK_THROWS_WITH(FilterbankStream(fil_rev),
+                      ContainsSubstring("not contiguous"));
+    FilterbankStream fil_forced(fil_rev, psrio::BitOrder::kLsbFirst, {}, false);
+    CHECK_FALSE(fil_forced.reordered());
+    CHECK(fil_forced.nsamples() == 4U);
+    const auto fil_vals = fil_forced.read_samples<float>(4U);
+    REQUIRE(fil_vals.size() == 8U);
+    CHECK(fil_vals[0] == 5.0F);
+    CHECK(fil_vals[4] == 1.0F);
 }

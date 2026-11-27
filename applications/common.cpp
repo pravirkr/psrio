@@ -210,7 +210,8 @@ Input::Input(std::span<const std::filesystem::path> paths,
              const formats::psrfits::DecodeOptions& decode,
              OpenProgressCallback on_open,
              std::size_t read_ahead_blocks,
-             bool drop_cache) {
+             bool drop_cache,
+             bool check_contiguity) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
@@ -243,8 +244,8 @@ Input::Input(std::span<const std::filesystem::path> paths,
 #endif
     }
     if (search) {
-        formats::psrfits::SearchStream stream(paths, decode,
-                                              std::move(on_open));
+        formats::psrfits::SearchStream stream(paths, decode, std::move(on_open),
+                                              check_contiguity);
         if (read_ahead_blocks > 0U) {
             stream.set_read_ahead_blocks(read_ahead_blocks);
         }
@@ -276,7 +277,8 @@ Input::Input(std::span<const std::filesystem::path> paths,
         m_block.emplace(std::move(stream));
         return;
     }
-    sigproc::FilterbankStream stream(paths, BitOrder::kLsbFirst, on_open);
+    sigproc::FilterbankStream stream(paths, BitOrder::kLsbFirst, on_open,
+                                     check_contiguity);
     if (read_ahead_blocks > 0U) {
         stream.set_read_ahead_blocks(read_ahead_blocks);
     }

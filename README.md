@@ -384,6 +384,7 @@ psrio -v digifil \
 
 - `--progress auto` (default) shows an interactive progress bar on a terminal and switches to periodic newline log lines when redirected to a Slurm/PBS log (`-q` or `--progress none` disables it).
 - `--io-buffer-mb` tunes background read-ahead memory (default `128` MiB per file) without altering `-U` rescaling block boundaries.
+- `--cont` (as `dspsr -cont`) assumes multiple input files are contiguous in the given order and skips timestamp/`NSUBOFFS` gap checks while still validating observing-setup compatibility.
 - `--drop-cache` (Linux) asks the kernel to evict consumed input and written output pages from the page cache to stay within strict Slurm/cgroup memory limits.
 
 ---

@@ -43,6 +43,9 @@ int run(std::span<const std::string> args,
     app.add_flag("-q,--quiet", ctx.quiet, "Print only warnings and errors");
     app.add_flag("--drop-cache", ctx.drop_cache,
                  "Ask the OS to drop read/written pages from cache (Linux)");
+    app.add_flag("--cont", ctx.force_contiguity,
+                 "Assume multiple input files are contiguous in the given "
+                 "order (as dspsr -cont)");
     app.footer("Run 'psrio <command> --help' for the options of a command.");
 
     add_inspect(app, ctx);

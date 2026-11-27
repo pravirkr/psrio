@@ -64,7 +64,7 @@ sigproc::FilterbankHeader decimated_header(const sigproc::FilterbankHeader& in,
 
 void run_decimate(const DecimateOptions& opts, const Context& ctx) {
     require_distinct(opts.inputs, opts.output);
-    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache, !ctx.force_contiguity);
     const auto nchans = input.nchans();
     const auto nifs   = input.nifs();
     const auto tfac   = opts.time_factor;

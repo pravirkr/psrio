@@ -90,7 +90,7 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
         [&reporter](std::size_t done, std::size_t total) {
             reporter.update_scan(done, total);
         },
-        read_ahead_blocks, ctx.drop_cache);
+        read_ahead_blocks, ctx.drop_cache, !ctx.force_contiguity);
     reporter.finish_scan();
 
     const auto output =
@@ -129,22 +129,28 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
               format_bytes(input.total_input_bytes()), nsamples_in,
               format_duration(obs_sec), input.nchans(), tsamp_in * 1.0e6);
     if (input.nfiles() > 1U) {
+        std::string_view order_note;
+        if (ctx.force_contiguity) {
+            order_note = " (forced contiguous)";
+        } else if (input.reordered()) {
+            order_note = " (sorted chronologically)";
+        }
         ctx.debug("psrio digifil: range {} .. {}{}",
                   input.paths().front().filename().string(),
-                  input.paths().back().filename().string(),
-                  input.reordered() ? " (sorted chronologically)" : "");
+                  input.paths().back().filename().string(), order_note);
     }
     ctx.debug("psrio digifil: output {} ({} ch, {} bits, tsamp {} us, "
               "~{} samples)",
               output.string(), nchans_out, config.nbits,
               tsamp_in * static_cast<double>(tfac) * 1.0e6, nsamples_est);
     ctx.debug("psrio digifil: rescale={}s (constant={}, clip={}), "
-              "scloffs={}, threads={}, io_buffer={} MiB, drop_cache={}",
+              "scloffs={}, threads={}, io_buffer={} MiB, drop_cache={}, "
+              "cont={}",
               config.rescale_seconds, config.rescale_constant,
               config.rescale_clip, config.scloffs, default_threads(),
               read_ahead_blocks *
                   (::psrio::detail::ReadAhead::kBlockBytes >> 20U),
-              config.drop_cache);
+              config.drop_cache, ctx.force_contiguity);
 
     const bool use_staging = !opts.no_atomic;
     const auto write_path  = use_staging ? staging_path_for(output) : output;

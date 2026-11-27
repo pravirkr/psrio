@@ -358,7 +358,7 @@ std::string lower(std::string_view text) {
     return out;
 }
 
-Fields collect(const InspectOptions& opts) {
+Fields collect(const InspectOptions& opts, const Context& ctx) {
     Fields fields;
     if (opts.inputs.empty()) {
         throw ValidationError("psrio: an input file is required");
@@ -367,7 +367,8 @@ Fields collect(const InspectOptions& opts) {
     fields.add("filename", "Data file", path.string());
     if (opts.inputs.size() > 1U) {
         fields.add("nfiles", "Files", opts.inputs.size());
-        Input input(opts.inputs);
+        Input input(opts.inputs, {}, {}, 0, ctx.drop_cache,
+                    !ctx.force_contiguity);
         std::string_view format = "SIGPROC";
         if (input.is_psrfits()) {
             format = "PSRFITS";
@@ -463,7 +464,7 @@ void run_inspect(const InspectOptions& opts, const Context& ctx) {
         run_edit(opts, ctx);
         return;
     }
-    const auto fields = collect(opts);
+    const auto fields = collect(opts, ctx);
     if (opts.key.empty()) {
         if (opts.json) {
             print_json(ctx, fields);

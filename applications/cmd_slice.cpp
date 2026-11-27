@@ -50,7 +50,7 @@ std::span<const T> take_columns(std::span<const T> in,
 
 void run_slice(const SliceOptions& opts, const Context& ctx) {
     require_distinct(opts.inputs, opts.output);
-    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache, !ctx.force_contiguity);
     const auto range =
         resolve_range(ctx, input.nsamples(), input.tsamp(), opts.start,
                       opts.start_time, opts.nsamps, opts.duration);

@@ -90,7 +90,8 @@ public:
 
     explicit FilterbankStream(std::span<const std::filesystem::path> paths,
                               BitOrder bit_order = BitOrder::kLsbFirst,
-                              const OpenProgressCallback& on_open = {});
+                              const OpenProgressCallback& on_open = {},
+                              bool check_contiguity               = true);
 
     FilterbankStream(const FilterbankStream&)                = delete;
     FilterbankStream& operator=(const FilterbankStream&)     = delete;
@@ -283,7 +284,8 @@ private:
 inline FilterbankStream::FilterbankStream(
     std::span<const std::filesystem::path> paths,
     BitOrder bit_order,
-    const OpenProgressCallback& on_open)
+    const OpenProgressCallback& on_open,
+    bool check_contiguity)
     : m_bit_order(bit_order) {
     if (paths.empty()) {
         throw ValidationError("psrio: a filterbank stream needs a file");
@@ -291,8 +293,9 @@ inline FilterbankStream::FilterbankStream(
     m_files.reserve(paths.size());
     for (std::size_t index = 0; index < paths.size(); ++index) {
         FilterbankReader reader(paths[index], bit_order);
-        if (paths.size() > 1U && (!reader.header().tstart.has_value() ||
-                                  !reader.header().tsamp.has_value())) {
+        if (check_contiguity && paths.size() > 1U &&
+            (!reader.header().tstart.has_value() ||
+             !reader.header().tsamp.has_value())) {
             throw FormatError(fmt::format(
                 "psrio: {} needs tstart and tsamp to continue a stream",
                 paths[index].string()));
@@ -309,7 +312,7 @@ inline FilterbankStream::FilterbankStream(
             on_open(index + 1U, paths.size());
         }
     }
-    if (m_files.size() > 1U) {
+    if (check_contiguity && m_files.size() > 1U) {
         std::ranges::stable_sort(
             m_files, [](const File& left, const File& right) {
                 return left.reader.tstart() < right.reader.tstart();
@@ -336,15 +339,18 @@ inline FilterbankStream::FilterbankStream(
         if (index > 0U) {
             const auto& prev   = m_files[index - 1U];
             const auto& header = file.reader.header();
-            if (prev.reader.tstart() == file.reader.tstart()) {
-                throw FormatError(fmt::format(
-                    "psrio: {} has the same start time as {} (duplicate file?)",
-                    file.path.string(), prev.path.string()));
-            }
             stream_detail::match_header(m_header, header, file.path.string());
-            ::psrio::detail::require_sample_gap(
-                prev.reader.tstart(), prev.count, prev.reader.tsamp(),
-                file.reader.tstart(), file.path.string());
+            if (check_contiguity) {
+                if (prev.reader.tstart() == file.reader.tstart()) {
+                    throw FormatError(fmt::format(
+                        "psrio: {} has the same start time as {} (duplicate "
+                        "file?)",
+                        file.path.string(), prev.path.string()));
+                }
+                ::psrio::detail::require_sample_gap(
+                    prev.reader.tstart(), prev.count, prev.reader.tsamp(),
+                    file.reader.tstart(), file.path.string());
+            }
         }
         cursor += file.count;
     }
