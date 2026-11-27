@@ -195,35 +195,67 @@ public:
         m_stream_emitted    = false;
     }
 
-    /// Report streaming progress after one block.
+    /// Report streaming progress after one block when total samples are known.
     void update_stream(std::uint64_t samples_done, std::size_t file_index) {
         if (m_mode == ProgressMode::kNone || m_total_samples == 0U) {
             return;
         }
+        const double frac = std::clamp(static_cast<double>(samples_done) /
+                                           static_cast<double>(m_total_samples),
+                                       0.0, 1.0);
+        const bool finished   = samples_done >= m_total_samples;
+        const auto bytes_done = static_cast<std::uint64_t>(
+            frac * static_cast<double>(m_total_input_bytes));
+        emit_stream_progress(samples_done, m_total_samples, file_index, frac,
+                             bytes_done, finished);
+    }
+
+    /// Report streaming progress for lazy `--cont` streams where total samples
+    /// are not pre-scanned up front.
+    void update_stream_lazy(std::uint64_t samples_done,
+                            std::size_t file_index,
+                            double file_frac,
+                            std::uint64_t bytes_done,
+                            bool finished) {
+        if (m_mode == ProgressMode::kNone || m_nfiles == 0U) {
+            return;
+        }
+        const double clamped_file = std::clamp(file_frac, 0.0, 1.0);
+        const double frac =
+            finished
+                ? 1.0
+                : std::clamp((static_cast<double>(file_index) + clamped_file) /
+                                 static_cast<double>(m_nfiles),
+                             0.0, 1.0);
+        emit_stream_progress(samples_done, 0U, file_index, frac, bytes_done,
+                             finished);
+    }
+
+private:
+    void emit_stream_progress(std::uint64_t samples_done,
+                              std::uint64_t total_samples,
+                              std::size_t file_index,
+                              double frac,
+                              std::uint64_t bytes_done,
+                              bool finished) {
         const auto now = Clock::now();
         const double since_last =
             std::chrono::duration<double>(now - m_last_emit).count();
         const double elapsed =
             std::chrono::duration<double>(now - m_start).count();
-        const double frac = std::clamp(static_cast<double>(samples_done) /
-                                           static_cast<double>(m_total_samples),
-                                       0.0, 1.0);
-        const bool finished = samples_done >= m_total_samples;
 
         if (m_mode == ProgressMode::kBar) {
             if (m_stream_emitted && !finished && since_last < 0.25) {
                 return;
             }
-            m_stream_emitted = true;
-            m_last_emit      = now;
-            const double rate =
-                elapsed > 1.0e-3
-                    ? (frac * static_cast<double>(m_total_input_bytes)) /
-                          elapsed
-                    : 0.0;
-            const double eta             = (frac > 1.0e-6 && elapsed > 0.25)
-                                               ? elapsed * ((1.0 - frac) / frac)
-                                               : -1.0;
+            m_stream_emitted  = true;
+            m_last_emit       = now;
+            const double rate = elapsed > 1.0e-3
+                                    ? static_cast<double>(bytes_done) / elapsed
+                                    : 0.0;
+            const double eta  = (frac > 1.0e-6 && elapsed > 0.25)
+                                    ? elapsed * ((1.0 - frac) / frac)
+                                    : -1.0;
             constexpr std::size_t kWidth = 24;
             const auto filled            = static_cast<std::size_t>(
                 std::llround(frac * static_cast<double>(kWidth)));
@@ -235,20 +267,29 @@ public:
                 bar[filled] = '>';
             }
             const double obs_done = static_cast<double>(samples_done) * m_tsamp;
-            const double obs_tot =
-                static_cast<double>(m_total_samples) * m_tsamp;
             std::string line;
-            if (m_nfiles > 1U) {
-                line = fmt::format(
-                    "[{}] {:5.1f}% | file {}/{} | {}/{} | {} | ETA {}", bar,
-                    frac * 100.0, file_index + 1U, m_nfiles,
-                    format_duration(obs_done), format_duration(obs_tot),
-                    format_rate(rate), format_duration(eta));
+            if (total_samples > 0U) {
+                const double obs_tot =
+                    static_cast<double>(total_samples) * m_tsamp;
+                if (m_nfiles > 1U) {
+                    line = fmt::format(
+                        "[{}] {:5.1f}% | file {}/{} | {}/{} | {} | ETA {}", bar,
+                        frac * 100.0, file_index + 1U, m_nfiles,
+                        format_duration(obs_done), format_duration(obs_tot),
+                        format_rate(rate), format_duration(eta));
+                } else {
+                    line =
+                        fmt::format("[{}] {:5.1f}% | {}/{} | {} | ETA {}", bar,
+                                    frac * 100.0, format_duration(obs_done),
+                                    format_duration(obs_tot), format_rate(rate),
+                                    format_duration(eta));
+                }
             } else {
-                line = fmt::format("[{}] {:5.1f}% | {}/{} | {} | ETA {}", bar,
-                                   frac * 100.0, format_duration(obs_done),
-                                   format_duration(obs_tot), format_rate(rate),
-                                   format_duration(eta));
+                line = fmt::format(
+                    "[{}] {:5.1f}% | file {}/{} | {} obs | {} | ETA {}", bar,
+                    frac * 100.0, file_index + 1U, m_nfiles,
+                    format_duration(obs_done), format_rate(rate),
+                    format_duration(eta));
             }
             emit_bar_line(line);
             return;
@@ -258,7 +299,7 @@ public:
         // then at 5% steps or every 15 s.
         const auto bucket    = static_cast<std::size_t>(frac * 20.0);
         const bool first_due = !m_stream_emitted && elapsed >= 5.0;
-        const bool due = finished || first_due ||
+        const bool due = (finished && m_last_log_bucket < 20U) || first_due ||
                          (bucket > m_last_log_bucket) || (since_last >= 15.0);
         if (!due) {
             return;
@@ -267,29 +308,37 @@ public:
         m_last_emit       = now;
         m_last_log_bucket = std::max(m_last_log_bucket, bucket);
         const double rate =
-            elapsed > 1.0e-3
-                ? (frac * static_cast<double>(m_total_input_bytes)) / elapsed
-                : 0.0;
+            elapsed > 1.0e-3 ? static_cast<double>(bytes_done) / elapsed : 0.0;
         const double eta = (frac > 1.0e-6 && elapsed > 0.25)
                                ? elapsed * ((1.0 - frac) / frac)
                                : -1.0;
-        if (m_nfiles > 1U) {
-            m_ctx->err << fmt::format(
-                "{}: {:5.1f}% (file {}/{}, {}/{} samples, {}, elapsed {}, "
-                "ETA {})\n",
-                m_label, frac * 100.0, file_index + 1U, m_nfiles, samples_done,
-                m_total_samples, format_rate(rate), format_duration(elapsed),
-                format_duration(eta));
+        if (total_samples > 0U) {
+            if (m_nfiles > 1U) {
+                m_ctx->err << fmt::format(
+                    "{}: {:5.1f}% (file {}/{}, {}/{} samples, {}, elapsed {}, "
+                    "ETA {})\n",
+                    m_label, frac * 100.0, file_index + 1U, m_nfiles,
+                    samples_done, total_samples, format_rate(rate),
+                    format_duration(elapsed), format_duration(eta));
+            } else {
+                m_ctx->err << fmt::format(
+                    "{}: {:5.1f}% ({}/{} samples, {}, elapsed {}, ETA {})\n",
+                    m_label, frac * 100.0, samples_done, total_samples,
+                    format_rate(rate), format_duration(elapsed),
+                    format_duration(eta));
+            }
         } else {
             m_ctx->err << fmt::format(
-                "{}: {:5.1f}% ({}/{} samples, {}, elapsed {}, ETA {})\n",
-                m_label, frac * 100.0, samples_done, m_total_samples,
+                "{}: {:5.1f}% (file {}/{}, {} samples, {}, elapsed {}, "
+                "ETA {})\n",
+                m_label, frac * 100.0, file_index + 1U, m_nfiles, samples_done,
                 format_rate(rate), format_duration(elapsed),
                 format_duration(eta));
         }
         m_ctx->err.flush();
     }
 
+public:
     /// Clear any active `\r` line and return total elapsed seconds since
     /// begin_stream().
     [[nodiscard]] double finish() {

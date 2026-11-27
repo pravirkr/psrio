@@ -6,9 +6,11 @@
 #include <filesystem>
 #include <fmt/format.h>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <ostream>
 #include <psrio/block_source.hpp>
+#include <psrio/detail/contiguity.hpp>
 #include <psrio/formats/psrfits/reader.hpp>
 #include <psrio/formats/sigproc/header.hpp>
 #include <psrio/formats/sigproc/writer.hpp>
@@ -103,7 +105,8 @@ public:
                    OpenProgressCallback on_open                  = {},
                    std::size_t read_ahead_blocks                 = 0,
                    bool drop_cache                               = false,
-                   bool check_contiguity                         = true);
+                   bool check_contiguity                         = true,
+                   bool lazy                                     = false);
 
     [[nodiscard]] const std::filesystem::path& path() const noexcept {
         return m_path;
@@ -126,6 +129,11 @@ public:
     }
     [[nodiscard]] bool is_series() const noexcept {
         return m_series.has_value();
+    }
+    [[nodiscard]] bool has_nsamples() const;
+    [[nodiscard]] const ::psrio::detail::StreamProgress*
+    lazy_progress() const noexcept {
+        return m_lazy_progress.get();
     }
     [[nodiscard]] std::uint64_t nsamples() const;
     [[nodiscard]] std::uint64_t nchans() const;
@@ -182,6 +190,7 @@ private:
     std::filesystem::path m_path;
     std::vector<std::filesystem::path> m_paths;
     std::vector<std::uint64_t> m_file_ends;
+    std::shared_ptr<::psrio::detail::StreamProgress> m_lazy_progress;
     std::uint64_t m_total_input_bytes{0};
     bool m_reordered{false};
     sigproc::FilterbankHeader m_header;

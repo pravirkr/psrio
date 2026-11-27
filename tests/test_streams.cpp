@@ -1,6 +1,7 @@
 #include "psrfits_bytes.hpp"
 #include "psrio/block_source.hpp"
 #include "psrio/common/types.hpp"
+#include "psrio/detail/contiguity.hpp"
 #include "psrio/formats/psrfits.hpp"
 #include "psrio/formats/sigproc.hpp"
 #include "psrio/open.hpp"
@@ -15,6 +16,7 @@
 #include <deque>
 #include <filesystem>
 #include <fmt/format.h>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -524,4 +526,34 @@ TEST_CASE("Streams support check_contiguity=false (--cont) while checking "
     REQUIRE(fil_vals.size() == 8U);
     CHECK(fil_vals[0] == 5.0F);
     CHECK(fil_vals[4] == 1.0F);
+
+    // Lazy --cont streaming opens only file 0 at construction and streams
+    // remaining files one by one while still catching setup mismatches.
+    const auto progress = std::make_shared<psrio::detail::StreamProgress>();
+    SearchStream lazy_sf(rev, psrio::formats::psrfits::DecodeOptions{}, {},
+                         false, true, progress);
+    CHECK_FALSE(lazy_sf.has_nsamples());
+    CHECK(lazy_sf.nfiles() == 2U);
+    CHECK(progress->file_index == 0U);
+    const auto lazy_sf_vals = lazy_sf.read_samples<float>(4U);
+    REQUIRE(lazy_sf_vals.size() == 8U);
+    CHECK(lazy_sf_vals[0] == 20.0F);
+    CHECK(lazy_sf_vals[4] == 10.0F);
+    CHECK(lazy_sf.has_nsamples());
+    CHECK(lazy_sf.nsamples() == 4U);
+
+    SearchStream lazy_bad(mismatched, psrio::formats::psrfits::DecodeOptions{},
+                          {}, false, true);
+    CHECK_FALSE(lazy_bad.has_nsamples());
+    CHECK_THROWS_WITH(lazy_bad.read_samples<float>(4U),
+                      ContainsSubstring("observing setup"));
+
+    FilterbankStream lazy_fil(fil_rev, psrio::BitOrder::kLsbFirst, {}, false,
+                              true);
+    CHECK_FALSE(lazy_fil.has_nsamples());
+    const auto lazy_fil_vals = lazy_fil.read_samples<float>(4U);
+    REQUIRE(lazy_fil_vals.size() == 8U);
+    CHECK(lazy_fil_vals[0] == 5.0F);
+    CHECK(lazy_fil_vals[4] == 1.0F);
+    CHECK(lazy_fil.has_nsamples());
 }

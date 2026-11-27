@@ -907,7 +907,7 @@ public:
         return m_pipeline->bytes_per_sample();
     }
     [[nodiscard]] std::uint64_t nsamples() const noexcept { return m_nsamples; }
-    [[nodiscard]] static bool has_nsamples() noexcept { return true; }
+    [[nodiscard]] bool has_nsamples() const noexcept { return m_has_nsamples; }
     [[nodiscard]] double tsamp() const { return m_header.tsamp.value_or(0.0); }
     [[nodiscard]] double tstart() const {
         return m_header.tstart.value_or(0.0);
@@ -946,12 +946,13 @@ public:
     /// Restart the pipeline so the next output sample is @p sample.
     /// @throws ValidationError if @p sample is past nsamples().
     void seek(std::uint64_t sample) {
-        if (sample > m_nsamples) {
+        if (sample > 0U && (!m_has_nsamples || sample > m_nsamples)) {
             throw ValidationError("psrio: seek is past the readable samples");
         }
         const auto tfac = m_pipeline->tscrunch();
         const auto skip = sample * tfac;
-        restart(m_start + skip, m_count - skip);
+        const auto left = m_has_nsamples ? (m_count - skip) : m_count;
+        restart(m_start + skip, left);
         m_sample = sample;
     }
     void rewind() { seek(0); }
@@ -1102,17 +1103,28 @@ private:
     void init(const formats::sigproc::FilterbankHeader& header,
               std::uint64_t start,
               std::optional<std::uint64_t> nsamps) {
-        const auto total = m_input->nsamples();
-        if (start >= total) {
-            throw ValidationError(fmt::format(
-                "psrio: start sample {} is outside the input ({} samples)",
-                start, total));
-        }
-        const auto count = nsamps.value_or(total - start);
-        if (count == 0U || count > total - start) {
-            throw ValidationError(fmt::format(
-                "psrio: {} samples from {} exceed the input ({} samples)",
-                count, start, total));
+        std::uint64_t count = 0;
+        if (m_input->has_nsamples()) {
+            const auto total = m_input->nsamples();
+            if (start >= total) {
+                throw ValidationError(fmt::format(
+                    "psrio: start sample {} is outside the input ({} samples)",
+                    start, total));
+            }
+            count = nsamps.value_or(total - start);
+            if (count == 0U || count > total - start) {
+                throw ValidationError(fmt::format(
+                    "psrio: {} samples from {} exceed the input ({} samples)",
+                    count, start, total));
+            }
+            m_has_nsamples = true;
+        } else {
+            if (nsamps.has_value() && *nsamps == 0U) {
+                throw ValidationError(
+                    "psrio: requested sample count must be positive");
+            }
+            m_has_nsamples = nsamps.has_value();
+            count = nsamps.value_or(std::numeric_limits<std::uint64_t>::max());
         }
         m_start    = start;
         m_count    = count;
@@ -1120,7 +1132,7 @@ private:
         m_gulp     = m_config.gulp.value_or(
             default_gulp(*m_input, *m_pipeline, m_config.max_ram_bytes()));
         m_header   = output_header(header, *m_pipeline, start);
-        m_nsamples = count / m_pipeline->tscrunch();
+        m_nsamples = m_has_nsamples ? (count / m_pipeline->tscrunch()) : 0U;
         m_input->set_fswap(false);
         restart(start, count);
     }
@@ -1151,7 +1163,9 @@ private:
     /// file bytes ahead asynchronously via ReadAhead, so decoding on the main
     /// thread keeps one OpenMP team active with zero core oversubscription.
     std::uint64_t take_block() {
-        const auto want = std::min(m_gulp, m_count_left - m_consumed);
+        const auto want = m_has_nsamples
+                              ? std::min(m_gulp, m_count_left - m_consumed)
+                              : m_gulp;
         if (want == 0U) {
             return 0U;
         }
@@ -1198,6 +1212,7 @@ private:
     std::uint64_t m_consumed{0};
     std::uint64_t m_sample{0};
     std::uint64_t m_nsamples{0};
+    bool m_has_nsamples{true};
     bool m_fswap{false};
     std::vector<std::byte> m_ready;
     std::size_t m_ready_at{0};
@@ -1239,7 +1254,9 @@ inline Summary run(BlockSource& source,
                    std::optional<std::uint64_t> nsamps = std::nullopt,
                    const ProgressCallback& on_progress = {}) {
     Source stream(source, header, config, start, nsamps);
-    const auto total_in = nsamps.value_or(source.nsamples() - start);
+    const auto total_in = source.has_nsamples()
+                              ? nsamps.value_or(source.nsamples() - start)
+                              : nsamps.value_or(0U);
     formats::sigproc::FilterbankWriter writer(output, stream.header());
     writer.set_drop_cache(config.drop_cache);
     writer.set_async(true);

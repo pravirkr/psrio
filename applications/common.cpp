@@ -2,6 +2,7 @@
 
 #include <CLI/CLI.hpp>
 #include <psrio/common/types.hpp>
+#include <psrio/detail/contiguity.hpp>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
@@ -26,6 +27,7 @@
 #include <fstream>
 #include <functional>
 #include <glob.h>
+#include <memory>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -211,7 +213,8 @@ Input::Input(std::span<const std::filesystem::path> paths,
              OpenProgressCallback on_open,
              std::size_t read_ahead_blocks,
              bool drop_cache,
-             bool check_contiguity) {
+             bool check_contiguity,
+             bool lazy) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
@@ -220,6 +223,21 @@ Input::Input(std::span<const std::filesystem::path> paths,
         return;
     }
     const bool search = formats::psrfits::is_search_path(paths.front());
+    if (!search) {
+#ifdef PSRIO_CLI_HAS_HDF5
+        if (formats::fbh5::is_hdf5_filterbank(paths.front())) {
+            throw ValidationError(
+                "psrio: an HDF5 filterbank does not join with other files");
+        }
+#else
+        if (open_detail::looks_like_hdf5(paths.front())) {
+            throw FormatError(fmt::format(
+                "psrio: {} is an HDF5 file; this psrio was built without "
+                "PSRIO_WITH_HDF5",
+                paths.front().string()));
+        }
+#endif
+    }
     for (const auto& path : paths) {
         if (is_tim_path(path) || is_presto_path(path)) {
             throw ValidationError(
@@ -229,23 +247,26 @@ Input::Input(std::span<const std::filesystem::path> paths,
             throw ValidationError(
                 "psrio: every file in a stream must be the same format");
         }
+        if (!search && open_detail::has_hdf5_extension(path)) {
 #ifdef PSRIO_CLI_HAS_HDF5
-        if (formats::fbh5::is_hdf5_filterbank(path)) {
             throw ValidationError(
                 "psrio: an HDF5 filterbank does not join with other files");
-        }
 #else
-        if (open_detail::looks_like_hdf5(path)) {
             throw FormatError(fmt::format(
                 "psrio: {} is an HDF5 file; this psrio was built without "
                 "PSRIO_WITH_HDF5",
                 path.string()));
-        }
 #endif
+        }
+    }
+    const bool use_lazy = lazy && !check_contiguity;
+    if (use_lazy) {
+        m_lazy_progress = std::make_shared<::psrio::detail::StreamProgress>();
     }
     if (search) {
         formats::psrfits::SearchStream stream(paths, decode, std::move(on_open),
-                                              check_contiguity);
+                                              check_contiguity, use_lazy,
+                                              m_lazy_progress);
         if (read_ahead_blocks > 0U) {
             stream.set_read_ahead_blocks(read_ahead_blocks);
         }
@@ -270,15 +291,18 @@ Input::Input(std::span<const std::filesystem::path> paths,
             .rows     = {},
             .nsuboffs = {},
         };
-        for (std::size_t index = 0; index < stream.nfiles(); ++index) {
-            m_info.rows.push_back(stream.file(index).nrows());
-            m_info.nsuboffs.push_back(stream.file(index).nsuboffs());
+        if (!use_lazy) {
+            for (std::size_t index = 0; index < stream.nfiles(); ++index) {
+                m_info.rows.push_back(stream.file(index).nrows());
+                m_info.nsuboffs.push_back(stream.file(index).nsuboffs());
+            }
         }
         m_block.emplace(std::move(stream));
         return;
     }
     sigproc::FilterbankStream stream(paths, BitOrder::kLsbFirst, on_open,
-                                     check_contiguity);
+                                     check_contiguity, use_lazy,
+                                     m_lazy_progress);
     if (read_ahead_blocks > 0U) {
         stream.set_read_ahead_blocks(read_ahead_blocks);
     }
@@ -290,6 +314,13 @@ Input::Input(std::span<const std::filesystem::path> paths,
     m_reordered         = stream.reordered();
     m_header            = stream.header();
     m_block.emplace(std::move(stream));
+}
+
+bool Input::has_nsamples() const {
+    if (m_series) {
+        return true;
+    }
+    return m_block ? m_block->has_nsamples() : true;
 }
 
 std::size_t Input::file_index_at(std::uint64_t sample) const {
@@ -503,11 +534,12 @@ expand_input_paths(std::span<const std::string> specs,
     }
     for (const auto& path : paths) {
         std::error_code ec;
-        if (!std::filesystem::exists(path, ec)) {
+        const auto st = std::filesystem::status(path, ec);
+        if (ec || !std::filesystem::exists(st)) {
             throw ValidationError(fmt::format(
                 "psrio: input file '{}' does not exist", path.string()));
         }
-        if (!std::filesystem::is_regular_file(path, ec)) {
+        if (!std::filesystem::is_regular_file(st)) {
             throw ValidationError(fmt::format(
                 "psrio: '{}' is not a regular file", path.string()));
         }
@@ -549,6 +581,10 @@ void add_threads_option(CLI::App& sub) {
 
 void require_distinct(std::span<const std::filesystem::path> inputs,
                       const std::filesystem::path& output) {
+    std::error_code ec;
+    if (!std::filesystem::exists(output, ec)) {
+        return;
+    }
     for (const auto& input : inputs) {
         require_distinct(input, output);
     }

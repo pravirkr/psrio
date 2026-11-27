@@ -3,11 +3,21 @@
 #include "psrio/detail/exceptions.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <fmt/format.h>
 #include <string_view>
 
 namespace psrio::detail {
+
+/// Live file-level progress updated by lazy multi-file streams.
+struct StreamProgress {
+    std::size_t file_index{0};
+    std::uint64_t file_first_sample{0};
+    std::uint64_t file_samples{0};
+    std::uint64_t bytes_before_file{0};
+    std::uint64_t file_bytes{0};
+};
 
 /// Relative tolerance sigpyproc uses in `numpy.allclose` for the sample gap.
 inline constexpr double kSampleGapTolerance = 0.1;

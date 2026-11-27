@@ -83,8 +83,15 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     config.drop_cache = ctx.drop_cache;
 
     ProgressReporter reporter(ctx, progress_mode, "psrio digifil");
-    ctx.debug("psrio digifil: opening {} input file{}...", input_paths.size(),
-              input_paths.size() == 1U ? "" : "s");
+    const bool lazy_stream = ctx.force_contiguity && input_paths.size() > 1U;
+    if (lazy_stream) {
+        ctx.debug("psrio digifil: streaming {} input files file-by-file "
+                  "(--cont)...",
+                  input_paths.size());
+    } else {
+        ctx.debug("psrio digifil: opening {} input file{}...",
+                  input_paths.size(), input_paths.size() == 1U ? "" : "s");
+    }
     // PSRFITS is decoded as dspsr does: scales and offsets only with
     // --scloffs, no weights, and -P picking a stored product.
     Input input(
@@ -92,7 +99,7 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
         [&reporter](std::size_t done, std::size_t total) {
             reporter.update_scan(done, total);
         },
-        read_ahead_blocks, ctx.drop_cache, !ctx.force_contiguity);
+        read_ahead_blocks, ctx.drop_cache, !ctx.force_contiguity, lazy_stream);
     reporter.finish_scan();
 
     const auto output =
@@ -116,7 +123,8 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
         }
     }
 
-    const auto nsamples_in  = input.nsamples();
+    const bool known_length = input.has_nsamples();
+    const auto nsamples_in  = known_length ? input.nsamples() : 0U;
     const auto tsamp_in     = input.tsamp();
     const auto ffac         = std::max<std::uint64_t>(config.fscrunch, 1U);
     const auto tfac         = std::max<std::uint64_t>(config.tscrunch, 1U);
@@ -124,12 +132,19 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     const auto nsamples_est = nsamples_in / tfac;
     const double obs_sec    = static_cast<double>(nsamples_in) * tsamp_in;
 
-    ctx.debug("psrio digifil: input {} ({} file{}, {}, {} samples, {} obs, "
-              "{} ch, tsamp {} us)",
-              input.is_psrfits() ? "PSRFITS" : "SIGPROC", input.nfiles(),
-              input.nfiles() == 1U ? "" : "s",
-              format_bytes(input.total_input_bytes()), nsamples_in,
-              format_duration(obs_sec), input.nchans(), tsamp_in * 1.0e6);
+    if (known_length) {
+        ctx.debug("psrio digifil: input {} ({} file{}, {}, {} samples, {} obs, "
+                  "{} ch, tsamp {} us)",
+                  input.is_psrfits() ? "PSRFITS" : "SIGPROC", input.nfiles(),
+                  input.nfiles() == 1U ? "" : "s",
+                  format_bytes(input.total_input_bytes()), nsamples_in,
+                  format_duration(obs_sec), input.nchans(), tsamp_in * 1.0e6);
+    } else {
+        ctx.debug("psrio digifil: input {} ({} files, file-by-file stream, "
+                  "{} ch, tsamp {} us)",
+                  input.is_psrfits() ? "PSRFITS" : "SIGPROC", input.nfiles(),
+                  input.nchans(), tsamp_in * 1.0e6);
+    }
     if (input.nfiles() > 1U) {
         std::string_view order_note;
         if (ctx.force_contiguity) {
@@ -141,10 +156,16 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
                   input.paths().front().filename().string(),
                   input.paths().back().filename().string(), order_note);
     }
-    ctx.debug("psrio digifil: output {} ({} ch, {} bits, tsamp {} us, "
-              "~{} samples)",
-              output.string(), nchans_out, config.nbits,
-              tsamp_in * static_cast<double>(tfac) * 1.0e6, nsamples_est);
+    if (known_length) {
+        ctx.debug("psrio digifil: output {} ({} ch, {} bits, tsamp {} us, "
+                  "~{} samples)",
+                  output.string(), nchans_out, config.nbits,
+                  tsamp_in * static_cast<double>(tfac) * 1.0e6, nsamples_est);
+    } else {
+        ctx.debug("psrio digifil: output {} ({} ch, {} bits, tsamp {} us)",
+                  output.string(), nchans_out, config.nbits,
+                  tsamp_in * static_cast<double>(tfac) * 1.0e6);
+    }
     ctx.debug("psrio digifil: rescale={}s (constant={}, clip={}), "
               "scloffs={}, threads={}, io_buffer={} MiB, drop_cache={}, "
               "cont={}",
@@ -163,13 +184,35 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     reporter.begin_stream(nsamples_in, tsamp_in, input.total_input_bytes(),
                           input.nfiles());
     std::size_t last_file_logged = 0;
+    std::uint64_t last_bytes_in  = input.total_input_bytes();
     digifil::Summary summary{};
     try {
         summary = digifil::run(
             input.block(), input.header(), write_path, config, 0, std::nullopt,
             [&](const digifil::Progress& prog) {
-                const auto file_idx = input.file_index_at(
-                    prog.samples_in_done > 0U ? prog.samples_in_done - 1U : 0U);
+                std::size_t file_idx = 0;
+                double file_frac     = 0.0;
+                if (const auto* lazy = input.lazy_progress()) {
+                    file_idx = lazy->file_index;
+                    const auto local =
+                        prog.samples_in_done >= lazy->file_first_sample
+                            ? prog.samples_in_done - lazy->file_first_sample
+                            : 0U;
+                    file_frac = lazy->file_samples > 0U
+                                    ? std::clamp(static_cast<double>(local) /
+                                                     static_cast<double>(
+                                                         lazy->file_samples),
+                                                 0.0, 1.0)
+                                    : 0.0;
+                    last_bytes_in =
+                        lazy->bytes_before_file +
+                        static_cast<std::uint64_t>(
+                            file_frac * static_cast<double>(lazy->file_bytes));
+                } else {
+                    file_idx = input.file_index_at(
+                        prog.samples_in_done > 0U ? prog.samples_in_done - 1U
+                                                  : 0U);
+                }
                 if (ctx.verbosity >= 2 && !ctx.quiet &&
                     file_idx != last_file_logged &&
                     file_idx < input.paths().size()) {
@@ -178,10 +221,26 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
                         "psrio digifil: file {}/{}: {}\n", file_idx + 1U,
                         input.nfiles(),
                         input.paths()[file_idx].filename().string());
+                    ctx.err.flush();
                     last_file_logged = file_idx;
                 }
-                reporter.update_stream(prog.samples_in_done, file_idx);
+                if (known_length) {
+                    reporter.update_stream(prog.samples_in_done, file_idx);
+                } else {
+                    reporter.update_stream_lazy(prog.samples_in_done, file_idx,
+                                                file_frac, last_bytes_in,
+                                                false);
+                }
             });
+        if (!known_length) {
+            if (const auto* lazy = input.lazy_progress()) {
+                last_bytes_in = lazy->bytes_before_file;
+            }
+            reporter.update_stream_lazy(
+                summary.nsamples_in,
+                input.nfiles() > 0U ? input.nfiles() - 1U : 0U, 1.0,
+                last_bytes_in, true);
+        }
         if (use_staging) {
             std::filesystem::rename(write_path, output);
         }
@@ -195,10 +254,10 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     }
 
     const double elapsed = reporter.finish();
+    const auto final_bytes =
+        known_length ? input.total_input_bytes() : last_bytes_in;
     const double avg_rate =
-        elapsed > 1.0e-3
-            ? static_cast<double>(input.total_input_bytes()) / elapsed
-            : 0.0;
+        elapsed > 1.0e-3 ? static_cast<double>(final_bytes) / elapsed : 0.0;
     ctx.debug("psrio digifil: {} input samples per block", summary.gulp);
     ctx.info("psrio digifil: wrote {} samples at {} bits from {} input samples "
              "to {} in {} ({})",

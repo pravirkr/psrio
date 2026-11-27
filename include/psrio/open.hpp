@@ -27,12 +27,17 @@ inline constexpr std::array<char, 8> kHdf5Signature{
 };
 
 /// True when @p path has an HDF5 extension or starts with the HDF5 signature.
-[[nodiscard]] inline bool looks_like_hdf5(const std::filesystem::path& path) {
+[[nodiscard]] inline bool
+has_hdf5_extension(const std::filesystem::path& path) {
     std::string ext = path.extension().string();
     std::ranges::transform(ext, ext.begin(), [](unsigned char c) {
         return static_cast<char>(std::tolower(c));
     });
-    if (ext == ".h5" || ext == ".hdf5") {
+    return ext == ".h5" || ext == ".hdf5";
+}
+
+[[nodiscard]] inline bool looks_like_hdf5(const std::filesystem::path& path) {
+    if (has_hdf5_extension(path)) {
         return true;
     }
     std::array<char, kHdf5Signature.size()> head{};
@@ -89,8 +94,12 @@ open_block_source(std::span<const std::filesystem::path> paths,
         return open_block_source(paths.front(), 0U, bit_order);
     }
     const bool search = formats::psrfits::is_search_path(paths.front());
+    if (!search && open_detail::looks_like_hdf5(paths.front())) {
+        throw ValidationError(
+            "psrio: an HDF5 filterbank does not join with other files");
+    }
     for (const auto& path : paths) {
-        if (open_detail::looks_like_hdf5(path)) {
+        if (!search && open_detail::has_hdf5_extension(path)) {
             throw ValidationError(
                 "psrio: an HDF5 filterbank does not join with other files");
         }
