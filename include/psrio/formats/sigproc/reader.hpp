@@ -181,13 +181,13 @@ public:
     /// read_samples. Raw byte reads and views stay in file order.
     void set_fswap(bool enable) noexcept { m_apply_fswap = enable; }
 
-    /// Drop cached file pages once their samples are read. Off by default,
-    /// or on when `PSRIO_DROP_CACHE=1` is set at open.
+    /// Drop cached file pages once their samples are read (Linux). Off by
+    /// default.
     void set_drop_cache(bool enable) noexcept { m_file.set_drop_cache(enable); }
 
     /// Once two reads in a row are contiguous, stream the rest of the file on
-    /// a background thread, kReadAheadBlocks blocks ahead of the caller. On by
-    /// default.
+    /// a background thread, read_ahead_blocks() blocks ahead of the caller. On
+    /// by default.
     void set_prefetch(bool enable) noexcept {
         m_prefetch = enable;
         if (!enable) {
@@ -195,11 +195,45 @@ public:
         }
     }
 
+    /// Number of ReadAhead::kBlockBytes blocks buffered ahead of the caller.
+    void set_read_ahead_blocks(std::size_t blocks) noexcept {
+        m_read_ahead_blocks = std::max<std::size_t>(blocks, 1U);
+    }
+
+    /// Start streaming payload bytes from the start of the file on a
+    /// background thread before the first read.
+    void prefetch_start() {
+        if (!m_prefetch || m_ahead != nullptr ||
+            m_header.header_bytes >= m_file.size()) {
+            return;
+        }
+        m_file.ensure_open();
+        m_ahead = std::make_unique<::psrio::detail::ReadAhead>(
+            m_file.duplicate(), m_header.header_bytes, m_file.size(),
+            m_read_ahead_blocks);
+    }
+
     /// Stop reading ahead and free its buffers, for example once a stream
     /// has moved past this file.
     void release_buffers() {
         m_ahead.reset();
         m_raw = {};
+    }
+
+    /// Stop read-ahead, free buffers, and close the OS file descriptor.
+    /// Metadata stays available; subsequent reads reopen on demand.
+    void close_handle() {
+        release_buffers();
+        m_read_end = std::numeric_limits<std::uint64_t>::max();
+        m_file.close_fd();
+    }
+
+    [[nodiscard]] bool is_open() const noexcept { return m_file.is_open(); }
+    [[nodiscard]] std::uint64_t file_size() const noexcept {
+        return m_file.size();
+    }
+    [[nodiscard]] const std::filesystem::path& path() const noexcept {
+        return m_file.path();
     }
 
     /// Blocks of ReadAhead::kBlockBytes read ahead of the caller.
@@ -339,6 +373,7 @@ private:
     std::unique_ptr<::psrio::detail::ReadAhead> m_ahead;
     std::uint64_t m_read_end{std::numeric_limits<std::uint64_t>::max()};
     bool m_prefetch{true};
+    std::size_t m_read_ahead_blocks{kReadAheadBlocks};
     std::uint64_t m_sample{0};
     BitOrder m_bit_order{BitOrder::kLsbFirst};
     bool m_apply_fswap{false};
@@ -471,6 +506,7 @@ FilterbankReader::mapped_bytes(std::uint64_t offset, std::uint64_t nbytes) {
 
 inline void FilterbankReader::read_payload(std::uint64_t offset,
                                            std::span<std::byte> dest) {
+    m_file.ensure_open();
     const auto start = m_header.header_bytes;
     const auto size  = m_file.size() - start;
     if (offset > size || dest.size() > size - offset) {
@@ -482,7 +518,7 @@ inline void FilterbankReader::read_payload(std::uint64_t offset,
     }
     if (m_ahead == nullptr && m_prefetch && at == m_read_end && !dest.empty()) {
         m_ahead = std::make_unique<::psrio::detail::ReadAhead>(
-            m_file.duplicate(), at, m_file.size(), kReadAheadBlocks);
+            m_file.duplicate(), at, m_file.size(), m_read_ahead_blocks);
     }
     if (m_ahead != nullptr) {
         m_ahead->read(at, dest);

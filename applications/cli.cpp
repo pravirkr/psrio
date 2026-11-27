@@ -41,6 +41,8 @@ int run(std::span<const std::string> args,
     app.get_formatter()->column_width(32);
     app.add_flag("-v,--verbose", ctx.verbosity, "Print more detail");
     app.add_flag("-q,--quiet", ctx.quiet, "Print only warnings and errors");
+    app.add_flag("--drop-cache", ctx.drop_cache,
+                 "Ask the OS to drop read/written pages from cache (Linux)");
     app.footer("Run 'psrio <command> --help' for the options of a command.");
 
     add_inspect(app, ctx);

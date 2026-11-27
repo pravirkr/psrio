@@ -15,10 +15,12 @@
 #include <ctime>
 #include <filesystem>
 #include <fmt/format.h>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <span>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace psrio::formats::sigproc {
@@ -73,17 +75,22 @@ inline void match_header(const FilterbankHeader& first,
 } // namespace stream_detail
 
 /**
- * @brief One time-ordered sequence of SIGPROC filterbank files.
+ * @brief One contiguous sequence of SIGPROC filterbank files.
  *
- * Files stay in the order given. Each file after the first must match the
- * first file's layout, and must start one sample after the previous file
- * ends. `nsamples()` is the sum. The header is the first file's header with
- * that combined length.
+ * Files are automatically sorted into chronological order by `tstart` before
+ * checking contiguity. Only headers are read at open and file descriptors are
+ * closed immediately afterward so streams over hundreds of files keep O(1)
+ * open descriptors. `nsamples()` is the sum. The header is the first file's
+ * header with that combined length.
  */
 class FilterbankStream {
 public:
+    using OpenProgressCallback =
+        std::function<void(std::size_t done, std::size_t total)>;
+
     explicit FilterbankStream(std::span<const std::filesystem::path> paths,
-                              BitOrder bit_order = BitOrder::kLsbFirst);
+                              BitOrder bit_order = BitOrder::kLsbFirst,
+                              const OpenProgressCallback& on_open = {});
 
     FilterbankStream(const FilterbankStream&)                = delete;
     FilterbankStream& operator=(const FilterbankStream&)     = delete;
@@ -93,6 +100,38 @@ public:
 
     [[nodiscard]] const FilterbankHeader& header() const noexcept {
         return m_header;
+    }
+    [[nodiscard]] std::size_t nfiles() const noexcept { return m_files.size(); }
+    [[nodiscard]] std::vector<std::filesystem::path> paths() const {
+        std::vector<std::filesystem::path> out;
+        out.reserve(m_files.size());
+        for (const auto& entry : m_files) {
+            out.push_back(entry.path);
+        }
+        return out;
+    }
+    [[nodiscard]] std::vector<std::uint64_t> file_ends() const {
+        std::vector<std::uint64_t> out;
+        out.reserve(m_files.size());
+        for (const auto& entry : m_files) {
+            out.push_back(entry.first + entry.count);
+        }
+        return out;
+    }
+    [[nodiscard]] std::uint64_t total_input_bytes() const noexcept {
+        return m_total_bytes;
+    }
+    [[nodiscard]] bool reordered() const noexcept { return m_reordered; }
+    void set_read_ahead_blocks(std::size_t blocks) noexcept {
+        for (auto& entry : m_files) {
+            entry.reader.set_read_ahead_blocks(blocks);
+        }
+    }
+    /// Ask the OS to drop consumed pages from the page cache (Linux).
+    void set_drop_cache(bool enable) noexcept {
+        for (auto& entry : m_files) {
+            entry.reader.set_drop_cache(enable);
+        }
     }
     [[nodiscard]] BitOrder bit_order() const noexcept { return m_bit_order; }
     void set_bit_order(BitOrder order) noexcept {
@@ -216,6 +255,8 @@ public:
 private:
     struct File {
         FilterbankReader reader;
+        std::filesystem::path path;
+        std::size_t input_index{0};
         std::uint64_t first{0};
         std::uint64_t count{0};
     };
@@ -231,54 +272,79 @@ private:
     std::vector<File> m_files;
     FilterbankHeader m_header{};
     std::uint64_t m_nsamples{0};
+    std::uint64_t m_total_bytes{0};
     std::uint64_t m_sample{0};
+    std::size_t m_last_index{0};
     BitOrder m_bit_order{BitOrder::kLsbFirst};
     bool m_fswap{false};
+    bool m_reordered{false};
 };
 
 inline FilterbankStream::FilterbankStream(
-    std::span<const std::filesystem::path> paths, BitOrder bit_order)
+    std::span<const std::filesystem::path> paths,
+    BitOrder bit_order,
+    const OpenProgressCallback& on_open)
     : m_bit_order(bit_order) {
     if (paths.empty()) {
         throw ValidationError("psrio: a filterbank stream needs a file");
     }
     m_files.reserve(paths.size());
-    for (const auto& path : paths) {
+    for (std::size_t index = 0; index < paths.size(); ++index) {
+        FilterbankReader reader(paths[index], bit_order);
+        if (paths.size() > 1U && (!reader.header().tstart.has_value() ||
+                                  !reader.header().tsamp.has_value())) {
+            throw FormatError(fmt::format(
+                "psrio: {} needs tstart and tsamp to continue a stream",
+                paths[index].string()));
+        }
+        reader.close_handle();
         m_files.push_back(File{
-            .reader = FilterbankReader(path, bit_order),
-            .first  = 0,
-            .count  = 0,
+            .reader      = std::move(reader),
+            .path        = paths[index],
+            .input_index = index,
+            .first       = 0,
+            .count       = 0,
         });
+        if (on_open) {
+            on_open(index + 1U, paths.size());
+        }
     }
-    m_header = m_files.front().reader.header();
-    if (paths.size() > 1U &&
-        (!m_header.tstart.has_value() || !m_header.tsamp.has_value())) {
-        throw FormatError(
-            "psrio: contiguous filterbanks need tstart and tsamp");
+    if (m_files.size() > 1U) {
+        std::ranges::stable_sort(
+            m_files, [](const File& left, const File& right) {
+                return left.reader.tstart() < right.reader.tstart();
+            });
+        for (std::size_t index = 0; index < m_files.size(); ++index) {
+            if (m_files[index].input_index != index) {
+                m_reordered = true;
+                break;
+            }
+        }
     }
+    m_header             = m_files.front().reader.header();
     std::uint64_t cursor = 0;
     for (std::size_t index = 0; index < m_files.size(); ++index) {
         auto& file = m_files[index];
         file.first = cursor;
         file.count = file.reader.nsamples();
-        if (paths.size() > 1U && file.count == 0U) {
+        m_total_bytes += file.reader.file_size();
+        if (m_files.size() > 1U && file.count == 0U) {
             throw FormatError(
                 fmt::format("psrio: {} has no samples to continue a stream",
-                            paths[index].string()));
+                            file.path.string()));
         }
         if (index > 0U) {
+            const auto& prev   = m_files[index - 1U];
             const auto& header = file.reader.header();
-            stream_detail::match_header(m_header, header,
-                                        paths[index].string());
-            if (!header.tstart.has_value() || !header.tsamp.has_value()) {
+            if (prev.reader.tstart() == file.reader.tstart()) {
                 throw FormatError(fmt::format(
-                    "psrio: {} needs tstart and tsamp to continue a stream",
-                    paths[index].string()));
+                    "psrio: {} has the same start time as {} (duplicate file?)",
+                    file.path.string(), prev.path.string()));
             }
+            stream_detail::match_header(m_header, header, file.path.string());
             ::psrio::detail::require_sample_gap(
-                m_files[index - 1U].reader.tstart(), m_files[index - 1U].count,
-                m_files[index - 1U].reader.tsamp(), *header.tstart,
-                paths[index].string());
+                prev.reader.tstart(), prev.count, prev.reader.tsamp(),
+                file.reader.tstart(), file.path.string());
         }
         cursor += file.count;
     }
@@ -297,13 +363,25 @@ inline void FilterbankStream::seek(std::uint64_t sample) {
 }
 
 inline std::size_t FilterbankStream::index_at(std::uint64_t sample) const {
-    for (std::size_t index = 0; index < m_files.size(); ++index) {
-        const auto& file = m_files[index];
-        if (sample < file.first + file.count) {
-            return index;
+    if (m_last_index < m_files.size()) {
+        const auto& cached = m_files[m_last_index];
+        if (sample >= cached.first && sample < cached.first + cached.count) {
+            return m_last_index;
+        }
+        if (m_last_index + 1U < m_files.size()) {
+            const auto& next = m_files[m_last_index + 1U];
+            if (sample >= next.first && sample < next.first + next.count) {
+                return m_last_index + 1U;
+            }
         }
     }
-    return m_files.size() - 1U;
+    const auto it = std::ranges::upper_bound(
+        m_files, sample, std::less<>{},
+        [](const File& entry) { return entry.first + entry.count; });
+    if (it == m_files.end()) {
+        return m_files.size() - 1U;
+    }
+    return static_cast<std::size_t>(it - m_files.begin());
 }
 
 template <typename T, typename Read>
@@ -329,7 +407,9 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
     const auto to_read = std::min(count, m_nsamples - m_sample);
     std::uint64_t done = 0;
     while (done < to_read) {
-        auto& file       = m_files[index_at(m_sample + done)];
+        const auto idx   = index_at(m_sample + done);
+        m_last_index     = idx;
+        auto& file       = m_files[idx];
         const auto local = (m_sample + done) - file.first;
         const auto room  = file.count - local;
         const auto take  = std::min(room, to_read - done);
@@ -342,8 +422,12 @@ inline std::uint64_t FilterbankStream::read_across(std::uint64_t count,
             break;
         }
         if (local + got == file.count) {
-            // The stream has moved past this file: stop its read-ahead.
-            file.reader.release_buffers();
+            // The stream has moved past this file: close its FD and stop
+            // read-ahead.
+            file.reader.close_handle();
+            if (idx + 1U < m_files.size()) {
+                m_files[idx + 1U].reader.prefetch_start();
+            }
         }
         done += got;
     }

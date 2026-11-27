@@ -10,6 +10,7 @@
 #include <fmt/format.h>
 #include <memory>
 #include <psrio/detail/exceptions.hpp>
+#include <psrio/formats/psrfits/reader.hpp>
 #include <span>
 #include <utility>
 #include <vector>
@@ -65,7 +66,8 @@ void run_splice(const SpliceOptions& opts, const Context& ctx) {
     for (const auto& path : opts.inputs) {
         require_distinct(path, opts.output);
         Band band;
-        band.input = std::make_unique<Input>(path);
+        band.input = std::make_unique<Input>(
+            path, formats::psrfits::DecodeOptions{}, 0, ctx.drop_cache);
         (void)band.input->block();
         const auto& header = band.input->header();
         band.freqs         = channel_frequencies(header);
@@ -107,7 +109,7 @@ void run_splice(const SpliceOptions& opts, const Context& ctx) {
         ctx.info("psrio splice: the bands are not contiguous; writing a "
                  "frequency table");
     }
-    Output output(opts.output, header);
+    Output output(opts.output, header, ctx.drop_cache);
     auto& writer = output.sigproc_writer();
 
     const auto nifs     = static_cast<std::size_t>(header.nifs);

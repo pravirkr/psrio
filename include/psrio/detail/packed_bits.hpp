@@ -3,6 +3,7 @@
 #include "psrio/common/types.hpp"
 #include "psrio/detail/endian.hpp"
 #include "psrio/detail/exceptions.hpp"
+#include "psrio/detail/parallel.hpp"
 
 #include <algorithm>
 #include <array>
@@ -196,69 +197,68 @@ inline void pack_sub_byte(std::span<const std::uint8_t> unpacked,
     unpack_detail::require_count(unpacked.size(),
                                  packed.size() * samples_per_byte);
 
+    const auto nbytes = packed.size();
+    const auto* in    = unpacked.data();
+    auto* out         = packed.data();
+    const bool msb    = order == BitOrder::kMsbFirst;
+    [[maybe_unused]] const bool wide =
+        ::psrio::detail::parallel_worthwhile(unpacked.size());
+
     if (nbits == 1) {
-        for (std::size_t index = 0; index < packed.size(); ++index) {
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nbytes, in, out, msb))
+        for (std::size_t index = 0; index < nbytes; ++index) {
             const auto pos = index * 8U;
             std::uint8_t byte_val{0};
-            if (order == BitOrder::kMsbFirst) {
-                byte_val =
-                    static_cast<std::uint8_t>(((unpacked[pos + 0] & 1U) << 7U) |
-                                              ((unpacked[pos + 1] & 1U) << 6U) |
-                                              ((unpacked[pos + 2] & 1U) << 5U) |
-                                              ((unpacked[pos + 3] & 1U) << 4U) |
-                                              ((unpacked[pos + 4] & 1U) << 3U) |
-                                              ((unpacked[pos + 5] & 1U) << 2U) |
-                                              ((unpacked[pos + 6] & 1U) << 1U) |
-                                              (unpacked[pos + 7] & 1U));
+            if (msb) {
+                byte_val = static_cast<std::uint8_t>(
+                    ((in[pos + 0] & 1U) << 7U) | ((in[pos + 1] & 1U) << 6U) |
+                    ((in[pos + 2] & 1U) << 5U) | ((in[pos + 3] & 1U) << 4U) |
+                    ((in[pos + 4] & 1U) << 3U) | ((in[pos + 5] & 1U) << 2U) |
+                    ((in[pos + 6] & 1U) << 1U) | (in[pos + 7] & 1U));
             } else {
-                byte_val =
-                    static_cast<std::uint8_t>((unpacked[pos + 0] & 1U) |
-                                              ((unpacked[pos + 1] & 1U) << 1U) |
-                                              ((unpacked[pos + 2] & 1U) << 2U) |
-                                              ((unpacked[pos + 3] & 1U) << 3U) |
-                                              ((unpacked[pos + 4] & 1U) << 4U) |
-                                              ((unpacked[pos + 5] & 1U) << 5U) |
-                                              ((unpacked[pos + 6] & 1U) << 6U) |
-                                              ((unpacked[pos + 7] & 1U) << 7U));
+                byte_val = static_cast<std::uint8_t>(
+                    (in[pos + 0] & 1U) | ((in[pos + 1] & 1U) << 1U) |
+                    ((in[pos + 2] & 1U) << 2U) | ((in[pos + 3] & 1U) << 3U) |
+                    ((in[pos + 4] & 1U) << 4U) | ((in[pos + 5] & 1U) << 5U) |
+                    ((in[pos + 6] & 1U) << 6U) | ((in[pos + 7] & 1U) << 7U));
             }
-            packed[index] = std::byte{byte_val};
+            out[index] = std::byte{byte_val};
         }
         return;
     }
     if (nbits == 2) {
-        for (std::size_t index = 0; index < packed.size(); ++index) {
+        PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                      shared(nbytes, in, out, msb))
+        for (std::size_t index = 0; index < nbytes; ++index) {
             const auto pos = index * 4U;
             std::uint8_t byte_val{0};
-            if (order == BitOrder::kMsbFirst) {
-                byte_val =
-                    static_cast<std::uint8_t>(((unpacked[pos + 0] & 3U) << 6U) |
-                                              ((unpacked[pos + 1] & 3U) << 4U) |
-                                              ((unpacked[pos + 2] & 3U) << 2U) |
-                                              (unpacked[pos + 3] & 3U));
+            if (msb) {
+                byte_val = static_cast<std::uint8_t>(
+                    ((in[pos + 0] & 3U) << 6U) | ((in[pos + 1] & 3U) << 4U) |
+                    ((in[pos + 2] & 3U) << 2U) | (in[pos + 3] & 3U));
             } else {
-                byte_val =
-                    static_cast<std::uint8_t>((unpacked[pos + 0] & 3U) |
-                                              ((unpacked[pos + 1] & 3U) << 2U) |
-                                              ((unpacked[pos + 2] & 3U) << 4U) |
-                                              ((unpacked[pos + 3] & 3U) << 6U));
+                byte_val = static_cast<std::uint8_t>(
+                    (in[pos + 0] & 3U) | ((in[pos + 1] & 3U) << 2U) |
+                    ((in[pos + 2] & 3U) << 4U) | ((in[pos + 3] & 3U) << 6U));
             }
-            packed[index] = std::byte{byte_val};
+            out[index] = std::byte{byte_val};
         }
         return;
     }
-    for (std::size_t index = 0; index < packed.size(); ++index) {
+    PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                  shared(nbytes, in, out, msb))
+    for (std::size_t index = 0; index < nbytes; ++index) {
         const auto pos = index * 2U;
         std::uint8_t byte_val{0};
-        if (order == BitOrder::kMsbFirst) {
-            byte_val =
-                static_cast<std::uint8_t>(((unpacked[pos + 0] & 0x0FU) << 4U) |
-                                          (unpacked[pos + 1] & 0x0FU));
+        if (msb) {
+            byte_val = static_cast<std::uint8_t>(((in[pos + 0] & 0x0FU) << 4U) |
+                                                 (in[pos + 1] & 0x0FU));
         } else {
-            byte_val =
-                static_cast<std::uint8_t>((unpacked[pos + 0] & 0x0FU) |
-                                          ((unpacked[pos + 1] & 0x0FU) << 4U));
+            byte_val = static_cast<std::uint8_t>((in[pos + 0] & 0x0FU) |
+                                                 ((in[pos + 1] & 0x0FU) << 4U));
         }
-        packed[index] = std::byte{byte_val};
+        out[index] = std::byte{byte_val};
     }
 }
 

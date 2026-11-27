@@ -54,7 +54,7 @@ std::ofstream open_csv(const std::filesystem::path& path) {
 }
 
 void run_stats(const StatsOptions& opts, const Context& ctx) {
-    Input input(opts.inputs);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
     const auto result = read_stats(input, opts, stats::Moments::kFull);
     const auto freqs  = channel_frequencies(input.header());
     const auto mean   = result.mean();
@@ -89,7 +89,7 @@ void run_bandpass(const StatsOptions& opts, const Context& ctx) {
         throw ValidationError(fmt::format(
             "psrio: bandpass method must be mean or sum, got {}", opts.method));
     }
-    Input input(opts.inputs);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
     const auto result = read_stats(input, opts, stats::Moments::kMean);
     const auto freqs  = channel_frequencies(input.header());
     const auto values =

@@ -850,3 +850,82 @@ TEST_CASE("psrio joins contiguous filterbanks in time", "[cli][stream]") {
               {"inspect", first.string(), gapped.string(), "-k", "nsamples"})
               .code == 1);
 }
+
+TEST_CASE("psrio digifil supports globs, file lists, verbose progress, and "
+          "atomic output",
+          "[cli][digifil]") {
+    const TempDir dir;
+    const auto header = [](double tstart) {
+        psrio::formats::sigproc::FilterbankHeader out;
+        out.nchans      = 4;
+        out.nifs        = 1;
+        out.nbits       = 8;
+        out.tsamp       = 0.001;
+        out.tstart      = tstart;
+        out.fch1        = 1400.0;
+        out.foff        = -1.0;
+        out.source_name = "globtest";
+        return out;
+    };
+    const auto write_chunk = [&](const fs::path& path, double tstart,
+                                 std::uint8_t base) {
+        psrio::formats::sigproc::FilterbankWriter writer(path, header(tstart));
+        std::vector<std::byte> bytes(std::size_t{40} * std::size_t{4});
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            bytes[i] = static_cast<std::byte>(
+                static_cast<std::uint8_t>((base + i) % 251U));
+        }
+        writer.write_block(40U, bytes);
+        writer.close();
+    };
+    // Unpadded numbering (_1, _2, _10) so glob order != chronological order.
+    write_chunk(dir.path() / "obs_1.fil", 50000.0, 10);
+    write_chunk(dir.path() / "obs_2.fil", 50000.0 + (0.04 / 86400.0), 50);
+    write_chunk(dir.path() / "obs_10.fil", 50000.0 + (0.08 / 86400.0), 90);
+
+    const auto glob_out = dir / "from_glob.fil";
+    const auto res_glob = psrio_run(
+        {"-v", "digifil", (dir.path() / "obs_*.fil").string(), "-o", glob_out,
+         "-I", "0", "--progress", "log", "--io-buffer-mb", "32"});
+    require_ok(res_glob);
+    CHECK(res_glob.err.find("sorted chronologically") != std::string::npos);
+    CHECK(res_glob.err.find("100.0%") != std::string::npos);
+    CHECK_FALSE(fs::exists(fs::path(glob_out + ".psrio.part")));
+    const FilterbankReader got_glob(glob_out);
+    CHECK(got_glob.nsamples() == 120U);
+
+    // --file-list with comments and blank lines produces byte-identical output.
+    const auto list_path = dir.path() / "files.txt";
+    {
+        std::ofstream out(list_path);
+        out << "# comment line\n\n";
+        out << (dir.path() / "obs_10.fil").string() << '\n';
+        out << (dir.path() / "obs_1.fil").string() << '\n';
+        out << (dir.path() / "obs_2.fil").string() << '\n';
+    }
+    const auto list_out = dir / "from_list.fil";
+    require_ok(psrio_run({"digifil", "--file-list", list_path.string(), "-o",
+                          list_out, "-I", "0", "--progress", "none"}));
+    CHECK(read_payload(glob_out) == read_payload(list_out));
+
+    // @filelist syntax also works.
+    const auto at_out = dir / "from_at.fil";
+    require_ok(psrio_run({"digifil", "@" + list_path.string(), "-o", at_out,
+                          "-I", "0", "--progress", "none"}));
+    CHECK(read_payload(glob_out) == read_payload(at_out));
+
+    // --drop-cache works both as a global option and after the subcommand.
+    const auto drop_out = dir / "from_drop.fil";
+    const auto res_drop =
+        psrio_run({"-v", "digifil", (dir.path() / "obs_*.fil").string(), "-o",
+                   drop_out, "-I", "0", "--progress", "none", "--drop-cache"});
+    require_ok(res_drop);
+    CHECK(res_drop.err.find("drop_cache=true") != std::string::npos);
+    CHECK(read_payload(glob_out) == read_payload(drop_out));
+
+    // Non-matching glob fails with a clear message.
+    const auto bad_glob = psrio_run(
+        {"digifil", (dir.path() / "nope_*.sf").string(), "-o", dir / "x.fil"});
+    CHECK(bad_glob.code != 0);
+    CHECK(bad_glob.err.find("matched no files") != std::string::npos);
+}

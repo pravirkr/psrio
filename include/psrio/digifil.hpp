@@ -23,7 +23,7 @@
 #include <ctime>
 #include <filesystem>
 #include <fmt/format.h>
-#include <future>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -91,6 +91,10 @@ struct Config {
     float scale_fac{1.0F};
     /// Keep only this input IF, or all IFs when negative (-P).
     int poln_select{-1};
+    /// Sum the first two input IFs into one Stokes I output when poln_select
+    /// is negative and the input has at least two IFs (dspsr `-d 1` on
+    /// multi-IF filterbanks; PSRFITS already reduces polarisations on decode).
+    bool pscrunch{false};
     /// Input samples per block. Rescaling statistics depend on the block
     /// boundaries during the first interval. Defaults to dspsr's block for
     /// max_ram_mb (default_gulp()).
@@ -101,6 +105,8 @@ struct Config {
     /// (dspsr `--scloffs`). Used by decode_options() when the caller opens
     /// the file; the pipeline itself does not read it.
     bool scloffs{false};
+    /// Ask the OS to evict written output pages from the page cache (Linux).
+    bool drop_cache{false};
 
     [[nodiscard]] double max_ram_bytes() const noexcept {
         return max_ram_mb * 1024.0 * 1024.0;
@@ -316,6 +322,9 @@ private:
                     const float* values = data + (row * ncols);
                     for (std::size_t col = first; col < last; ++col) {
                         const auto value = static_cast<double>(values[col]);
+                        if (!std::isfinite(value)) {
+                            continue;
+                        }
                         if (clip &&
                             (value < lower[col] || value > upper[col])) {
                             continue;
@@ -355,9 +364,12 @@ private:
             const double mean     = m_sums[col] * recip;
             const double variance = (m_sumsq[col] * recip) - (mean * mean);
             m_offset[col]         = static_cast<float>(-mean);
-            m_scale[col] = variance > 0.0
-                               ? static_cast<float>(1.0 / std::sqrt(variance))
-                               : 1.0F;
+            if (variance > 0.0) {
+                const auto inv = static_cast<float>(1.0 / std::sqrt(variance));
+                m_scale[col]   = std::isfinite(inv) ? inv : 1.0F;
+            } else {
+                m_scale[col] = 1.0F;
+            }
         }
     }
 
@@ -371,7 +383,12 @@ private:
             const double variance = (m_sumsq[col] * recip) - (mean * mean);
             const double sigma    = variance > 0.0 ? std::sqrt(variance) : 0.0;
             m_offset[col]         = static_cast<float>(-mean);
-            m_scale[col] = sigma > 0.0 ? static_cast<float>(1.0 / sigma) : 1.0F;
+            if (sigma > 0.0) {
+                const auto inv = static_cast<float>(1.0 / sigma);
+                m_scale[col]   = std::isfinite(inv) ? inv : 1.0F;
+            } else {
+                m_scale[col] = 1.0F;
+            }
             // A constant channel has no spread to clip against.
             const double half = sigma > 0.0
                                     ? m_clip * sigma
@@ -452,7 +469,8 @@ inline void quantise_row(const float* src,
                          float digi_max,
                          Out* out) noexcept {
     const auto level = [=](float value) {
-        const float shifted = (value * scale) + mean;
+        const float scaled  = value * scale;
+        const float shifted = scaled + mean;
         const float above   = shifted >= 0.0F ? shifted : 0.0F;
         const float clamped = above > digi_max ? digi_max : above;
         return static_cast<Out>(
@@ -511,9 +529,11 @@ public:
                 fmt::format("psrio: IF {} is out of range for {}-IF input",
                             config.poln_select, input.nifs));
         }
-        m_ffac     = ffac;
-        m_tfac     = std::max<std::uint64_t>(config.tscrunch, 1U);
-        m_nifs_out = config.poln_select >= 0 ? 1U : input.nifs;
+        m_ffac = ffac;
+        m_tfac = std::max<std::uint64_t>(config.tscrunch, 1U);
+        m_pscrunch =
+            config.pscrunch && config.poln_select < 0 && input.nifs >= 2U;
+        m_nifs_out = (config.poln_select >= 0 || m_pscrunch) ? 1U : input.nifs;
         m_nchans   = input.nchans / ffac;
         m_flip     = input.foff > 0.0;
         m_is_float = config.nbits == -32;
@@ -581,7 +601,8 @@ public:
     /// Float buffers dspsr allocates for this configuration, for
     /// block_samples().
     [[nodiscard]] int float_copies() const noexcept {
-        return 1 + (m_ffac > 1U ? 1 : 0) + (m_tfac > 1U ? 1 : 0);
+        return 1 + (m_ffac > 1U ? 1 : 0) + (m_tfac > 1U ? 1 : 0) +
+               (m_pscrunch ? 1 : 0);
     }
 
     /// Process @p nsamp input samples from @p block, which is modified.
@@ -595,6 +616,7 @@ public:
                 "psrio: digifil block is smaller than its sample count");
         }
         auto data = block.first(static_cast<std::size_t>(nsamp * row_in));
+        std::uint64_t active_ifs = m_in.nifs;
         if (m_config.poln_select >= 0) {
             const auto pol   = static_cast<std::size_t>(m_config.poln_select);
             const auto width = static_cast<std::size_t>(m_in.nchans);
@@ -603,9 +625,38 @@ public:
                              data.data() + ((s * row_in) + (pol * width)),
                              width * sizeof(float));
             }
-            data = data.first(static_cast<std::size_t>(nsamp) * width);
+            data       = data.first(static_cast<std::size_t>(nsamp) * width);
+            active_ifs = 1U;
         }
-        data = fscrunch_inplace(data, nsamp * m_nifs_out, m_in.nchans, m_ffac);
+        if (m_ffac > 1U) {
+            const auto nrows = nsamp * active_ifs;
+            m_fscrunch_buf.resize(static_cast<std::size_t>(nrows * m_nchans));
+            data =
+                fscrunch_into(data, m_fscrunch_buf, nrows, m_in.nchans, m_ffac);
+        }
+
+        if (m_pscrunch) {
+            const auto nchans = static_cast<std::size_t>(m_nchans);
+            const auto stride = static_cast<std::size_t>(active_ifs * m_nchans);
+            const auto rows   = static_cast<std::size_t>(nsamp);
+            m_pscrunch_buf.resize(rows * nchans);
+            const float* in = data.data();
+            float* out      = m_pscrunch_buf.data();
+            [[maybe_unused]] const bool wide =
+                ::psrio::detail::parallel_worthwhile(rows * nchans);
+            PSRIO_OMP(omp parallel for default(none) schedule(static) if (wide)
+                          shared(rows, stride, nchans, in, out))
+            for (std::size_t s = 0; s < rows; ++s) {
+                const float* p0 = in + (s * stride);
+                const float* p1 = p0 + nchans;
+                float* dst      = out + (s * nchans);
+                PSRIO_OMP(omp simd)
+                for (std::size_t c = 0; c < nchans; ++c) {
+                    dst[c] = p0[c] + p1[c];
+                }
+            }
+            data = m_pscrunch_buf;
+        }
 
         const auto row_out = static_cast<std::size_t>(m_nifs_out * m_nchans);
         const auto work    = m_tscrunch.push(data, nsamp);
@@ -699,6 +750,7 @@ private:
     std::uint64_t m_nifs_out{1};
     std::uint64_t m_nchans{0};
     bool m_flip{false};
+    bool m_pscrunch{false};
     bool m_is_float{false};
     int m_nbits{8};
     float m_scale_in{1.0F};
@@ -707,6 +759,8 @@ private:
     std::vector<float> m_pol_mean;
     std::optional<Rescaler> m_rescaler;
     TimeScruncher m_tscrunch{1, 1};
+    std::vector<float> m_fscrunch_buf;
+    std::vector<float> m_pscrunch_buf;
     std::vector<std::uint8_t> m_levels;
     std::vector<std::byte> m_bytes;
 };
@@ -815,12 +869,11 @@ public:
         init(header, start, nsamps);
     }
 
-    Source(const Source&)            = delete;
-    Source& operator=(const Source&) = delete;
-    Source(Source&&) noexcept        = default;
-    // A read may be in flight into this object's buffers.
-    Source& operator=(Source&&) = delete;
-    ~Source() { wait(); }
+    Source(const Source&)                = delete;
+    Source& operator=(const Source&)     = delete;
+    Source(Source&&) noexcept            = default;
+    Source& operator=(Source&&) noexcept = default;
+    ~Source()                            = default;
 
     /// SIGPROC header of the output stream.
     [[nodiscard]] const formats::sigproc::FilterbankHeader&
@@ -896,7 +949,6 @@ public:
         if (sample > m_nsamples) {
             throw ValidationError("psrio: seek is past the readable samples");
         }
-        wait();
         const auto tfac = m_pipeline->tscrunch();
         const auto skip = sample * tfac;
         restart(m_start + skip, m_count - skip);
@@ -1085,47 +1137,29 @@ private:
 
     /// Start reading @p count input samples at @p start with a new pipeline.
     void restart(std::uint64_t start, std::uint64_t count) {
-        wait();
-        if (m_consumed != 0U || m_requested != 0U) {
+        if (m_consumed != 0U) {
             m_pipeline = std::make_unique<Pipeline>(m_config, layout());
         }
-        m_consumed  = 0;
-        m_requested = 0;
+        m_consumed = 0;
         m_ready.clear();
         m_ready_at = 0;
         m_input->seek(start);
         m_count_left = count;
-        launch();
     }
 
-    /// Read the next input block on another thread.
-    void launch() {
-        const auto row  = m_input->nifs() * m_input->nchans();
-        const auto want = std::min(m_gulp, m_count_left - m_requested);
-        if (want == 0U) {
-            return;
-        }
-        m_next.resize(static_cast<std::size_t>(want * row));
-        m_requested += want;
-        m_pending =
-            std::async(std::launch::async, [input = m_input, want,
-                                            block = std::span<float>(m_next)] {
-                return input->read_samples(want, block);
-            });
-    }
-
-    /// Wait for the block in flight, start the one after, and return how
-    /// many samples m_current now holds.
+    /// Read the next input block into m_current. Underlying readers stream
+    /// file bytes ahead asynchronously via ReadAhead, so decoding on the main
+    /// thread keeps one OpenMP team active with zero core oversubscription.
     std::uint64_t take_block() {
-        if (!m_pending.valid()) {
-            return 0;
+        const auto want = std::min(m_gulp, m_count_left - m_consumed);
+        if (want == 0U) {
+            return 0U;
         }
-        const auto got = m_pending.get();
-        std::swap(m_current, m_next);
+        const auto row = m_input->nifs() * m_input->nchans();
+        m_current.resize(static_cast<std::size_t>(want * row));
+        const auto got =
+            m_input->read_samples(want, std::span<float>(m_current));
         m_consumed += got;
-        if (got > 0U) {
-            launch();
-        }
         return got;
     }
 
@@ -1152,12 +1186,6 @@ private:
         }
     }
 
-    void wait() noexcept {
-        if (m_pending.valid()) {
-            m_pending.wait();
-        }
-    }
-
     std::unique_ptr<BlockSource> m_owned;
     BlockSource* m_input{nullptr};
     Config m_config;
@@ -1168,17 +1196,13 @@ private:
     std::uint64_t m_count_left{0};
     std::uint64_t m_gulp{0};
     std::uint64_t m_consumed{0};
-    std::uint64_t m_requested{0};
     std::uint64_t m_sample{0};
     std::uint64_t m_nsamples{0};
     bool m_fswap{false};
     std::vector<std::byte> m_ready;
     std::size_t m_ready_at{0};
     std::vector<float> m_current;
-    std::vector<float> m_next;
     std::vector<std::byte> m_unpacked;
-    // Last, so it is destroyed (and joined) before the buffers it fills.
-    std::future<std::uint64_t> m_pending;
 };
 
 /// Counts reported by run().
@@ -1187,6 +1211,16 @@ struct Summary {
     std::uint64_t nsamples_out{0};
     std::uint64_t gulp{0};
 };
+
+/// Live progress snapshot reported after each output block by run().
+struct Progress {
+    std::uint64_t samples_in_done{0};
+    std::uint64_t samples_in_total{0};
+    std::uint64_t samples_out_done{0};
+    std::uint64_t bytes_written{0};
+};
+
+using ProgressCallback = std::function<void(const Progress&)>;
 
 /// Stream samples [start, start + nsamps) of @p source through digifil into
 /// a new SIGPROC file at @p output.
@@ -1202,15 +1236,27 @@ inline Summary run(BlockSource& source,
                    const std::filesystem::path& output,
                    const Config& config,
                    std::uint64_t start                 = 0,
-                   std::optional<std::uint64_t> nsamps = std::nullopt) {
+                   std::optional<std::uint64_t> nsamps = std::nullopt,
+                   const ProgressCallback& on_progress = {}) {
     Source stream(source, header, config, start, nsamps);
+    const auto total_in = nsamps.value_or(source.nsamples() - start);
     formats::sigproc::FilterbankWriter writer(output, stream.header());
+    writer.set_drop_cache(config.drop_cache);
+    writer.set_async(true);
     while (true) {
         const auto bytes = stream.next();
         if (bytes.empty()) {
             break;
         }
         writer.write_bytes(bytes);
+        if (on_progress) {
+            on_progress(Progress{
+                .samples_in_done  = stream.input_samples_read(),
+                .samples_in_total = total_in,
+                .samples_out_done = writer.nsamples_written(),
+                .bytes_written    = writer.header().file_bytes,
+            });
+        }
     }
     writer.close();
     return Summary{

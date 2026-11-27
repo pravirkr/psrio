@@ -1,6 +1,7 @@
 #include "common.hpp"
 
 #include <CLI/CLI.hpp>
+#include <psrio/common/types.hpp>
 #include <psrio/detail/exceptions.hpp>
 #include <psrio/formats/psrfits.hpp>
 #include <psrio/formats/sigproc/header.hpp>
@@ -22,6 +23,9 @@
 #include <cstdint>
 #include <filesystem>
 #include <fmt/format.h>
+#include <fstream>
+#include <functional>
+#include <glob.h>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -86,12 +90,15 @@ sigproc::FilterbankHeader from_fbh5(const formats::fbh5::FilterbankHeader& in) {
 
 std::variant<sigproc::FilterbankWriter, TimeSeriesWriter>
 make_writer(const std::filesystem::path& path,
-            sigproc::FilterbankHeader header) {
+            sigproc::FilterbankHeader header,
+            bool drop_cache) {
     if (!is_series_path(path)) {
         if (header.data_type == 2) {
             header.data_type = 1;
         }
-        return sigproc::FilterbankWriter(path, std::move(header));
+        sigproc::FilterbankWriter writer(path, std::move(header));
+        writer.set_drop_cache(drop_cache);
+        return writer;
     }
     if (header.nchans != 1 || header.nifs != 1) {
         throw ValidationError(fmt::format(
@@ -121,11 +128,20 @@ bool is_tim_path(const std::filesystem::path& path) {
 }
 
 Input::Input(const std::filesystem::path& path,
-             const formats::psrfits::DecodeOptions& decode)
-    : m_path(path) {
+             const formats::psrfits::DecodeOptions& decode,
+             std::size_t read_ahead_blocks,
+             bool drop_cache)
+    : m_path(path),
+      m_paths{path} {
+    std::error_code size_ec;
+    m_total_input_bytes = std::filesystem::file_size(path, size_ec);
+    if (size_ec) {
+        m_total_input_bytes = 0U;
+    }
     if (is_tim_path(path)) {
         m_series.emplace(path);
-        m_header = *m_series->sigproc_header();
+        m_header    = *m_series->sigproc_header();
+        m_file_ends = {m_series->nsamples()};
         return;
     }
     if (is_presto_path(path)) {
@@ -135,17 +151,24 @@ Input::Input(const std::filesystem::path& path,
         m_header.nchans    = 1;
         m_header.nifs      = 1;
         m_header.nbits     = 32;
+        m_file_ends        = {m_series->nsamples()};
         return;
     }
     if (formats::psrfits::is_search_path(path)) {
         formats::psrfits::SearchFile file(path, decode);
-        m_header         = file.sigproc_header();
-        m_psrfits        = true;
-        m_stored_nbits   = file.input_nbits();
-        m_stored_npol    = file.input_npol();
-        m_subint_samples = file.subint_samples();
-        m_sum_feeds      = file.sums_polarisations();
-        m_info           = PsrfitsInfo{
+        if (read_ahead_blocks > 0U) {
+            file.set_read_ahead_blocks(read_ahead_blocks);
+        }
+        file.set_drop_cache(drop_cache);
+        m_header            = file.sigproc_header();
+        m_psrfits           = true;
+        m_stored_nbits      = file.input_nbits();
+        m_stored_npol       = file.input_npol();
+        m_subint_samples    = file.subint_samples();
+        m_sum_feeds         = file.sums_polarisations();
+        m_total_input_bytes = file.file_size();
+        m_file_ends         = {file.nsamples()};
+        m_info              = PsrfitsInfo{
             .frontend = std::string(file.frontend()),
             .backend  = std::string(file.backend()),
             .obs_mode = std::string(file.obs_mode()),
@@ -159,7 +182,8 @@ Input::Input(const std::filesystem::path& path,
 #ifdef PSRIO_CLI_HAS_HDF5
     if (formats::fbh5::is_hdf5_filterbank(path)) {
         formats::fbh5::FilterbankFile file(path);
-        m_header = from_fbh5(file.header());
+        m_header    = from_fbh5(file.header());
+        m_file_ends = {file.nsamples()};
         m_block.emplace(std::move(file));
         return;
     }
@@ -172,17 +196,26 @@ Input::Input(const std::filesystem::path& path,
     }
 #endif
     sigproc::FilterbankReader reader(path);
-    m_header = reader.header();
+    if (read_ahead_blocks > 0U) {
+        reader.set_read_ahead_blocks(read_ahead_blocks);
+    }
+    reader.set_drop_cache(drop_cache);
+    m_header            = reader.header();
+    m_total_input_bytes = reader.file_size();
+    m_file_ends         = {reader.nsamples()};
     m_block.emplace(std::move(reader));
 }
 
 Input::Input(std::span<const std::filesystem::path> paths,
-             const formats::psrfits::DecodeOptions& decode) {
+             const formats::psrfits::DecodeOptions& decode,
+             OpenProgressCallback on_open,
+             std::size_t read_ahead_blocks,
+             bool drop_cache) {
     if (paths.empty()) {
         throw ValidationError("psrio: an input file is required");
     }
     if (paths.size() == 1U) {
-        *this = Input(paths.front(), decode);
+        *this = Input(paths.front(), decode, read_ahead_blocks, drop_cache);
         return;
     }
     const bool search = formats::psrfits::is_search_path(paths.front());
@@ -209,17 +242,26 @@ Input::Input(std::span<const std::filesystem::path> paths,
         }
 #endif
     }
-    m_path = paths.front();
     if (search) {
-        formats::psrfits::SearchStream stream(paths, decode);
-        m_header          = stream.sigproc_header();
-        m_psrfits         = true;
-        m_stored_nbits    = stream.input_nbits();
-        m_stored_npol     = stream.input_npol();
-        m_subint_samples  = stream.subint_samples();
-        m_sum_feeds       = stream.sums_polarisations();
-        const auto& first = stream.file(0);
-        m_info            = PsrfitsInfo{
+        formats::psrfits::SearchStream stream(paths, decode,
+                                              std::move(on_open));
+        if (read_ahead_blocks > 0U) {
+            stream.set_read_ahead_blocks(read_ahead_blocks);
+        }
+        stream.set_drop_cache(drop_cache);
+        m_paths             = stream.paths();
+        m_path              = m_paths.front();
+        m_file_ends         = stream.file_ends();
+        m_total_input_bytes = stream.total_input_bytes();
+        m_reordered         = stream.reordered();
+        m_header            = stream.sigproc_header();
+        m_psrfits           = true;
+        m_stored_nbits      = stream.input_nbits();
+        m_stored_npol       = stream.input_npol();
+        m_subint_samples    = stream.subint_samples();
+        m_sum_feeds         = stream.sums_polarisations();
+        const auto& first   = stream.file(0);
+        m_info              = PsrfitsInfo{
             .frontend = std::string(first.frontend()),
             .backend  = std::string(first.backend()),
             .obs_mode = std::string(first.obs_mode()),
@@ -234,9 +276,29 @@ Input::Input(std::span<const std::filesystem::path> paths,
         m_block.emplace(std::move(stream));
         return;
     }
-    sigproc::FilterbankStream stream(paths);
-    m_header = stream.header();
+    sigproc::FilterbankStream stream(paths, BitOrder::kLsbFirst, on_open);
+    if (read_ahead_blocks > 0U) {
+        stream.set_read_ahead_blocks(read_ahead_blocks);
+    }
+    stream.set_drop_cache(drop_cache);
+    m_paths             = stream.paths();
+    m_path              = m_paths.front();
+    m_file_ends         = stream.file_ends();
+    m_total_input_bytes = stream.total_input_bytes();
+    m_reordered         = stream.reordered();
+    m_header            = stream.header();
     m_block.emplace(std::move(stream));
+}
+
+std::size_t Input::file_index_at(std::uint64_t sample) const {
+    if (m_file_ends.empty()) {
+        return 0U;
+    }
+    const auto it = std::ranges::upper_bound(m_file_ends, sample);
+    if (it == m_file_ends.end()) {
+        return m_file_ends.size() - 1U;
+    }
+    return static_cast<std::size_t>(it - m_file_ends.begin());
 }
 
 std::uint64_t Input::nsamples() const {
@@ -300,8 +362,9 @@ std::uint64_t Input::read_floats(std::uint64_t count, std::span<float> dest) {
 }
 
 Output::Output(const std::filesystem::path& path,
-               sigproc::FilterbankHeader header)
-    : m_writer(make_writer(path, std::move(header))) {}
+               sigproc::FilterbankHeader header,
+               bool drop_cache)
+    : m_writer(make_writer(path, std::move(header), drop_cache)) {}
 
 sigproc::FilterbankWriter& Output::sigproc_writer() {
     auto* writer = std::get_if<sigproc::FilterbankWriter>(&m_writer);
@@ -333,6 +396,121 @@ std::filesystem::path Output::path() const {
 
 void Output::close() {
     std::visit([](auto& writer) { writer.close(); }, m_writer);
+}
+
+namespace {
+
+[[nodiscard]] bool has_glob_meta(std::string_view text) noexcept {
+    return text.find_first_of("*?[") != std::string_view::npos;
+}
+
+void expand_one_spec(std::string_view spec,
+                     std::vector<std::filesystem::path>& out);
+
+void read_file_list(const std::filesystem::path& list_path,
+                    std::vector<std::filesystem::path>& out) {
+    if (!std::filesystem::is_regular_file(list_path)) {
+        throw ValidationError(fmt::format(
+            "psrio: file list '{}' does not exist", list_path.string()));
+    }
+    std::ifstream in(list_path);
+    if (!in) {
+        throw IoError(fmt::format("psrio: cannot open file list '{}'",
+                                  list_path.string()));
+    }
+    const auto base_dir = list_path.parent_path();
+    std::string line;
+    while (std::getline(in, line)) {
+        const auto first = line.find_first_not_of(" \t\r\n");
+        if (first == std::string::npos || line[first] == '#') {
+            continue;
+        }
+        const auto last  = line.find_last_not_of(" \t\r\n");
+        const auto entry = line.substr(first, last - first + 1U);
+        const std::filesystem::path candidate(entry);
+        if (!has_glob_meta(entry) && candidate.is_relative() &&
+            !std::filesystem::exists(candidate) && !base_dir.empty() &&
+            std::filesystem::exists(base_dir / candidate)) {
+            out.push_back(base_dir / candidate);
+        } else {
+            expand_one_spec(entry, out);
+        }
+    }
+}
+
+void expand_one_spec(std::string_view spec,
+                     std::vector<std::filesystem::path>& out) {
+    if (spec.empty()) {
+        return;
+    }
+    if (spec.front() == '@') {
+        read_file_list(std::filesystem::path(spec.substr(1U)), out);
+        return;
+    }
+    const std::string pattern(spec);
+    if (has_glob_meta(spec) && !std::filesystem::exists(pattern)) {
+        glob_t matched{};
+        const int flags =
+#ifdef GLOB_TILDE
+            GLOB_TILDE;
+#else
+            0;
+#endif
+        // NOLINTNEXTLINE(concurrency-mt-unsafe): single-threaded CLI setup
+        const int rc = ::glob(pattern.c_str(), flags, nullptr, &matched);
+        struct GlobGuard {
+            glob_t* g;
+            explicit GlobGuard(glob_t* ptr) noexcept : g(ptr) {}
+            GlobGuard(const GlobGuard&)            = delete;
+            GlobGuard& operator=(const GlobGuard&) = delete;
+            GlobGuard(GlobGuard&&)                 = delete;
+            GlobGuard& operator=(GlobGuard&&)      = delete;
+            ~GlobGuard() { ::globfree(g); }
+        } const guard{&matched};
+        if (rc == GLOB_NOMATCH || matched.gl_pathc == 0U) {
+            throw ValidationError(
+                fmt::format("psrio: pattern '{}' matched no files", spec));
+        }
+        if (rc != 0) {
+            throw IoError(
+                fmt::format("psrio: failed to expand pattern '{}'", spec));
+        }
+        for (std::size_t i = 0; i < matched.gl_pathc; ++i) {
+            out.emplace_back(matched.gl_pathv[i]);
+        }
+        return;
+    }
+    out.emplace_back(pattern);
+}
+
+} // namespace
+
+std::vector<std::filesystem::path>
+expand_input_paths(std::span<const std::string> specs,
+                   const std::optional<std::filesystem::path>& file_list) {
+    std::vector<std::filesystem::path> paths;
+    if (file_list.has_value()) {
+        read_file_list(*file_list, paths);
+    }
+    for (const auto& spec : specs) {
+        expand_one_spec(spec, paths);
+    }
+    if (paths.empty()) {
+        throw ValidationError(
+            "psrio: at least one input file (or --file-list) is required");
+    }
+    for (const auto& path : paths) {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            throw ValidationError(fmt::format(
+                "psrio: input file '{}' does not exist", path.string()));
+        }
+        if (!std::filesystem::is_regular_file(path, ec)) {
+            throw ValidationError(fmt::format(
+                "psrio: '{}' is not a regular file", path.string()));
+        }
+    }
+    return paths;
 }
 
 void require_distinct(const std::filesystem::path& input,

@@ -334,18 +334,57 @@ int main() {
 
 ## The `psrio` command
 
-Built with `-DPSRIO_BUILD_APPLICATIONS=ON`. Every command takes one or more `.fil` or search-mode `.sf` files in time order, and `-j` threads.
+Built with `-DPSRIO_BUILD_APPLICATIONS=ON` (enabled by default for top-level builds). Every command accepts one or more `.fil` or search-mode `.sf` files (automatically sorted chronologically by start time), quoted globs (e.g. `"/data/obs/*.sf"`), `@filelist.txt` / `--file-list`, and `-j` threads.
+
+### Installing the CLI
+
+```bash
+# Clone and build an optimised Release binary (defaults to -march=native)
+git clone https://github.com/pravirkr/psrio.git
+cd psrio
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DPSRIO_BUILD_APPLICATIONS=ON \
+  -DPSRIO_BUILD_TESTS=OFF \
+  -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+cmake --build build -j
+cmake --install build
+```
+
+Make sure `$HOME/.local/bin` is on your `PATH`, then verify with `psrio --help`.
+
+Useful CLI CMake options:
+
+- `-DPSRIO_CLI_CPU_ARCH=<arch>` — `-march` target for the CLI (defaults to `native`). On heterogeneous HPC clusters where login and compute nodes have different CPUs, set a portable target such as `-DPSRIO_CLI_CPU_ARCH=x86-64-v3` (AVX2) to avoid illegal-instruction crashes on older nodes.
+- `-DPSRIO_CLI_WITH_DMT=OFF` — skip fetching `dmt` and requiring FFTW if you do not need `psrio dedisperse` (faster build for `digifil`, `inspect`, `slice`, `clean`, etc.).
+- `-DPSRIO_DMT_GPU=AUTO|CUDA|HIP|OFF` — GPU backend for `psrio dedisperse --device`. When building without a visible GPU, also pass `-DDMT_CUDA_ARCHITECTURES=<compute capability>` (e.g. `89` for an L40); `dmt`'s default `native` falls back to `sm_52`.
+- `-DPSRIO_WITH_HDF5=ON` — enable reading `.h5` (FBH5) files in the CLI.
+
+### Commands
 
 | Command | sigpyproc / dspsr equivalent |
 |---|---|
 | `inspect` (alias `header`), `header FILE --set key=value` | `spp_header print/get/update` |
 | `slice`, `splice`, `decimate`, `convert` | `spp_io extract/splice`, `spp_decimate` |
-| `digifil` (`--scloffs`, `-P`, `-U`, `--rescale-clip`) | `spp_digifil`, dspsr `digifil` |
+| `digifil` (`--scloffs`, `-P`, `-U`, `--rescale-clip`, `--progress`, `--io-buffer-mb`) | `spp_digifil`, dspsr `digifil` |
 | `stats`, `bandpass` | `spp_stats`, `spp_bandpass` |
 | `clean rfi/zap-channels/zap-times/zerodm` | `spp_clean` |
 | `dedisperse` (`--device cpu\|cuda[:N]`, needs dmt) | `spp_dedisperse` |
 
-CLI build options: `PSRIO_CLI_CPU_ARCH` (`-march`, default `native`; use e.g. `x86-64-v3` for binaries that move between machines), `PSRIO_CLI_WITH_DMT` (dedisperse), and `PSRIO_DMT_GPU` (`AUTO`, `CUDA`, `HIP`, `OFF`: dmt's GPU backend for `dedisperse --device`). When building without a visible GPU, also pass `-DDMT_CUDA_ARCHITECTURES=<compute capability>` (e.g. `89` for an L40); dmt's default `native` falls back to sm_52.
+### HPC / Large-Observation Example
+
+```bash
+# Convert 500+ search-mode PSRFITS files into one filterbank on an HPC node
+psrio -v digifil \
+  "/data/obs/*.sf" \
+  -o /scratch/output.fil \
+  -b 8 -t 4 -f 2 -I 10 \
+  -j 8 --io-buffer-mb 256 --drop-cache
+```
+
+- `--progress auto` (default) shows an interactive progress bar on a terminal and switches to periodic newline log lines when redirected to a Slurm/PBS log (`-q` or `--progress none` disables it).
+- `--io-buffer-mb` tunes background read-ahead memory (default `128` MiB per file) without altering `-U` rescaling block boundaries.
+- `--drop-cache` (Linux) asks the kernel to evict consumed input and written output pages from the page cache to stay within strict Slurm/cgroup memory limits.
 
 ---
 

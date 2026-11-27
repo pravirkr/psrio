@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -774,4 +775,112 @@ TEST_CASE("SearchFile decode options select products and calibration",
         CHECK_THROWS_AS(SearchFile(path.path(), DecodeOptions{.product = -2}),
                         psrio::ValidationError);
     }
+}
+
+TEST_CASE("SearchFile handles placeholder headers, negative ZERO_OFF, and "
+          "unused calibration columns",
+          "[psrfits][robustness]") {
+    using psrio::formats::psrfits::DecodeOptions;
+
+    FitsFileBytes file;
+    file.begin_hdu();
+    file.key("SIMPLE", "T");
+    file.key("BITPIX", "8");
+    file.key("NAXIS", "0");
+    file.key("EXTEND", "T");
+    file.key("FITSTYPE", "'PSRFITS'");
+    file.key("OBS_MODE", "'SEARCH'");
+    file.key("TELESCOP", "'Parkes'");
+    file.key("BACKEND", "'BPSR'");
+    file.key("SRC_NAME", "'Robust'");
+    file.key("STT_IMJD", "59000");
+    file.key("STT_SMJD", "100");
+    file.key("STT_OFFS", "0.0");
+    file.key("IBEAM", "'*'");
+    file.key("CHAN_DM", "'*'");
+    file.end_header();
+
+    file.begin_hdu();
+    file.key("XTENSION", "'BINTABLE'");
+    file.key("BITPIX", "8");
+    file.key("NAXIS", "2");
+    file.key("NAXIS1", "76");
+    file.key("NAXIS2", "1");
+    file.key("PCOUNT", "0");
+    file.key("GCOUNT", "1");
+    file.key("TFIELDS", "9");
+    file.key("EXTNAME", "'SUBINT'");
+    file.key("TTYPE1", "'TSUBINT'");
+    file.key("TFORM1", "'1D'");
+    file.key("TTYPE2", "'OFFS_SUB'");
+    file.key("TFORM2", "'1D'");
+    file.key("TTYPE3", "'TEL_AZ'");
+    file.key("TFORM3", "'1D'");
+    file.key("TTYPE4", "'TEL_ZEN'");
+    file.key("TFORM4", "'1D'");
+    file.key("TTYPE5", "'DAT_FREQ'");
+    file.key("TFORM5", "'2D'");
+    file.key("TTYPE6", "'DAT_WTS'");
+    file.key("TFORM6", "'2E'");
+    file.key("TTYPE7", "'DAT_OFFS'");
+    file.key("TFORM7", "'2E'");
+    file.key("TTYPE8", "'DAT_SCL'");
+    file.key("TFORM8", "'2E'");
+    file.key("TTYPE9", "'DATA'");
+    file.key("TFORM9", "'4B'");
+    file.key("NPOL", "1");
+    file.key("NCHAN", "2");
+    file.key("NBITS", "8");
+    file.key("NSBLK", "2");
+    file.key("TBIN", "0.001");
+    file.key("POL_TYPE", "'INTEN'");
+    file.key("ZERO_OFF", "-10.0");
+    file.key("SIGNINT", "0");
+    file.key("NSTOT", "0");
+    file.end_header();
+
+    std::vector<std::byte> row;
+    append_be(row, 0.002);
+    append_be(row, 0.001);
+    append_be(row, 123.5);
+    append_be(row, 45.25);
+    append_be(row, 1400.0);
+    append_be(row, 1399.0);
+    // Deliberately put NaN into DAT_WTS: ignored when weights=false.
+    append_be(row, std::numeric_limits<float>::quiet_NaN());
+    append_be(row, std::numeric_limits<float>::quiet_NaN());
+    append_be(row, 0.0F);
+    append_be(row, 0.0F);
+    append_be(row, 1.0F);
+    append_be(row, 1.0F);
+    for (const std::uint8_t value : {20, 30, 40, 50}) {
+        append_be(row, value);
+    }
+    REQUIRE(row.size() == 76U);
+    file.raw(row);
+    file.pad_data();
+
+    const TempPath path("psrio-psrfits-robust.sf");
+    file.write(path.path());
+
+    // Raw mode skips DAT_WTS (no NaN failure) and keeps full trimmed nsamples
+    // despite NSTOT=0.
+    SearchFile raw(path.path(),
+                   DecodeOptions{.scloffs = false, .weights = false});
+    CHECK(raw.nsamples() == 2U);
+    CHECK(raw.beam() == 0);
+    CHECK_FALSE(raw.refdm().has_value());
+    const auto hdr = raw.sigproc_header();
+    CHECK(hdr.machine_id == 10);
+    CHECK(hdr.rawdatafile == path.path().filename().string());
+    CHECK(hdr.az_start == Catch::Approx(123.5));
+    CHECK(hdr.za_start == Catch::Approx(45.25));
+    CHECK(raw.read_samples<float>(2) ==
+          std::vector<float>{20.0F, 30.0F, 40.0F, 50.0F});
+
+    // Negative ZERO_OFF (-10.0) subtracts 10.0, matching dspsr.
+    SearchFile scaled(path.path(),
+                      DecodeOptions{.scloffs = true, .weights = false});
+    CHECK(scaled.read_samples<float>(2) ==
+          std::vector<float>{10.0F, 20.0F, 30.0F, 40.0F});
 }

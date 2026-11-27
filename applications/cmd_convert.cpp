@@ -44,7 +44,7 @@ void copy_floats(Input& input, Output& output, std::uint64_t gulp) {
 
 void run_convert(const ConvertOptions& opts, const Context& ctx) {
     require_distinct(opts.inputs, opts.output);
-    Input input(opts.inputs);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
     const bool to_series = is_series_path(opts.output);
     const int in_bits    = input.nbits();
     const int bits       = opts.nbits.value_or(to_series ? 32 : in_bits);
@@ -70,7 +70,8 @@ void run_convert(const ConvertOptions& opts, const Context& ctx) {
                 "digifil always writes descending frequencies");
         }
         digifil::Config config;
-        config.nbits = bits;
+        config.nbits      = bits;
+        config.drop_cache = ctx.drop_cache;
         const auto summary =
             digifil::run(input.block(), input.header(), opts.output, config);
         ctx.info("psrio convert: rescaled to {} bits with digifil's defaults "
@@ -81,7 +82,7 @@ void run_convert(const ConvertOptions& opts, const Context& ctx) {
 
     const auto gulp = std::max<std::uint64_t>(opts.gulp, 1U);
     if (bits == in_bits && !input.is_series() && !to_series) {
-        Output output(opts.output, header);
+        Output output(opts.output, header, ctx.drop_cache);
         copy_bytes(input, output, gulp);
         output.close();
         ctx.info("psrio convert: wrote {} samples to {}",
@@ -98,7 +99,7 @@ void run_convert(const ConvertOptions& opts, const Context& ctx) {
     if (header.signed_data && bits != 8) {
         header.signed_data = 0;
     }
-    Output output(opts.output, header);
+    Output output(opts.output, header, ctx.drop_cache);
     copy_floats(input, output, gulp);
     output.close();
     ctx.info("psrio convert: wrote {} samples at {} bits to {}",

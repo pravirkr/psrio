@@ -411,7 +411,7 @@ void run_fdmt(const DedisperseOptions& opts,
 }
 
 void run_dedisperse(const DedisperseOptions& opts, const Context& ctx) {
-    Input input(opts.inputs);
+    Input input(opts.inputs, {}, {}, 0, ctx.drop_cache);
     auto& source       = input.block();
     const auto& header = input.header();
     if (input.nifs() != 1U) {
