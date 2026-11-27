@@ -83,6 +83,8 @@ void run_digifil(const DigifilOptions& opts, const Context& ctx) {
     config.drop_cache = ctx.drop_cache;
 
     ProgressReporter reporter(ctx, progress_mode, "psrio digifil");
+    ctx.debug("psrio digifil: opening {} input file{}...", input_paths.size(),
+              input_paths.size() == 1U ? "" : "s");
     // PSRFITS is decoded as dspsr does: scales and offsets only with
     // --scloffs, no weights, and -P picking a stored product.
     Input input(

@@ -259,6 +259,9 @@ struct DecodeOptions {
     /// Stored polarisation product to read (0 .. NPOL-1, for example 0 for
     /// AA and 1 for BB), or -1 for Stokes I (the POL_TYPE rule below).
     int product{-1};
+    /// Validate internal SUBINT OFFS_SUB contiguity at open. Set false for
+    /// `--cont` when the caller guarantees contiguity.
+    bool check_contiguity{true};
 };
 
 /**
@@ -599,8 +602,6 @@ private:
     std::uint64_t m_meta_row{std::numeric_limits<std::uint64_t>::max()};
     std::uint64_t m_meta_first{0};
     std::uint64_t m_meta_bytes{0};
-    std::vector<double> m_row_tsub;
-    std::vector<double> m_row_offs;
     std::vector<std::byte> m_stage;
     detail::CellRange m_data_range{};
     std::uint64_t m_data_row{std::numeric_limits<std::uint64_t>::max()};
@@ -685,9 +686,6 @@ inline void SearchFile::load(const std::filesystem::path& path) {
     load_geometry();
     load_frequencies();
     load_timing();
-    // Free per-row timing scratch once validation is done.
-    m_row_tsub = {};
-    m_row_offs = {};
 }
 
 inline void SearchFile::load_geometry() {
@@ -813,57 +811,26 @@ inline void SearchFile::load_frequencies() {
         throw FormatError("psrio: DAT_FREQ is shorter than NCHAN");
     }
     m_freqs.resize(static_cast<std::size_t>(m_nchan));
-    std::vector<double> row(static_cast<std::size_t>(m_nchan));
-    // One pass over the rows also collects TSUBINT and OFFS_SUB for
-    // load_timing(), so each row's metadata is read once.
-    const auto* durations = detail::find_column(m_table, "TSUBINT");
-    const auto* centres   = detail::find_column(m_table, "OFFS_SUB");
-    const auto* az_col    = detail::find_column(m_table, "TEL_AZ");
-    const auto* zen_col   = detail::find_column(m_table, "TEL_ZEN");
-    m_row_tsub.assign(durations != nullptr ? m_table.nrows : 0U, 0.0);
-    // OFFS_SUB is only checked between rows.
-    m_row_offs.assign(
-        centres != nullptr && m_table.nrows >= 2U ? m_table.nrows : 0U, 0.0);
-    for (std::uint64_t isub = 0; isub < m_table.nrows; ++isub) {
-        if (durations != nullptr) {
-            m_row_tsub[static_cast<std::size_t>(isub)] =
-                scalar_at(isub, *durations);
-        }
-        if (!m_row_offs.empty()) {
-            m_row_offs[static_cast<std::size_t>(isub)] =
-                scalar_at(isub, *centres);
-        }
-        if (isub == 0U) {
-            if (az_col != nullptr) {
-                try {
-                    m_az_start = scalar_at(0U, *az_col);
-                } catch (const FormatError&) {
-                    m_az_start.reset();
-                }
-            }
-            if (zen_col != nullptr) {
-                try {
-                    m_za_start = scalar_at(0U, *zen_col);
-                } catch (const FormatError&) {
-                    m_za_start.reset();
-                }
-            }
-        }
-        detail::load_reals(meta_cell(isub, freq_col), freq_col, row);
-        if (isub == 0U) {
-            m_freqs = row;
-            continue;
-        }
-        for (std::uint64_t chan = 0; chan < m_nchan; ++chan) {
-            if (std::abs(row[static_cast<std::size_t>(chan)] -
-                         m_freqs[static_cast<std::size_t>(chan)]) >
-                detail::kFreqAtolMhz) {
-                throw FormatError(fmt::format(
-                    "psrio: DAT_FREQ of subint {} differs from subint 0",
-                    isub));
-            }
+    // Read only row 0 at open (matching dspsr/sigpyproc) so opening hundreds
+    // of multi-subint files on parallel filesystems does O(1) reads per file
+    // rather than O(nrows) scattered seeks.
+    const auto* az_col  = detail::find_column(m_table, "TEL_AZ");
+    const auto* zen_col = detail::find_column(m_table, "TEL_ZEN");
+    if (az_col != nullptr) {
+        try {
+            m_az_start = scalar_at(0U, *az_col);
+        } catch (const FormatError&) {
+            m_az_start.reset();
         }
     }
+    if (zen_col != nullptr) {
+        try {
+            m_za_start = scalar_at(0U, *zen_col);
+        } catch (const FormatError&) {
+            m_za_start.reset();
+        }
+    }
+    detail::load_reals(meta_cell(0U, freq_col), freq_col, m_freqs);
     m_fch1            = m_freqs.front();
     m_uniform         = true;
     const double step = m_freqs[1] - m_freqs[0];
@@ -925,61 +892,49 @@ inline void SearchFile::load_timing() {
     const auto* durations = detail::find_column(m_table, "TSUBINT");
     const auto* centres   = detail::find_column(m_table, "OFFS_SUB");
     const double full     = static_cast<double>(m_nsblk) * m_tsamp;
-    std::vector<double> tsub(static_cast<std::size_t>(m_table.nrows), full);
+    double first_tsub     = full;
+    double last_tsub      = full;
+    const auto last_row   = m_table.nrows - 1U;
     if (durations != nullptr) {
-        for (std::uint64_t row = 0; row < m_table.nrows; ++row) {
-            tsub[static_cast<std::size_t>(row)] =
-                m_row_tsub[static_cast<std::size_t>(row)];
-            if (!(tsub[static_cast<std::size_t>(row)] > 0.0)) {
-                throw FormatError(
-                    "psrio: TSUBINT must be positive for every row");
-            }
+        first_tsub = scalar_at(0U, *durations);
+        if (!(first_tsub > 0.0)) {
+            throw FormatError("psrio: TSUBINT must be positive for every row");
         }
-        for (std::uint64_t row = 0; row + 1U < m_table.nrows; ++row) {
-            if (std::abs(tsub[static_cast<std::size_t>(row)] - full) >
-                (0.5 * m_tsamp)) {
-                throw FormatError(
-                    "psrio: only the last sub-integration may be short");
-            }
+        if (m_table.nrows >= 2U &&
+            std::abs(first_tsub - full) > (0.5 * m_tsamp)) {
+            throw FormatError(
+                "psrio: only the last sub-integration may be short");
+        }
+        last_tsub =
+            last_row == 0U ? first_tsub : scalar_at(last_row, *durations);
+        if (!(last_tsub > 0.0)) {
+            throw FormatError("psrio: TSUBINT must be positive for every row");
         }
     }
     std::uint64_t trimmed =
         detail::checked_mul(m_nsblk, m_table.nrows, "sample count");
-    if (durations != nullptr) {
-        const double last = tsub.back();
-        if (std::abs(last - full) > (0.5 * m_tsamp)) {
-            const auto samples = std::llround(last / m_tsamp);
-            if (samples < 1 ||
-                std::cmp_greater(static_cast<std::uint64_t>(samples),
-                                 m_nsblk)) {
-                throw FormatError(fmt::format(
-                    "psrio: last TSUBINT {} s is not between one sample and "
-                    "NSBLK",
-                    last));
-            }
-            trimmed = ((m_table.nrows - 1U) * m_nsblk) +
-                      static_cast<std::uint64_t>(samples);
+    if (durations != nullptr && std::abs(last_tsub - full) > (0.5 * m_tsamp)) {
+        const auto samples = std::llround(last_tsub / m_tsamp);
+        if (samples < 1 ||
+            std::cmp_greater(static_cast<std::uint64_t>(samples), m_nsblk)) {
+            throw FormatError(fmt::format(
+                "psrio: last TSUBINT {} s is not between one sample and NSBLK",
+                last_tsub));
         }
+        trimmed = (last_row * m_nsblk) + static_cast<std::uint64_t>(samples);
     }
-    if (m_table.nrows >= 2U) {
+    if (m_options.check_contiguity && m_table.nrows >= 2U) {
         if (centres == nullptr) {
             throw FormatError("psrio: split files and row gaps are not "
                               "supported (no OFFS_SUB)");
         }
-        std::vector<double> offs(static_cast<std::size_t>(m_table.nrows));
-        for (std::uint64_t row = 0; row < m_table.nrows; ++row) {
-            offs[static_cast<std::size_t>(row)] =
-                m_row_offs[static_cast<std::size_t>(row)];
-        }
-        for (std::uint64_t row = 0; row + 1U < m_table.nrows; ++row) {
-            const double expected =
-                0.5 * (tsub[static_cast<std::size_t>(row)] +
-                       tsub[static_cast<std::size_t>(row + 1U)]);
-            const double delta = offs[static_cast<std::size_t>(row + 1U)] -
-                                 offs[static_cast<std::size_t>(row)];
-            if (std::abs(delta - expected) > (0.5 * m_tsamp)) {
-                throw FormatError("psrio: sub-integrations are not contiguous");
-            }
+        const double first_offs = scalar_at(0U, *centres);
+        const double last_offs  = scalar_at(last_row, *centres);
+        const double expected =
+            (static_cast<double>(last_row) * full) - (0.5 * (full - last_tsub));
+        const double delta = last_offs - first_offs;
+        if (std::abs(delta - expected) > (0.5 * m_tsamp)) {
+            throw FormatError("psrio: sub-integrations are not contiguous");
         }
     }
     const auto capacity =

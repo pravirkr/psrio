@@ -383,13 +383,14 @@ inline SearchStream::SearchStream(std::span<const std::filesystem::path> paths,
     const auto total = paths.size();
     std::vector<std::optional<File>> opened(total);
 
-    // Open headers with bounded concurrency (at most 8 open FDs at a time)
+    options.check_contiguity = check_contiguity;
+    // Open headers with bounded concurrency (at most 16 open FDs at a time)
     // and close each FD immediately after metadata parsing so 500+ files never
     // exhaust RLIMIT_NOFILE.
     const auto hw =
         std::max<std::size_t>(std::thread::hardware_concurrency(), 1U);
     const std::size_t workers =
-        total <= 4U ? 1U : std::min<std::size_t>({total, hw, 8U});
+        total <= 4U ? 1U : std::min<std::size_t>({total, hw, 16U});
 
     if (workers == 1U) {
         for (std::size_t index = 0; index < total; ++index) {

@@ -38,7 +38,8 @@ struct Context {
     template <typename... Args>
     void info(fmt::format_string<Args...> format, Args&&... args) const {
         if (!quiet) {
-            err << fmt::format(format, std::forward<Args>(args)...) << '\n';
+            err << fmt::format(format, std::forward<Args>(args)...) << '\n'
+                << std::flush;
         }
     }
 
@@ -46,7 +47,8 @@ struct Context {
     template <typename... Args>
     void debug(fmt::format_string<Args...> format, Args&&... args) const {
         if (!quiet && verbosity > 0) {
-            err << fmt::format(format, std::forward<Args>(args)...) << '\n';
+            err << fmt::format(format, std::forward<Args>(args)...) << '\n'
+                << std::flush;
         }
     }
 

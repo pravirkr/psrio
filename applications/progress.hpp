@@ -139,26 +139,30 @@ public:
         const double elapsed =
             std::chrono::duration<double>(now - m_start).count();
         if (m_mode == ProgressMode::kBar) {
-            if (done < total && since_last < 0.2) {
+            if (m_scan_emitted && done < total && since_last < 0.2) {
                 return;
             }
-            m_last_emit = now;
+            m_scan_emitted = true;
+            m_last_emit    = now;
             const double pct =
                 100.0 * static_cast<double>(done) / static_cast<double>(total);
             emit_bar_line(fmt::format("{}: opening headers {}/{} ({:5.1f}%)",
                                       m_label, done, total, pct));
             return;
         }
-        // Log mode: only print scan progress if opening takes >2 s or at 25%
-        // steps after that.
-        const auto bucket = (done * 4U) / total;
-        if ((elapsed < 2.0 && done < total) ||
-            (since_last < 10.0 && bucket <= m_last_scan_bucket &&
-             done < total)) {
+        // Log mode: emit once opening exceeds 2 s, then every 5 s or 10%,
+        // plus a final 100% line if any scan line was printed.
+        const auto bucket    = (done * 10U) / total;
+        const bool first_due = !m_scan_emitted && elapsed >= 2.0;
+        const bool next_due =
+            m_scan_emitted &&
+            (done >= total || since_last >= 5.0 || bucket > m_last_scan_bucket);
+        if (!first_due && !next_due) {
             return;
         }
+        m_scan_emitted     = true;
         m_last_emit        = now;
-        m_last_scan_bucket = bucket;
+        m_last_scan_bucket = std::max(m_last_scan_bucket, bucket);
         const double pct =
             100.0 * static_cast<double>(done) / static_cast<double>(total);
         m_ctx->err << fmt::format("{}: opened {}/{} headers ({:.0f}%, {})\n",
@@ -188,6 +192,7 @@ public:
         m_last_log_bucket   = 0;
         m_last_file_logged  = 0;
         m_stream_started    = true;
+        m_stream_emitted    = false;
     }
 
     /// Report streaming progress after one block.
@@ -206,10 +211,11 @@ public:
         const bool finished = samples_done >= m_total_samples;
 
         if (m_mode == ProgressMode::kBar) {
-            if (!finished && since_last < 0.25) {
+            if (m_stream_emitted && !finished && since_last < 0.25) {
                 return;
             }
-            m_last_emit = now;
+            m_stream_emitted = true;
+            m_last_emit      = now;
             const double rate =
                 elapsed > 1.0e-3
                     ? (frac * static_cast<double>(m_total_input_bytes)) /
@@ -248,13 +254,16 @@ public:
             return;
         }
 
-        // Log mode (non-TTY / batch logs): emit at 5% steps or every 15 s.
-        const auto bucket = static_cast<std::size_t>(frac * 20.0);
-        const bool due =
-            finished || (bucket > m_last_log_bucket) || (since_last >= 15.0);
+        // Log mode (non-TTY / batch logs): emit first update after 5 s (or 5%),
+        // then at 5% steps or every 15 s.
+        const auto bucket    = static_cast<std::size_t>(frac * 20.0);
+        const bool first_due = !m_stream_emitted && elapsed >= 5.0;
+        const bool due = finished || first_due ||
+                         (bucket > m_last_log_bucket) || (since_last >= 15.0);
         if (!due) {
             return;
         }
+        m_stream_emitted  = true;
         m_last_emit       = now;
         m_last_log_bucket = std::max(m_last_log_bucket, bucket);
         const double rate =
@@ -324,7 +333,9 @@ private:
     double m_tsamp{0.0};
     std::uint64_t m_total_input_bytes{0};
     std::size_t m_nfiles{1};
+    bool m_scan_emitted{false};
     bool m_stream_started{false};
+    bool m_stream_emitted{false};
 };
 
 } // namespace psrio::cli
